@@ -1,0 +1,7 @@
+# Runtime deps: cased + compose mcp service (deskd deps live in image/Dockerfile)
+fastapi==0.139.0
+uvicorn==0.50.2
+docker==7.1.0
+cryptography==49.0.0
+requests==2.34.2
+mcp==1.28.1

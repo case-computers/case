@@ -1,0 +1,375 @@
+<!doctype html>
+<!-- Deployer: computers exist here. Drive never provisions; this page never chats. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploy · case</title>
+<meta name="robots" content="noindex">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 340 260'%3E%3Cg fill='none' stroke='%230a0a0a' stroke-width='22' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M 140 62 L 140 40 Q 140 30 150 30 L 190 30 Q 200 30 200 40 L 200 62'/%3E%3Crect x='30' y='62' width='280' height='168' rx='24'/%3E%3C/g%3E%3Crect x='150' y='116' width='40' height='60' fill='%232563eb'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0a0a0a; --accent:#2563eb; --paper:#ffffff;
+  --mut:#555; --faint:#999; --soft:#ececec; --warn:#c02626;
+  --field:#fafafa;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:'Inter',-apple-system,'Helvetica Neue',Arial,sans-serif;
+  --ease:cubic-bezier(.22,1,.36,1);
+  --t:220ms;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100%}
+body{
+  background:var(--paper);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+a{color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+::selection{background:var(--accent);color:#fff}
+button,input{font:inherit;color:inherit}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+@keyframes blink{50%{opacity:0}}
+.wrap{max-width:40rem;margin:0 auto;padding:36px 24px 80px}
+.top{
+  display:flex;align-items:baseline;gap:12px;margin-bottom:28px;
+}
+.brand{font-weight:700;font-size:16px;letter-spacing:-.01em;text-decoration:none}
+.page{font-size:13px;color:var(--faint);font-weight:500}
+.go{margin-left:auto;font-size:12px;color:var(--faint);text-decoration:none}
+.go:hover{color:var(--ink)}
+.gauge{
+  font-family:var(--mono);font-size:28px;font-weight:500;letter-spacing:-.03em;
+  margin:0 0 6px;
+}
+.gauge b{font-weight:500}
+.sub{font-size:13px;color:var(--mut);margin-bottom:28px}
+.err{display:none;font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--warn);margin:0 0 16px}
+.err.on{display:block}
+.toolbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.add{
+  border:0;background:transparent;cursor:pointer;padding:0;
+  font-size:13px;font-weight:600;color:var(--ink);
+}
+.add:hover{color:var(--accent)}
+.add[disabled]{color:var(--faint);cursor:default}
+.new{
+  display:none;grid-template-columns:auto 1fr;gap:10px;align-items:center;
+  margin:0 0 18px;padding:8px 0 10px;border-left:2px solid var(--accent);padding-left:12px;
+  animation:rise var(--t) var(--ease);
+}
+.new.on{display:grid}
+.lab{font-family:var(--mono);font-size:10px;letter-spacing:.2em;color:var(--faint)}
+.new input,.rm input{
+  border:0;border-bottom:1px solid var(--soft);background:transparent;
+  padding:6px 0;font-size:14px;outline:none;min-width:0;width:100%;
+  caret-color:var(--accent);
+}
+.new input:focus{border-bottom-color:var(--accent)}
+.size{display:flex;gap:16px}
+.size select{
+  border:0;border-bottom:1px solid var(--soft);background:transparent;
+  padding:6px 0;font-size:14px;outline:none;cursor:pointer;
+}
+.size select:focus{border-bottom-color:var(--accent)}
+.add.ghost{font-weight:500;color:var(--faint)}
+.add.ghost:hover{color:var(--ink)}
+.add.ghost[disabled]{color:var(--soft);cursor:default}
+.rm input{caret-color:var(--warn)}
+.rm input:focus{border-bottom-color:var(--warn)}
+.list{border-top:1px solid var(--soft)}
+.row{
+  display:grid;grid-template-columns:minmax(0,1.4fr) .7fr .9fr auto;
+  gap:12px;align-items:baseline;padding:14px 0;
+  border-bottom:1px solid var(--soft);
+}
+.row .nm{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .st{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--mut)}
+.row .st.awake{color:var(--accent)}
+.row .when{font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums}
+.acts{display:flex;align-items:center;gap:2px;justify-content:flex-end}
+.acts button{
+  border:0;background:transparent;cursor:pointer;padding:4px 8px;
+  font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--faint);
+}
+.acts button:hover{color:var(--ink)}
+.acts .rmx{font-size:14px;letter-spacing:0;padding:2px 8px}
+.acts .rmx:hover{color:var(--warn)}
+.acts .use.on{color:var(--accent)}
+.acts button[disabled]{color:var(--soft);cursor:default}
+.rm{
+  grid-column:1/-1;display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center;
+  padding:4px 0 2px;border-left:2px solid var(--warn);padding-left:12px;
+  animation:rise var(--t) var(--ease);
+}
+.empty{padding:28px 0;font-size:13px;color:var(--faint)}
+.pending{opacity:.7}
+.cur{
+  display:inline-block;width:7px;height:12px;background:var(--accent);
+  margin-left:6px;vertical-align:-1px;animation:blink 1.1s steps(1) infinite;
+}
+@media(max-width:560px){
+  .row{grid-template-columns:1fr auto;gap:6px 12px}
+  .row .when{grid-column:1;font-size:11px}
+  .acts{grid-column:2;grid-row:1/span 2;align-self:center}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="brand" href="/">case</a>
+    <span class="page">deploy</span>
+    <a class="go" href="/">drive</a>
+  </div>
+  <div class="gauge" id="gauge">—</div>
+  <p class="sub" id="sub">computers on this host</p>
+  <p class="err" id="err"></p>
+  <div class="toolbar">
+    <button type="button" class="add" id="addBtn">+ New computer</button>
+    <button type="button" class="add ghost" id="sleepAll" hidden>Sleep all</button>
+  </div>
+  <form class="new" id="newForm">
+    <label class="lab" for="newName">NAME</label>
+    <input id="newName" name="name" autocomplete="off" maxlength="40" placeholder="payroll-bot" aria-label="Computer name">
+    <label class="lab" for="newRam">SIZE</label>
+    <div class="size">
+      <select id="newRam" aria-label="Memory">
+        <option value="1024">1 GB</option>
+        <option value="2048" selected>2 GB</option>
+        <option value="4096">4 GB</option>
+        <option value="8192">8 GB</option>
+      </select>
+      <select id="newCpus" aria-label="CPUs">
+        <option value="1" selected>1 CPU</option>
+        <option value="2">2 CPUs</option>
+        <option value="4">4 CPUs</option>
+      </select>
+    </div>
+  </form>
+  <div class="list" id="list"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Which computer Drive is pointed at. Deploy owns the choice; Drive reads it.
+const PICK_KEY='case.drive.computer';
+const readPick=()=>{try{return localStorage.getItem(PICK_KEY)||'';}catch{return '';}};
+let picked=readPick();
+let rows=[];
+let up=false;
+let maxRunning=0;
+let running=0;
+let maxRamMb=0;
+let ramMb=0;
+let sleepingAll=false;
+let rmId='';
+let busyId='';
+let creating=false;
+let creatingName='';
+let newOpen=false;
+let errMsg='';
+
+function atCap(){return maxRunning>0&&running>=maxRunning;}
+const gb=mb=>{
+  const n=Number(mb);
+  // 0 is a number worth printing ("0 GB of 2.9 GB in use"); null/NaN is not.
+  if(mb==null||!Number.isFinite(n)||n<0)return '';
+  return (n%1024?(n/1024).toFixed(1):String(n/1024))+' GB';
+};
+const isAwake=c=>c.state==='awake'||c.state==='waking'||c.state==='creating';
+function sizeLabel(c){
+  const bits=[gb(c.ram_mb),c.cpus?c.cpus+(c.cpus===1?' CPU':' CPUs'):''].filter(Boolean);
+  return bits.join(' · ');
+}
+function showErr(m){
+  errMsg=m||'';
+  const el=$('err');
+  el.textContent=errMsg;
+  el.classList.toggle('on',!!errMsg);
+}
+function paint(){
+  $('gauge').innerHTML=up
+    ?(maxRunning?running+'<b>/'+maxRunning+'</b> awake':running+' awake')
+    :'cased down';
+  const count=rows.length?(rows.length===1?'1 computer':rows.length+' computers')+' on this host'
+                        :'no computers on this host';
+  // The budget is what actually stops the next wake, so say it before a 409 does.
+  const budget=maxRamMb?' · '+gb(ramMb)+' of '+gb(maxRamMb)+' in use':'';
+  $('sub').textContent=up?count+budget:'cannot reach cased';
+  $('addBtn').disabled=creating||!up||atCap();
+  const anyAwake=rows.some(isAwake);
+  $('sleepAll').hidden=!up||!anyAwake;
+  $('sleepAll').disabled=sleepingAll;
+  $('sleepAll').textContent=sleepingAll?'Sleeping…':'Sleep all';
+  $('newForm').classList.toggle('on',newOpen);
+  if(!rows.length&&!creating){
+    $('list').innerHTML='<div class="empty">'+(up?'Nothing here yet.':'cased unreachable')+'</div>';
+    return;
+  }
+  let html='';
+  if(creating)html+='<div class="row pending"><span class="nm">'+esc(creatingName)+'<span class="cur"></span></span><span class="st">CREATING</span><span class="when"></span><span></span></div>';
+  html+=rows.map(c=>{
+    const awake=isAwake(c);
+    const busy=busyId===c.id;
+    const powOff=busy||(!awake&&atCap());
+    const st=String(c.state||'—').toUpperCase();
+    return '<div class="row'+(busy?' pending':'')+'" data-id="'+esc(c.id)+'">'
+      +'<span class="nm">'+esc(c.name||c.id)+'</span>'
+      +'<span class="st'+(c.state==='awake'?' awake':'')+'">'+esc(st)+'</span>'
+      +'<span class="when">'+esc(sizeLabel(c))+'</span>'
+      +'<span class="acts">'
+      +'<button type="button" class="use'+(picked===c.id?' on':'')+'" data-id="'+esc(c.id)+'">'+(picked===c.id?'IN DRIVE':'DRIVE')+'</button>'
+      +'<button type="button" class="pow" data-id="'+esc(c.id)+'"'+(powOff?' disabled':'')+'>'+(awake?'SLEEP':'WAKE')+'</button>'
+      +'<button type="button" class="rmx" data-id="'+esc(c.id)+'"'+(busy?' disabled':'')+' aria-label="Delete">×</button>'
+      +'</span>'
+      +(rmId===c.id
+        ?'<form class="rm" data-id="'+esc(c.id)+'" data-name="'+esc(c.name||'')+'"><label class="lab" for="rmName">TYPE '+esc(String(c.name||'').toUpperCase())+'</label><input id="rmName" name="name" autocomplete="off" aria-label="Confirm name to delete"></form>'
+        :'')
+      +'</div>';
+  }).join('');
+  $('list').innerHTML=html;
+  const rm=$('rmName');
+  if(rm)rm.focus();
+}
+async function refresh(){
+  try{
+    const r=await fetch('/api/computers');
+    const j=await r.json();
+    up=!!j.up;
+    rows=j.computers||[];
+    maxRunning=Number(j.max_running)||0;
+    maxRamMb=Number(j.max_ram_mb)||0;
+    ramMb=Number(j.ram_mb)||0;
+    running=Number(j.running);
+    if(!Number.isFinite(running))running=rows.filter(c=>c.state==='awake'||c.state==='waking'||c.state==='creating').length;
+    if(!up)showErr(j.error||'cased unreachable');
+    else if(errMsg&&/cased/i.test(errMsg))showErr('');
+    paint();
+  }catch{
+    up=false;rows=[];paint();
+    showErr('cased unreachable');
+  }
+}
+$('addBtn').addEventListener('click',()=>{
+  if($('addBtn').disabled)return;
+  newOpen=!newOpen;
+  showErr('');
+  paint();
+  if(newOpen)$('newName').focus();
+});
+$('newForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const name=String($('newName').value||'').replace(/\s+/g,' ').trim().slice(0,40);
+  if(!name||creating)return;
+  creating=true;creatingName=name;newOpen=false;showErr('');paint();
+  try{
+    const size={ram_mb:Number($('newRam').value)||2048,cpus:Number($('newCpus').value)||1};
+    const r=await fetch('/api/computers',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,...size}),signal:AbortSignal.timeout(120000)});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){
+      showErr(String((j.error&&j.error.message)||j.error||'could not create').toLowerCase());
+      newOpen=true;
+    }else $('newName').value='';
+  }catch(err){
+    showErr(String(err.message||'could not create').toLowerCase());
+    newOpen=true;
+  }
+  creating=false;
+  await refresh();
+  if(newOpen)$('newName').focus();
+});
+// Teardown in one click. Sequential on purpose: sleeping N desktops at once on a
+// small host is exactly the memory spike we are trying to avoid.
+$('sleepAll').addEventListener('click',async()=>{
+  if(sleepingAll)return;
+  sleepingAll=true;showErr('');paint();
+  for(const c of rows.filter(isAwake)){
+    busyId=c.id;paint();
+    try{
+      const r=await fetch('/api/sleep',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({computer_id:c.id})});
+      if(!r.ok){
+        const j=await r.json().catch(()=>({}));
+        showErr((c.name||c.id)+': '+String((j.error&&j.error.message)||j.error||'sleep failed').toLowerCase());
+      }
+    }catch(err){showErr(String(err.message||'sleep failed').toLowerCase());}
+  }
+  busyId='';sleepingAll=false;
+  await refresh();
+});
+$('list').addEventListener('click',async e=>{
+  const u=e.target.closest('.use');
+  if(u){
+    picked=u.dataset.id;
+    try{localStorage.setItem(PICK_KEY,picked);}catch{/* private mode: Drive falls back */}
+    location.href='/';
+    return;
+  }
+  const x=e.target.closest('.rmx');
+  if(x){
+    const id=x.dataset.id;
+    rmId=rmId===id?'':id;
+    paint();
+    return;
+  }
+  const p=e.target.closest('.pow');
+  if(!p||p.disabled)return;
+  const id=p.dataset.id;
+  const row=rows.find(c=>c.id===id);
+  if(!row)return;
+  busyId=id;showErr('');paint();
+  const awake=row.state==='awake'||row.state==='waking';
+  try{
+    const r=await fetch(awake?'/api/sleep':'/api/wake',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({computer_id:id})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)showErr(String((j.error&&j.error.message)||j.error||(awake?'sleep failed':'wake failed')).toLowerCase());
+  }catch(err){showErr(String(err.message||'failed').toLowerCase());}
+  busyId='';
+  await refresh();
+});
+$('list').addEventListener('submit',async e=>{
+  const f=e.target.closest('.rm');
+  if(!f)return;
+  e.preventDefault();
+  const id=f.dataset.id;
+  const expect=f.dataset.name;
+  const typed=f.querySelector('input').value;
+  // The label shouts the name in caps, so accept it in any case — and say why
+  // nothing happened instead of returning in silence.
+  if(String(typed||'').trim().toLowerCase()!==String(expect||'').toLowerCase()){
+    showErr('name does not match');
+    return;
+  }
+  busyId=id;showErr('');paint();
+  try{
+    const r=await fetch('/api/computers',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({computer_id:id,name:expect})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)showErr(String((j.error&&j.error.message)||j.error||'delete failed').toLowerCase());
+    else{
+      rmId='';
+      // Drive must not silently land on someone else's desk (different logins).
+      if(picked===id){picked='';try{localStorage.removeItem(PICK_KEY);}catch{/* ignore */}}
+    }
+  }catch(err){showErr(String(err.message||'delete failed').toLowerCase());}
+  busyId='';
+  await refresh();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape')return;
+  if(rmId){rmId='';paint();}
+  else if(newOpen){newOpen=false;paint();}
+});
+refresh();
+setInterval(()=>{
+  if(document.activeElement&&document.activeElement.tagName==='INPUT')return;
+  if(creating||busyId)return;
+  refresh();
+},4000);
+</script>
+</body>
+</html>

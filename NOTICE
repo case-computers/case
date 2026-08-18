@@ -1,0 +1,68 @@
+Case
+Copyright (c) 2026 Case contributors
+
+This product includes software developed by third parties. Case does not
+relicense any of it; each component remains under its own terms. This file
+lists what Case ships, links against, or builds into its desktop image.
+
+The licenses named below are the components' own, as published by their
+respective projects. Check each project for authoritative terms.
+
+--------------------------------------------------------------------------------
+Desktop image (image/Dockerfile) — case-desk
+--------------------------------------------------------------------------------
+
+Debian GNU/Linux (bookworm-slim base)   various free licenses (see the image's
+                                        /usr/share/doc/*/copyright)
+Xfce (xfce4-session, xfwm4, xfdesktop4,
+  xfce4-panel, xfce4-terminal)          GPL-2.0 / LGPL-2.1
+Xvfb, x11vnc                            MIT-style X11 / GPL-2.0
+noVNC                                   MPL-2.0
+websockify                              LGPL-3.0
+xdotool                                 BSD-3-Clause
+scrot                                   MIT-style
+dbus-x11                                AFL-2.1 / GPL-2.0
+ca-certificates, curl, procps, git,
+  wget, jq, unzip, nano, sudo           various free licenses
+fonts-dejavu                            Bitstream Vera / Public Domain
+fonts-liberation                        SIL Open Font License 1.1
+
+Chromium, installed via Playwright      BSD-3-Clause (Chromium), with bundled
+  (PLAYWRIGHT_BROWSERS_PATH)            components under their own licenses
+Playwright (Python)                     Apache-2.0
+
+Debian's chromium package is deliberately NOT used; see the note in
+image/Dockerfile.
+
+--------------------------------------------------------------------------------
+Control plane and in-container daemon (Python)
+--------------------------------------------------------------------------------
+
+FastAPI                                 MIT
+Uvicorn                                 BSD-3-Clause
+docker (docker-py)                      Apache-2.0
+cryptography                            Apache-2.0 or BSD-3-Clause
+requests                                Apache-2.0
+websocket-client                        Apache-2.0
+mcp (Model Context Protocol SDK)        MIT
+pytest                                  MIT
+
+--------------------------------------------------------------------------------
+Drive UI (web/)
+--------------------------------------------------------------------------------
+
+openai (Node SDK)                       Apache-2.0
+JetBrains Mono, Inter                   SIL Open Font License 1.1
+                                        (loaded from Google Fonts at runtime,
+                                        not redistributed in this repository)
+
+--------------------------------------------------------------------------------
+Documents
+--------------------------------------------------------------------------------
+
+CODE_OF_CONDUCT.md is the Contributor Covenant 2.1, used under CC BY 4.0.
+https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
+
+--------------------------------------------------------------------------------
+
+Nothing here is an endorsement by those projects of Case.

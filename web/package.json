@@ -1,0 +1,13 @@
+{
+  "name": "case-drive-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node web-ui/serve.mjs",
+    "test": "node web-ui/test_serve.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
+    "openai": "^6.7.0"
+  }
+}

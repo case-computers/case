@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Every PR gets a maintainer. The credential paths get one on purpose:
+# a bug there leaks a login, not a pixel.
+
+*                           @ishu86
+
+/control-plane/store.py     @ishu86
+/control-plane/links.py     @ishu86
+/image/deskd.py             @ishu86
+/SECURITY.md                @ishu86
+/LICENSE.md                 @ishu86
+/CLA.md                     @ishu86
+/CLA-SIGNERS                @ishu86

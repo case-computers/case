@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: MIT
+name: Bug report
+description: Something in Case does not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste secrets.** No `CASE_TOKEN`, no API keys, no ntfy topics,
+        no vault contents. For a security issue use SECURITY.md instead of this form.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker compose up --build
+        2. open /deploy, create a computer
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`docker compose logs cased --tail=100`, or the cased console. Redact before pasting."
+      render: text
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      placeholder: macOS 15 / Colima 0.8 / arm64, or Ubuntu 24.04 / Docker 27 / amd64
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Case commit
+      description: "`git rev-parse --short HEAD`"

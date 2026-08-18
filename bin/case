@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# case — tiny CLI, thin curl wrappers over cased (API_SPEC.md §9).
+set -euo pipefail
+[ -f ~/.case/env ] && . ~/.case/env   # ntfy, CASE_TOKEN, …
+BASE="${CASE_URL:-http://127.0.0.1:8787/v1}"
+pp() { python3 -m json.tool 2>/dev/null || cat; }
+auth=()
+[ -n "${CASE_TOKEN:-}" ] && auth=(-H "Authorization: Bearer ${CASE_TOKEN}")
+c() { curl -sf "${auth[@]}" "$@"; }
+
+case "${1:-help}" in
+  up)     # boot the substrate: colima VM (Darwin) or native docker (Linux) + cased.
+          # Idempotent. CASE_CPU/CASE_MEM override 4/4. If cased is systemd-managed
+          # (deploy/cased.service) let systemd own it — don't spawn a rival process.
+          [ -f ~/.case/env ] && . ~/.case/env   # ntfy topics etc.
+          if [ "$(uname)" = Darwin ]; then
+            colima status >/dev/null 2>&1 || colima start --cpu "${CASE_CPU:-4}" --memory "${CASE_MEM:-4}"
+          else
+            docker info >/dev/null 2>&1 || { echo "docker not running — systemctl start docker"; exit 1; }
+            if systemctl is-enabled cased >/dev/null 2>&1; then
+              # systemd owns cased (it reconciles at start), but the documented user is
+              # unprivileged — try, then sudo, then just say so. Never abort `up` over it.
+              systemctl restart cased 2>/dev/null || sudo -n systemctl restart cased 2>/dev/null \
+                || echo "cased is systemd-managed; run: sudo systemctl restart cased"
+              for _ in $(seq 1 30); do curl -sf "${BASE%/v1}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+              curl -sf "${BASE%/v1}/health" | pp; exit $?
+            fi
+          fi
+          # manual/dev path (Mac, or Linux without the unit): (re)start cased ourselves
+          pkill -f '[c]ased.py' 2>/dev/null || true
+          sleep 1
+          ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+          mkdir -p ~/.case
+          nohup "$ROOT/.venv/bin/python" "$ROOT/control-plane/cased.py" >> ~/.case/cased.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf "${BASE%/v1}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+          curl -sf "${BASE%/v1}/health" | pp ;;
+  down)   # park everything: sleep running computers (graceful), stop cased + VM
+          ids=$(c "$BASE/computers" | python3 -c 'import json,sys;[print(c["id"]) for c in json.load(sys.stdin)["computers"] if c["state"]=="running"]' 2>/dev/null || true)
+          for id in $ids; do c -X POST "$BASE/computers/$id/sleep" >/dev/null && echo "slept $id"; done
+          if [ "$(uname)" != Darwin ] && systemctl is-enabled cased >/dev/null 2>&1; then
+            systemctl stop cased; exit 0        # else systemd just restarts it in 3s
+          fi
+          pkill -f '[c]ased.py' 2>/dev/null || true
+          [ "$(uname)" = Darwin ] && colima stop || true ;;
+  new)    c -X POST "$BASE/computers" -H 'Content-Type: application/json' \
+            -d "{\"name\":\"${2:-}\"}" | pp ;;
+  ls)     c "$BASE/computers" | pp ;;
+  sleep)  c -X POST "$BASE/computers/$2/sleep" | pp ;;
+  wake)   c -X POST "$BASE/computers/$2/wake" | pp ;;
+  rm)     c -X DELETE "$BASE/computers/$2" && echo deleted ;;
+  vnc)    url=$(c "$BASE/computers/$2" | python3 -c 'import json,sys;print(json.load(sys.stdin)["vnc_url"] or "")')
+          [ -n "$url" ] && open "$url" || echo "not running — wake it first" ;;
+  cred)   # case cred add [computer_id name username domain[,domain] [totp_seed]]
+          # no args after 'add' -> interactive prompts
+          [ "${2:-}" = add ] || { echo "usage: case cred add [<computer_id> <name> <username> <domains> [totp_seed]]"; exit 1; }
+          CID="${3:-}" NAME="${4:-}" USERN="${5:-}" DOMAINS="${6:-}" TOTP="${7:-}"
+          if [ -z "$CID" ]; then
+            c "$BASE/computers" | python3 -c 'import json,sys
+for c in json.load(sys.stdin)["computers"]: print("  " + c["id"] + "  " + c["name"] + "  [" + c["state"] + "]")'
+            read -r -p "computer id (paste id): " CID
+          fi
+          [ -n "$NAME" ]    || read -r -p "credential name (e.g. github): " NAME
+          [ -n "$USERN" ]   || read -r -p "username / email: " USERN
+          [ -n "$DOMAINS" ] || read -r -p "domains (comma-separated, e.g. github.com): " DOMAINS
+          [ -n "$TOTP" ]    || read -r -p "TOTP seed (enter to skip): " TOTP
+          read -r -s -p "secret for $NAME: " SECRET; echo
+          python3 - "$BASE" "$CID" "$NAME" "$USERN" "$DOMAINS" "$TOTP" "$SECRET" <<'EOF'
+import json, os, sys, urllib.request
+base, cid, name, user, domains, totp, secret = sys.argv[1:8]
+body = {"name": name, "username": user, "secret": secret, "domains": domains.split(",")}
+if totp: body["totp_seed"] = totp
+headers = {"Content-Type": "application/json"}
+tok = (os.environ.get("CASE_TOKEN") or "").strip()
+if tok:
+    headers["Authorization"] = "Bearer " + tok
+req = urllib.request.Request(f"{base}/computers/{cid}/credentials",
+    data=json.dumps(body).encode(), headers=headers)
+print(urllib.request.urlopen(req).read().decode())
+EOF
+          ;;
+  *)      echo "usage: case up | down | new [name] | ls | sleep <id> | wake <id> | rm <id> | vnc <id> | cred add ..." ;;
+esac

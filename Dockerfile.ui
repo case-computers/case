@@ -1,0 +1,10 @@
+# Drive UI. Proxies cased + noVNC on the compose network.
+FROM node:22-slim
+WORKDIR /app
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --omit=dev
+COPY web/ ./
+ENV PORT=4174
+ENV CASE_BIND=0.0.0.0
+EXPOSE 4174
+CMD ["node", "web-ui/serve.mjs"]
