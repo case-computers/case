@@ -8,12 +8,11 @@ RES="${DESK_RESOLUTION:-1280x800x24}"
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0   # stale after docker stop; blocks Xvfb on wake
 Xvfb :0 -screen 0 "$RES" -nolisten tcp &
 XVFB_PID=$!
-sleep 0.5
+
+for _ in $(seq 1 100); do [ -e /tmp/.X11-unix/X0 ] && break; sleep 0.1; done
 
 x11vnc -display :0 -forever -shared -nopw -quiet -bg
 websockify --web /usr/share/novnc 6080 localhost:5900 &
-
-for _ in $(seq 1 100); do [ -e /tmp/.X11-unix/X0 ] && break; sleep 0.1; done
 
 dbus-launch startxfce4 &
 

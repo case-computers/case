@@ -13,11 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Debian's chromium 150 SIGTRAPs at startup and never opens CDP on arm64/docker;
-# Playwright's chromium build is the battle-tested docker automation browser
+# Playwright's chromium build is the battle-tested docker automation browser.
+# The pip playwright package is only the browser downloader — nothing imports it
+# (deskd drives the headed chrome over CDP), so it is uninstalled after the fetch;
+# --no-shell skips the 340MB headless build start.sh never launches.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN python3 -m venv /opt/deskd \
     && /opt/deskd/bin/pip install --no-cache-dir fastapi uvicorn websocket-client requests playwright \
-    && /opt/deskd/bin/playwright install --with-deps chromium \
+    && /opt/deskd/bin/playwright install --with-deps --no-shell chromium \
+    && /opt/deskd/bin/pip uninstall -y playwright pyee greenlet \
     && chmod -R a+rX /opt/pw-browsers \
     && rm -rf /var/lib/apt/lists/*
 
