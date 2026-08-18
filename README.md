@@ -11,7 +11,7 @@ Needs Docker 20.10+ with Compose v2.
 1. Clone the repo.
 
 ```bash
-git clone https://github.com/ishu86/case.git && cd case
+git clone https://github.com/case-computers/case.git && cd case
 ```
 
 2. Start the stack.
@@ -33,13 +33,16 @@ claude mcp add --transport http case http://127.0.0.1:8788/mcp
 
 ## Faster start
 
-Skip the desktop image build (Debian + Xfce + Chromium, a few minutes) by pulling it:
+Skip the desktop image build (Debian + Xfce + Chromium, a few minutes) by
+pulling a published image:
 
 ```bash
-docker pull ghcr.io/ishu86/case-desk:latest
-echo "CASE_IMAGE=ghcr.io/ishu86/case-desk:latest" >> .env
+docker pull ghcr.io/case-computers/case-desk:latest
+echo "CASE_IMAGE=ghcr.io/case-computers/case-desk:latest" >> .env
 docker compose up
 ```
+
+If that pull 404s, no image has been published yet. Use `docker compose up --build`.
 
 ## Optional
 
@@ -56,6 +59,9 @@ docker compose up cased mcp --build
 ```json
 { "mcpServers": { "case": { "type": "http", "url": "http://127.0.0.1:8788/mcp" } } }
 ```
+
+`case-mcp.json` at the repo root is the stdio MCP config the scheduler passes
+to Claude (`--mcp-config`). Compose users should use the HTTP URL above.
 
 ### Laptop without Compose
 

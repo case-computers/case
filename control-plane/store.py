@@ -481,7 +481,7 @@ class Store:
 
     def burn_all_links(self, except_token=None):
         """Revoke every live human link. Console rotate passes except_token so the
-        caller's bookmark survives; case-give --rotate leaves it unset."""
+        caller's bookmark survives; a full burn (no except_token) leaves it unset."""
         if except_token:
             return self.q("UPDATE links SET used_at=? WHERE used_at IS NULL AND token!=?",
                           (now(), except_token)).rowcount

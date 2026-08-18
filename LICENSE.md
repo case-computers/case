@@ -46,7 +46,11 @@ Two things a commercial license does **not** and cannot cover:
   into Case's source.
 - **The name.** See below.
 
-To ask about terms, open an issue or contact the maintainers.
+To ask about terms, open an issue at
+https://github.com/case-computers/case/issues.
+
+GitHub may label this repository Other: the tree is dual-licensed, which the
+license picker does not split by directory. The table above is authoritative.
 
 ## Trademark
 

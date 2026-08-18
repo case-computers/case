@@ -21,7 +21,7 @@ from events import emit  # noqa: E402 — used via mock path
 import events  # noqa: E402
 
 
-DEFAULT_RELAY = "https://vwttrlkoccrdijkymhiz.supabase.co/functions/v1/handoff-email"
+DEFAULT_RELAY = "https://relay.example.test/handoff-email"
 
 
 def _handoff(**kw):
@@ -177,6 +177,18 @@ def test_unset_neither_cred_nor_topic_is_relay_fail_closed():
     importlib.reload(notify)
     assert isinstance(notify.notifier, notify.RelayNotifier)
     assert not notify.notifier.credential
+    assert not notify.notifier.url
+
+
+def test_relay_deliver_requires_url():
+    r = notify.RelayNotifier("", "cn_" + "ab" * 16)
+    with mock.patch.object(notify.requests, "post") as post:
+        try:
+            r._deliver(_handoff(), "acme")
+            raise AssertionError("expected RuntimeError")
+        except RuntimeError as e:
+            assert "CASE_HANDOFF_RELAY_URL" in str(e)
+    post.assert_not_called()
 
 
 def test_ntfy_notify_still_posts_when_selected():

@@ -2,5 +2,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/ishu86/case/security/advisories/new
+    url: https://github.com/case-computers/case/security/advisories/new
     about: Report privately. Never in a public issue.

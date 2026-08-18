@@ -36,5 +36,6 @@ personal browsing.
 (d) **ntfy topics are bearer secrets.** Anyone who knows a topic name can post or
 subscribe. Treat topic names like passwords; use random names and rotate if leaked.
 
-Report vulnerabilities privately to the maintainers. Do not file public issues
-that include tokens, ntfy topics, or vault contents.
+Report vulnerabilities privately via GitHub Security Advisories:
+https://github.com/case-computers/case/security/advisories/new
+Do not file public issues that include tokens, ntfy topics, or vault contents.

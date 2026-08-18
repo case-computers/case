@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "case": {
-      "command": "/Users/ishantkohar/dev/case/prod/.venv/bin/python",
-      "args": ["/Users/ishantkohar/dev/case/prod/mcp/case_mcp.py"]
+      "command": "python3",
+      "args": ["mcp/case_mcp.py"]
     }
   }
 }

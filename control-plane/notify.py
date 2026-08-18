@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Notification channel: notify(handoff) out, on_answer(handoff_id, value) in.
 
-Production default: RelayNotifier → central handoff-email Edge Function (owner
-derived server-side from hashed cn_ credential; box never sends a recipient).
-Dev/operator override: CASE_NOTIFY_CHANNEL=ntfy keeps the phone-topic loop.
-Schedule reports use push(), ntfy when that channel is selected, else no-op.
+Relay: POST assist links to CASE_HANDOFF_RELAY_URL (owner derived server-side
+from hashed cn_ credential; box never sends a recipient). Unset URL and
+credential: relay is disabled. CASE_NOTIFY_CHANNEL=ntfy keeps the phone-topic
+loop. Schedule reports use push(), ntfy when that channel is selected, else no-op.
 """
 import base64
 import json
@@ -21,9 +21,6 @@ from events import emit
 
 log = logging.getLogger("cased.notify")
 
-# Keep in sync with bin/case-give RELAY_URL_DEFAULT (separate process; cannot import).
-DEFAULT_RELAY_URL = (
-    "https://vwttrlkoccrdijkymhiz.supabase.co/functions/v1/handoff-email")
 RELAY_BACKOFF_S = (0.5, 2.0, 5.0)
 
 
@@ -112,10 +109,10 @@ class RelayNotifier:
     """POST handoff assist links to the central Edge Function. Never sends a recipient."""
 
     def __init__(self, url, credential):
-        self.url = (url or DEFAULT_RELAY_URL).rstrip("/")
+        self.url = (url or "").rstrip("/")
         self.credential = credential or ""
-        if not self.credential:
-            log.warning("CASE_NOTIFY_CREDENTIAL unset — handoff relay disabled")
+        if not self.url or not self.credential:
+            log.warning("handoff relay disabled (set CASE_HANDOFF_RELAY_URL and CASE_NOTIFY_CREDENTIAL)")
 
     def notify(self, handoff, computer_name):
         threading.Thread(target=self._send, args=(handoff, computer_name), daemon=True).start()
@@ -131,6 +128,8 @@ class RelayNotifier:
 
     def _deliver(self, h, computer_name):
         """One POST. Returns True on HTTP success. Raises on transport/HTTP error."""
+        if not self.url:
+            raise RuntimeError("CASE_HANDOFF_RELAY_URL unset")
         if not self.credential:
             raise RuntimeError("CASE_NOTIFY_CREDENTIAL unset")
         assist_url = h.get("assist_url") or ""
@@ -201,7 +200,7 @@ def build_notifier():
 
     def _relay():
         return RelayNotifier(
-            os.environ.get("CASE_HANDOFF_RELAY_URL", DEFAULT_RELAY_URL),
+            os.environ.get("CASE_HANDOFF_RELAY_URL") or "",
             os.environ.get("CASE_NOTIFY_CREDENTIAL"),
         )
 

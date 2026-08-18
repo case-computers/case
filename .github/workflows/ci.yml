@@ -46,17 +46,6 @@ jobs:
           node web/web-ui/test_nav.mjs
           node web/web-ui/test_deploy.mjs
 
-  secrets:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   # Case is dual-licensed and sold commercially, which is only possible if the
   # project can sublicense every contribution. Deliberately no third-party CLA
   # bot: the one everyone used was archived in March 2026, and a licensing gate

@@ -222,7 +222,7 @@ async def token_guard(request: Request, call_next):
 
 @app.middleware("http")
 async def console_door_guard(request: Request, call_next):
-    # No header = loopback (case-give, the operator) or the agent's own path through
+    # No header = loopback (bin/case, the operator) or the agent's own path through
     # case-mcp. Both unchanged by this.
     if request.headers.get("x-case-door") == "console":
         # Starlette answers HEAD from every GET route; a reader that may GET may HEAD.
@@ -657,8 +657,8 @@ def delete_credential(cid: str, name: str):
 
 # ---------- human links (fill + desk) ----------
 # Minted URLs are the only human auth on a box: no accounts, no sessions.
-# Minting stays loopback-only (case-give --link over SSH, later the dashboard
-# service), /v1 is deliberately NOT behind the public bearer door, because the
+# Minting stays loopback-only (bin/case or the Drive UI), /v1 is deliberately
+# NOT behind the public bearer door, because the
 # agent's token must not be able to answer handoffs or mint its own links.
 
 @app.post("/v1/computers/{cid}/links", status_code=201)
@@ -694,8 +694,8 @@ def mint_box_link(body: dict = Body(...)):
 
 @app.delete("/v1/links")
 def revoke_links():
-    """Kill every outstanding human link on this box. `case-give --rotate` calls it:
-    a link token is a bearer capability too, so 'rotate' must mean all of them."""
+    """Kill every outstanding human link on this box. MCP rotate calls it:
+    a link token is a bearer capability too, so rotate must mean all of them."""
     return {"burned": store.burn_all_links()}
 
 
@@ -716,7 +716,7 @@ def connect_reveal():
 
 @app.post("/v1/mcp/seed")
 def mcp_seed(request: Request, body: dict = Body(...)):
-    """Loopback-only: case-give writes the reveal copy after write_door. Never on the
+    """Loopback-only: writes the reveal copy after the MCP door is written. Never on the
     console door, a browser Link must not deposit an arbitrary bearer."""
     if from_console(request):
         raise ApiError(404, "not_found", "not_found")
@@ -746,7 +746,7 @@ def mcp_rotate(request: Request, body: dict = Body(...)):
         # fall back to the public Host header (console door keeps the FQDN)
         host = (request.headers.get("host") or "").split(":")[0].strip().lower()
     if not HOST_RE.match(host or ""):
-        raise ApiError(400, "bad_request", "box has no seeded host; run case-give --seed-connect")
+        raise ApiError(400, "bad_request", "box has no seeded host; POST /v1/mcp/seed with host first")
     token = _new_mcp_token()
     err = _door_write(host, token, origin)
     if err:
@@ -769,7 +769,7 @@ def mcp_rotate(request: Request, body: dict = Body(...)):
 def _fill_box_host(request: Request):
     """Host for the console ?box= param.
 
-    Prefer box_meta (what mcp/seed and case-give recorded), then CASE_MCP_HOST,
+    Prefer box_meta (what mcp/seed recorded), then CASE_MCP_HOST,
     then the request host so a mis-set env still sends the human home.
     """
     st = store.mcp_token_status()
