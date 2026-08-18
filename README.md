@@ -2,7 +2,7 @@
 
 Case gives AI agents a durable Linux desktop (Chromium, files, logins) on any machine
 with Docker. Sleep, wake, or reboot: the identity stays on the volume. You bring the
-brain (Claude, Cursor, Codex, or the Drive UI with your OpenAI key).
+brain (Claude, Cursor, Codex, or the Drive UI with your provider key).
 
 ## Quick start
 
