@@ -33,6 +33,11 @@ chrome_loop() {
       --remote-debugging-port=9222 \
       --no-first-run --no-default-browser-check \
       --disable-session-crashed-bubble --hide-crash-restore-bubble \
+      --disable-background-networking --disable-component-update \
+      --disable-domain-reliability --disable-sync --disable-default-apps \
+      --disable-breakpad --metrics-recording-only --no-pings \
+      --disable-component-extensions-with-background-pages \
+      --disable-features=NetworkTimeServiceQuerying,OptimizationHints \
       --start-maximized \
       about:blank >>/tmp/chromium.log 2>&1
     echo "[chrome_loop] chromium exited rc=$?" >>/tmp/chromium.log

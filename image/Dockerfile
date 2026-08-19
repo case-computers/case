@@ -25,6 +25,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git jq unzip nano sudo xterm \
     && rm -rf /var/lib/apt/lists/*
 
+# De-Google: Debian ships real Google API keys in chromium.d, activating browser-
+# level Google services (sync, GCM push, geolocation, speech) — dead weight for
+# agents that phones home at startup. Invalid dummy keys keep those services off
+# without the "API keys missing" infobar keyless builds show. Web logins
+# (gmail.com etc.) are plain cookie logins and are unaffected. Policies kill the
+# service machinery itself; matching kill flags live in start.sh.
+RUN printf 'export GOOGLE_API_KEY="no"\nexport GOOGLE_DEFAULT_CLIENT_ID="no"\nexport GOOGLE_DEFAULT_CLIENT_SECRET="no"\n' > /etc/chromium.d/apikeys \
+    && mkdir -p /etc/chromium/policies/managed \
+    && printf '%s' '{"BrowserSignin":0,"SyncDisabled":true,"MetricsReportingEnabled":false,"SafeBrowsingProtectionLevel":0,"BackgroundModeEnabled":false,"ComponentUpdatesEnabled":false,"PromotionalTabsEnabled":false,"UrlKeyedAnonymizedDataCollectionEnabled":false}' \
+       > /etc/chromium/policies/managed/case.json
+
 ARG NOVNC_VERSION=1.5.0
 RUN curl -fsSL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" \
     | tar xz -C /usr/share && mv "/usr/share/noVNC-${NOVNC_VERSION}" /usr/share/novnc
