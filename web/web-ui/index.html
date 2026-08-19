@@ -281,7 +281,7 @@ body.teaching .teachbar{display:flex}
 .teach-stop:hover{background:var(--ink);border-color:var(--ink)}
 /* while recording: the chat box IS the stop button */
 body.teaching .teach-stop{display:block;animation:rise var(--t) var(--ease)}
-body.teaching .ask textarea,body.teaching #sendBtn,body.teaching .plus,body.teaching .cfg{display:none}
+body.teaching .ask textarea,body.teaching #sendBtn,body.teaching #stopBtn,body.teaching .plus,body.teaching .cfg{display:none}
 body.teaching .ask{border-color:var(--warn);padding:6px}
 /* while recording: the browser pane glows red */
 @keyframes rec-breath{
@@ -543,6 +543,7 @@ body.acting .deskwrap::before{
                 <button type="button" id="teachStart">Teach a task<small>DEMONSTRATE IN THE BROWSER · SAVED AS A SKILL</small></button>
               </div>
               <textarea id="q" rows="1" placeholder="tell the computer what to do" aria-label="Message"></textarea>
+              <button type="button" class="btn" id="stopBtn" hidden>STOP</button>
               <button type="submit" class="btn solid" id="sendBtn">SEND</button>
               <button type="button" class="teach-stop" id="teachStop">■&ensp;STOP — SAVE AS SKILL</button>
             </div>
@@ -1200,6 +1201,9 @@ let inflight=0;
 const glow=on=>{inflight=Math.max(0,inflight+(on?1:-1));body.classList.toggle('acting',inflight>0);};
 const glowOff=()=>{inflight=0;body.classList.remove('acting');};
 
+let chatCtl=null;
+$('stopBtn').addEventListener('click',()=>{if(chatCtl)chatCtl.abort();});
+
 $('go').addEventListener('submit',async e=>{
   e.preventDefault();
   const t=q.value.trim();
@@ -1264,9 +1268,12 @@ $('go').addEventListener('submit',async e=>{
     row.querySelector('.tool-name').textContent=label;
     if(ev.args&&Object.keys(ev.args).length)row.querySelector('.tool-args').textContent=pretty(ev.args);
   };
+  chatCtl=new AbortController();
+  $('stopBtn').hidden=false;
   try{
     const r=await fetch('/api/chat',{
       method:'POST',
+      signal:chatCtl.signal,
       headers:{
         'content-type':'application/json',
         ...(provider==='anthropic'?{'x-anthropic-key':anthropicKey}:{'x-openai-key':openaiKey})
@@ -1328,8 +1335,11 @@ $('go').addEventListener('submit',async e=>{
     if(!raw)setText(r.ok?'':'http '+r.status);
   }catch(err){
     glowOff();
-    setText('Cannot reach the drive server. '+(err.message||''));
+    if(err&&err.name==='AbortError')setText(raw?raw+'\n\n■ STOPPED':'■ STOPPED');
+    else setText('Cannot reach the drive server. '+(err.message||''));
   }finally{
+    chatCtl=null;
+    $('stopBtn').hidden=true;
     caret.remove();
     if(activeTid==='__pending')activeTid=''; // stream died before the thread was born
     refresh(); // state may have changed (wake on first tool); threads re-sync too

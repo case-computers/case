@@ -679,6 +679,9 @@ async function chat(req, res) {
     'cache-control': 'no-store', 'x-accel-buffering': 'no',
   });
   const emit = (obj) => res.write(JSON.stringify(obj) + '\n');
+  // STOP in the UI aborts the fetch; stop looping then, but keep the turn's
+  // history — tools already ran, and replaying them on "continue" double-acts.
+  const stopped = () => res.destroyed;
   emit({ type: 'start', computer_id: id, thread_id: thread.id, title: thread.title, agent: thread.agent, model, effort });
   let vault = '(none)';
   try {
@@ -707,6 +710,7 @@ async function chat(req, res) {
         tools: ALL_TOOLS,
         emit,
         rounds: ROUNDS,
+        stopped,
         actFor: (name, args) => actFor(name, args || {}, id),
         runTool: async (name, args, call) => {
           claim();
@@ -791,7 +795,7 @@ async function chat(req, res) {
       return { response, traces, textDelta };
     };
     let finished = false;
-    for (let i = 0; i < ROUNDS && !finished; i++) {
+    for (let i = 0; i < ROUNDS && !finished && !stopped(); i++) {
       const { response, traces, textDelta } = await round();
       text = (response.output_text || traces.texts.join('\n') || '').trim();
       if (!traces.calls.length) {

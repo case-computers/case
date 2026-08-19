@@ -312,7 +312,7 @@ function clipJson(v, n = 8000) {
 }
 
 export async function anthropicToolLoop({
-  key, model, effort, system, messages, tools, emit, rounds, runTool, actFor,
+  key, model, effort, system, messages, tools, emit, rounds, runTool, actFor, stopped,
 }) {
   const client = new Anthropic({ apiKey: key });
   const antTools = openaiToolsToAnthropic(tools);
@@ -350,6 +350,7 @@ export async function anthropicToolLoop({
     return { message, traces, textDelta };
   };
   for (let i = 0; i < rounds && !finished; i++) {
+    if (stopped?.()) break;
     let result;
     try {
       result = await round(params);
