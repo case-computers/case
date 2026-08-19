@@ -299,6 +299,10 @@ body.teaching .deskwrap::before{
   font-size:14.5px;line-height:1.5;min-height:24px;max-height:140px;font-family:var(--sans);
 }
 .ask textarea::placeholder{color:var(--faint)}
+/* narrow panel: squeeze the textarea, never the SEND button */
+.ask{min-width:0}
+.ask textarea{min-width:0}
+.ask .btn{flex-shrink:0}
 .foot{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:var(--faint);margin-top:9px}
 
 /* ---------- rail: one surface, two modes ---------- */

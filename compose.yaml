@@ -42,6 +42,8 @@ services:
       # Total RAM the awake desktops may hold. Unset = 75% of what the engine sees,
       # which on a Mac is the Docker VM, not the Mac.
       CASE_MAX_RAM_MB: ${CASE_MAX_RAM_MB:-}
+      # DESK_DEBUG=1: desktops mirror chromium/websockify logs to docker logs
+      DESK_DEBUG: ${DESK_DEBUG:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - case-home:/data

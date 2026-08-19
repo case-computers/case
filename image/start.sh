@@ -32,6 +32,9 @@ x11vnc -display :0 -forever -shared -nopw -quiet -bg
 # log to file, not compose stdout: its per-connection "Plain non-SSL (ws://)"
 # lines read like TLS errors to people skimming `docker compose logs`
 /opt/deskd/bin/websockify --web /usr/share/novnc 6080 localhost:5900 >>/tmp/websockify.log 2>&1 &
+# DESK_DEBUG=1 (docker run -e, or on cased to cover every desktop): mirror the
+# in-container logs to docker logs
+[ "$DESK_DEBUG" = "1" ] && tail -n +1 -F /tmp/chromium.log /tmp/websockify.log 2>/dev/null &
 
 # Bare WM, no desktop environment. --compositor=off: xfwm4's XRender compositor
 # turns chromium's content area white on Xvfb. dbus session bus for xfconfd.
