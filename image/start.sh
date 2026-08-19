@@ -6,13 +6,14 @@
 RES="${DESK_RESOLUTION:-1280x800x24}"
 
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0   # stale after docker stop; blocks Xvfb on wake
-Xvfb :0 -screen 0 "$RES" -nolisten tcp &
+# -fbdir /dev/shm: mmap the framebuffer to a file deskd reads for screenshots
+Xvfb :0 -screen 0 "$RES" -nolisten tcp -fbdir /dev/shm &
 XVFB_PID=$!
 
 for _ in $(seq 1 100); do [ -e /tmp/.X11-unix/X0 ] && break; sleep 0.1; done
 
 x11vnc -display :0 -forever -shared -nopw -quiet -bg
-websockify --web /usr/share/novnc 6080 localhost:5900 &
+/opt/deskd/bin/websockify --web /usr/share/novnc 6080 localhost:5900 &
 
 # Bare WM, no desktop environment. --compositor=off: xfwm4's XRender compositor
 # turns chromium's content area white on Xvfb. dbus session bus for xfconfd.

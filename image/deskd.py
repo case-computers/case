@@ -15,6 +15,7 @@ import struct
 import subprocess
 import threading
 import time
+import zlib
 from collections import deque
 from urllib.parse import urlparse
 
@@ -58,10 +59,49 @@ def denv():
     return e
 
 
+FB = "/dev/shm/Xvfb_screen0"   # Xvfb -fbdir maps the framebuffer here, XWD format
+
+
+def _png_chunk(tag, body):
+    c = tag + body
+    return struct.pack(">I", len(body)) + c + struct.pack(">I", zlib.crc32(c))
+
+
 def grab():
-    subprocess.run(["scrot", "--overwrite", "/tmp/.screen.png"], env=denv(), check=True, timeout=10)
-    with open("/tmp/.screen.png", "rb") as f:
-        return f.read()
+    # Read the live framebuffer straight from Xvfb's mmap — no X round trip, no
+    # subprocess, no image library. A frame caught mid-draw can tear; acceptable
+    # for agent screenshots and it is what a human eye sees on a real screen too.
+    with open(FB, "rb") as f:
+        data = f.read()
+    (hdr_size, version, pix_fmt, _d, width, height, _xo, byte_order, _u, _bo,
+     _p, bpp, bpl, _v, rmask, gmask, bmask, _b, _c, ncolors) = struct.unpack(">20I", data[:80])
+    if not (version == 7 and pix_fmt == 2 and bpp == 32):
+        raise RuntimeError(f"unexpected XWD format v{version} fmt{pix_fmt} bpp{bpp}")
+    off = hdr_size + ncolors * 12
+    mv = memoryview(data)
+    std = byte_order == 0 and (rmask, gmask, bmask) == (0xFF0000, 0xFF00, 0xFF)
+    raw = bytearray()
+    for y in range(height):
+        row = mv[off + y * bpl: off + y * bpl + width * 4]
+        raw.append(0)  # PNG row filter: none
+        rgb = bytearray(width * 3)
+        if std:  # BGRX in memory: C-speed slice shuffle
+            rgb[0::3] = row[2::4]
+            rgb[1::3] = row[1::4]
+            rgb[2::3] = row[0::4]
+        else:    # generic masks/endianness, per-pixel
+            rs = (rmask & -rmask).bit_length() - 1
+            gs = (gmask & -gmask).bit_length() - 1
+            bs = (bmask & -bmask).bit_length() - 1
+            for i, px in enumerate(struct.unpack((">" if byte_order else "<") + f"{width}I", row)):
+                rgb[i * 3] = (px >> rs) & 0xFF
+                rgb[i * 3 + 1] = (px >> gs) & 0xFF
+                rgb[i * 3 + 2] = (px >> bs) & 0xFF
+        raw += rgb
+    return (b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+            + _png_chunk(b"IEND", b""))
 
 
 @app.get("/health")

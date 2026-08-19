@@ -8,18 +8,30 @@ FROM debian:bookworm-slim
 # is all the agent and the noVNC viewer need; a session manager, desktop, and panel
 # were ~150MB RAM of laptop cosplay per computer.
 ENV DEBIAN_FRONTEND=noninteractive
+# Deliberately absent (each hid a heavy dependency chain, traced 2026-08-19):
+#   apt novnc      — pulls nodejs + OpenStack python libs (~70MB); noVNC is static
+#                    JS, vendored below from the pinned release tarball instead.
+#   apt websockify — hard-depends numpy (26MB); pip --no-deps in the venv works,
+#                    numpy only speeds a legacy encoding path we never proxy.
+#   scrot          — pulls imlib2 → ghostscript + poppler (~50MB); deskd reads
+#                    Xvfb's -fbdir framebuffer and PNG-encodes with stdlib zlib.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb x11vnc novnc websockify \
+    xvfb x11vnc \
     chromium xfwm4 \
-    xdotool scrot \
+    xdotool \
     python3 python3-venv python3-pip \
     dbus-x11 ca-certificates curl procps \
     fonts-dejavu fonts-liberation \
-    git wget jq unzip nano sudo xfce4-terminal \
+    git jq unzip nano sudo xterm \
     && rm -rf /var/lib/apt/lists/*
 
+ARG NOVNC_VERSION=1.5.0
+RUN curl -fsSL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" \
+    | tar xz -C /usr/share && mv "/usr/share/noVNC-${NOVNC_VERSION}" /usr/share/novnc
+
 RUN python3 -m venv /opt/deskd \
-    && /opt/deskd/bin/pip install --no-cache-dir fastapi uvicorn websocket-client requests
+    && /opt/deskd/bin/pip install --no-cache-dir fastapi uvicorn websocket-client requests \
+    && /opt/deskd/bin/pip install --no-cache-dir --no-deps websockify
 
 # passwordless sudo: the container IS the agent's sandbox — self-serve apt installs.
 # ponytail: system installs still die on container recreate; volume-only tools survive.
