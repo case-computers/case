@@ -1,10 +1,16 @@
-# case-desk — persistent agent desktop. Debian slim + Xfce + Chromium + noVNC + deskd.
+# case-desk — persistent agent desktop. Debian slim + xfwm4 + Chromium + noVNC + deskd.
 FROM debian:bookworm-slim
 
+# Debian's apt chromium: SIGTRAPped on arm64/docker at v150, retested working at
+# v151.0.7922 (2026-08-18) — headed, CDP opens, stable. If a bookworm point release
+# regresses it, the fallback is Playwright's pinned build (see git history).
+# No desktop environment: xfwm4 alone gives windows titlebars/focus/maximize, which
+# is all the agent and the noVNC viewer need; a session manager, desktop, and panel
+# were ~150MB RAM of laptop cosplay per computer.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc novnc websockify \
-    xfce4-session xfwm4 xfdesktop4 xfce4-panel \
+    chromium xfwm4 \
     xdotool scrot \
     python3 python3-venv python3-pip \
     dbus-x11 ca-certificates curl procps \
@@ -12,33 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git wget jq unzip nano sudo xfce4-terminal \
     && rm -rf /var/lib/apt/lists/*
 
-# Debian's chromium 150 SIGTRAPs at startup and never opens CDP on arm64/docker;
-# Playwright's chromium build is the battle-tested docker automation browser.
-# The pip playwright package is only the browser downloader — nothing imports it
-# (deskd drives the headed chrome over CDP), so it is uninstalled after the fetch;
-# --no-shell skips the 340MB headless build start.sh never launches.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN python3 -m venv /opt/deskd \
-    && /opt/deskd/bin/pip install --no-cache-dir fastapi uvicorn websocket-client requests playwright \
-    && /opt/deskd/bin/playwright install --with-deps --no-shell chromium \
-    && /opt/deskd/bin/pip uninstall -y playwright pyee greenlet \
-    && chmod -R a+rX /opt/pw-browsers \
-    && rm -rf /var/lib/apt/lists/*
+    && /opt/deskd/bin/pip install --no-cache-dir fastapi uvicorn websocket-client requests
 
 # passwordless sudo: the container IS the agent's sandbox — self-serve apt installs.
 # ponytail: system installs still die on container recreate; volume-only tools survive.
 RUN useradd -m -u 1000 -s /bin/bash agent \
     && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent
-# xfwm4's XRender compositor turns chromium's content area white on Xvfb — disable it
-RUN mkdir -p /home/agent/.config/xfce4/xfconf/xfce-perchannel-xml && printf '%s\n' \
-    '<?xml version="1.0" encoding="UTF-8"?>' \
-    '<channel name="xfwm4" version="1.0">' \
-    '  <property name="general" type="empty">' \
-    '    <property name="use_compositing" type="bool" value="false"/>' \
-    '  </property>' \
-    '</channel>' \
-    > /home/agent/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
-    && chown -R agent:agent /home/agent/.config
 
 COPY deskd.py /opt/deskd/deskd.py
 COPY start.sh /usr/local/bin/start.sh
