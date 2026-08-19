@@ -15,6 +15,11 @@ seed() { [ -f "$2" ] || { mkdir -p "$(dirname "$2")"; cp "$1" "$2"; }; }
 seed /usr/share/case/gtk-settings.ini ~/.config/gtk-3.0/settings.ini
 seed /usr/share/case/xfce4-panel.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
 seed /usr/share/case/xfwm4.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+seed /usr/share/case/xfce4-desktop.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+# dock launchers: the panel reads items from its per-plugin launcher dir
+seed /usr/share/applications/chromium.desktop ~/.config/xfce4/panel/launcher-10/chromium.desktop
+seed /usr/share/applications/thunar.desktop ~/.config/xfce4/panel/launcher-11/thunar.desktop
+seed /usr/share/applications/debian-xterm.desktop ~/.config/xfce4/panel/launcher-12/debian-xterm.desktop
 
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0   # stale after docker stop; blocks Xvfb on wake
 # -fbdir /dev/shm: mmap the framebuffer to a file deskd reads for screenshots
@@ -30,8 +35,9 @@ x11vnc -display :0 -forever -shared -nopw -quiet -bg
 # turns chromium's content area white on Xvfb. dbus session bus for xfconfd.
 # bookworm's xfwm4 has no --daemon flag; it runs foreground, so background it.
 dbus-launch xfwm4 --compositor=off &
-xwallpaper --zoom /usr/share/backgrounds/case.png
+xwallpaper --zoom /usr/share/backgrounds/case.png   # instant paint; xfdesktop takes over
 xfce4-panel --disable-wm-check &
+xfdesktop &
 
 # chromium exits if stdin ever reads EOF — hold a never-EOF fifo open for it
 mkfifo /tmp/.chrome-stdin 2>/dev/null

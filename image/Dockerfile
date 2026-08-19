@@ -48,7 +48,7 @@ RUN useradd -m -u 1000 -s /bin/bash agent \
 
 # Separate layer so adding it didn't re-download the big apt layer above;
 # fold into the main install at the next base-layer rebuild.
-RUN apt-get update && apt-get install -y --no-install-recommends thunar \
+RUN apt-get update && apt-get install -y --no-install-recommends thunar xfdesktop4 \
     && rm -rf /var/lib/apt/lists/*
 
 # Desktop look: wallpaper, single-bar panel config, Greybird theme, and a custom
@@ -57,7 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends thunar \
 COPY assets/wallpaper.png /usr/share/backgrounds/case.png
 COPY assets/cursor-left_ptr /usr/share/icons/case/cursors/left_ptr
 RUN printf '[Icon Theme]\nName=case\n' > /usr/share/icons/case/index.theme
-COPY assets/gtk-settings.ini assets/xfce4-panel.xml assets/xfwm4.xml /usr/share/case/
+COPY assets/gtk-settings.ini assets/xfce4-panel.xml assets/xfwm4.xml assets/xfce4-desktop.xml /usr/share/case/
 
 COPY deskd.py /opt/deskd/deskd.py
 COPY start.sh /usr/local/bin/start.sh
