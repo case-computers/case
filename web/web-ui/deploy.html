@@ -183,6 +183,7 @@ const gb=mb=>{
   return (n%1024?(n/1024).toFixed(1):String(n/1024))+' GB';
 };
 const isAwake=c=>c.state==='awake'||c.state==='waking'||c.state==='creating';
+const deskUrl=id=>{return '/live/'+encodeURIComponent(id)+'/vnc.html?autoconnect=1&resize=scale&path=live/'+encodeURIComponent(id)+'/websockify';};
 function sizeLabel(c){
   const bits=[gb(c.ram_mb),c.cpus?c.cpus+(c.cpus===1?' CPU':' CPUs'):''].filter(Boolean);
   return bits.join(' · ');
@@ -225,6 +226,7 @@ function paint(){
       +'<span class="when">'+esc(sizeLabel(c))+'</span>'
       +'<span class="acts">'
       +'<button type="button" class="use'+(picked===c.id?' on':'')+'" data-id="'+esc(c.id)+'">'+(picked===c.id?'IN DRIVE':'DRIVE')+'</button>'
+      +'<button type="button" class="desk" data-id="'+esc(c.id)+'"'+(c.state==='awake'?'':' disabled')+'>DESK</button>'
       +'<button type="button" class="pow" data-id="'+esc(c.id)+'"'+(powOff?' disabled':'')+'>'+(awake?'SLEEP':'WAKE')+'</button>'
       +'<button type="button" class="rmx" data-id="'+esc(c.id)+'"'+(busy?' disabled':'')+' aria-label="Delete">×</button>'
       +'</span>'
@@ -303,6 +305,11 @@ $('sleepAll').addEventListener('click',async()=>{
   await refresh();
 });
 $('list').addEventListener('click',async e=>{
+  const d=e.target.closest('.desk');
+  if(d){
+    if(!d.disabled)window.open(deskUrl(d.dataset.id),'_blank','noopener');
+    return;
+  }
   const u=e.target.closest('.use');
   if(u){
     picked=u.dataset.id;

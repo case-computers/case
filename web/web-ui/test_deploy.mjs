@@ -35,9 +35,10 @@ const mod = path.join(os.tmpdir(), 'case-deploy-under-test.mjs');
 fs.writeFileSync(mod, `
   ${grab('const gb=')}
   ${grab('function sizeLabel(')}
-  export { gb, sizeLabel };
+  ${grab('const deskUrl=')}
+  export { gb, sizeLabel, deskUrl };
 `);
-const { gb, sizeLabel } = await import('file://' + mod);
+const { gb, sizeLabel, deskUrl } = await import('file://' + mod);
 
 let bad = 0;
 const is = (got, want, what) => {
@@ -62,6 +63,12 @@ const sub = (ram, max) => '1 computer on this host' + (max ? ' · ' + gb(ram) + 
 is(sub(0, 2928), '1 computer on this host · 0 GB of 2.9 GB in use', 'idle host still names the budget');
 is(sub(1024, 2928), '1 computer on this host · 1 GB of 2.9 GB in use', 'in-use memory reads back');
 is(sub(0, 0), '1 computer on this host', 'no budget (no /proc) says nothing at all');
+
+// DESK opens the same live view Drive embeds (index.html builds this URL too).
+is(deskUrl('c_abc123'),
+  '/live/c_abc123/vnc.html?autoconnect=1&resize=scale&path=live/c_abc123/websockify',
+  'desk url matches the /live proxy contract');
+is(page.includes('class="desk"'), true, 'rows render a DESK button');
 
 fs.rmSync(mod, { force: true });
 if (bad) { console.log(`\n${bad} deploy label check(s) failed`); process.exit(1); }
