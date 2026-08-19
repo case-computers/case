@@ -56,6 +56,7 @@ chrome_loop() {
       --user-data-dir=/home/agent/chrome-profile \
       --remote-debugging-port=9222 \
       --no-first-run --no-default-browser-check \
+      --test-type \
       --disable-session-crashed-bubble --hide-crash-restore-bubble \
       --disable-background-networking --disable-component-update \
       --disable-domain-reliability --disable-sync --disable-default-apps \
