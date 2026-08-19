@@ -73,6 +73,10 @@ WORKDIR /home/agent
 # the volume, where `pip install --user` survives container recreation and one
 # tenant's dependency is not every tenant's image layer.
 ENV DISPLAY=:0
+# Without a UTF-8 locale, xdotool type dies on the first non-ASCII char
+# ("Invalid multi-byte sequence") — em-dashes and ellipses in agent-written
+# text made every such type action fail after partially typing.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 EXPOSE 8000 6080
 
 CMD ["/usr/local/bin/start.sh"]

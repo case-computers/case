@@ -122,8 +122,8 @@ def screenshot():
 
 # ---------- actions ----------
 
-def xdo(*args):
-    subprocess.run(["xdotool", *args], env=denv(), check=True, timeout=15)
+def xdo(*args, timeout=15):
+    subprocess.run(["xdotool", *args], env=denv(), check=True, timeout=timeout)
 
 
 def do_action(a):
@@ -151,7 +151,10 @@ def do_action(a):
         if dy:
             xdo("click", "--repeat", str(min(abs(dy), 50)), "--delay", "40", "5" if dy > 0 else "4")
     elif t == "type":
-        xdo("type", "--delay", "15", "--", str(a["text"]))
+        text = str(a["text"])
+        # a killed xdotool leaves text half-typed and the caller retrying the
+        # whole thing — scale the timeout so long texts can't hit it
+        xdo("type", "--delay", "15", "--", text, timeout=15 + len(text) // 10)
     elif t == "key":
         xdo("key", "--", str(a["keys"]))
     elif t == "wait":
