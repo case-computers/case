@@ -75,7 +75,8 @@ services:
       cased:
         condition: service_healthy
     restart: unless-stopped
-    # GET /mcp is often 400/405; curl -f would never go healthy.
+    # Bare GET /mcp answers 406 Not Acceptable (no MCP Accept header) — expected,
+    # not an error. Any HTTP answer means up; curl -f would never go healthy.
     healthcheck:
       test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8788/mcp"]
       interval: 5s

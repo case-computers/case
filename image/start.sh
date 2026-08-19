@@ -5,6 +5,17 @@
 
 RES="${DESK_RESOLUTION:-1280x800x24}"
 
+# libXcursor honors this in every X client — the one switch that themes the
+# cursor everywhere (chromium reads it via GTK settings too, seeded below).
+export XCURSOR_THEME=case XCURSOR_SIZE=32
+
+# Seed per-user desktop config when missing (first boot, or volumes from older
+# images); never overwrite — the volume is the user's.
+seed() { [ -f "$2" ] || { mkdir -p "$(dirname "$2")"; cp "$1" "$2"; }; }
+seed /usr/share/case/gtk-settings.ini ~/.config/gtk-3.0/settings.ini
+seed /usr/share/case/xfce4-panel.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
+seed /usr/share/case/xfwm4.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0   # stale after docker stop; blocks Xvfb on wake
 # -fbdir /dev/shm: mmap the framebuffer to a file deskd reads for screenshots
 Xvfb :0 -screen 0 "$RES" -nolisten tcp -fbdir /dev/shm &
@@ -19,6 +30,8 @@ x11vnc -display :0 -forever -shared -nopw -quiet -bg
 # turns chromium's content area white on Xvfb. dbus session bus for xfconfd.
 # bookworm's xfwm4 has no --daemon flag; it runs foreground, so background it.
 dbus-launch xfwm4 --compositor=off &
+xwallpaper --zoom /usr/share/backgrounds/case.png
+xfce4-panel --disable-wm-check &
 
 # chromium exits if stdin ever reads EOF — hold a never-EOF fifo open for it
 mkfifo /tmp/.chrome-stdin 2>/dev/null

@@ -14,6 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc \
     chromium xfwm4 \
+    xfce4-panel xwallpaper greybird-gtk-theme elementary-xfce-icon-theme \
     xdotool \
     python3 python3-venv python3-pip \
     dbus-x11 ca-certificates curl procps \
@@ -44,6 +45,19 @@ RUN python3 -m venv /opt/deskd \
 # volume survives.
 RUN useradd -m -u 1000 -s /bin/bash agent \
     && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent
+
+# Separate layer so adding it didn't re-download the big apt layer above;
+# fold into the main install at the next base-layer rebuild.
+RUN apt-get update && apt-get install -y --no-install-recommends thunar \
+    && rm -rf /var/lib/apt/lists/*
+
+# Desktop look: wallpaper, single-bar panel config, Greybird theme, and a custom
+# cursor theme ("case", left_ptr in 24/32/48px). Per-user configs are seeded from
+# /usr/share/case by start.sh only when missing, so user changes survive.
+COPY assets/wallpaper.png /usr/share/backgrounds/case.png
+COPY assets/cursor-left_ptr /usr/share/icons/case/cursors/left_ptr
+RUN printf '[Icon Theme]\nName=case\n' > /usr/share/icons/case/index.theme
+COPY assets/gtk-settings.ini assets/xfce4-panel.xml assets/xfwm4.xml /usr/share/case/
 
 COPY deskd.py /opt/deskd/deskd.py
 COPY start.sh /usr/local/bin/start.sh
