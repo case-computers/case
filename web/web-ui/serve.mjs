@@ -682,6 +682,15 @@ async function chat(req, res) {
   // STOP in the UI aborts the fetch; stop looping then, but keep the turn's
   // history — tools already ran, and replaying them on "continue" double-acts.
   const stopped = () => res.destroyed;
+  // A long-poll tool (auth wait can block 4+ min) would hold CHAT_BUSY long after
+  // the client is gone. Race each tool against disconnect; once gone, later tools
+  // never start. The synthetic output keeps every function_call answered.
+  let clientGone;
+  const goneP = new Promise((r) => { clientGone = r; });
+  res.on('close', () => clientGone());
+  const toolOrStop = (start, act) => stopped()
+    ? Promise.resolve({ ok: false, error: 'stopped by user', act })
+    : Promise.race([start(), goneP.then(() => ({ ok: false, error: 'stopped by user', act }))]);
   emit({ type: 'start', computer_id: id, thread_id: thread.id, title: thread.title, agent: thread.agent, model, effort });
   let vault = '(none)';
   try {
@@ -721,7 +730,9 @@ async function chat(req, res) {
             arguments: call.arguments || JSON.stringify(args || {}),
           });
           const eplan = extraPlan(name, args, id);
-          const result = eplan ? await runExtra(eplan) : await runCaseTool(name, args, id, null);
+          const result = await toolOrStop(
+            () => (eplan ? runExtra(eplan) : runCaseTool(name, args, id, null)),
+            actFor(name, args || {}, id));
           const { image_b64, ...persist } = result;
           hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(persist) });
           return result;
@@ -812,7 +823,8 @@ async function chat(req, res) {
         const callId = call.call_id || call.id;
         emit({ type: 'tool_run', id: call.id, call_id: callId, name: call.name, act });
         const eplan = extraPlan(call.name, args, id);
-        const result = eplan ? await runExtra(eplan) : await runCaseTool(call.name, args, id);
+        const result = await toolOrStop(
+          () => (eplan ? runExtra(eplan) : runCaseTool(call.name, args, id)), act);
         const { image_b64, ...rest } = result;
         emit({ type: 'tool_result', id: call.id, call_id: callId, act: rest.act || act, ok: !!rest.ok, name: call.name, args_used: call.name === 'computer_exec' ? String(args.command || '').slice(0, 200) : undefined, detail: clip(rest.error || rest.result || rest, 400) });
         hist.items.push({ type: 'function_call_output', call_id: callId, output: clip(rest) });

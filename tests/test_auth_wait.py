@@ -277,6 +277,60 @@ def test_wait_safe_after_restart_style_reread():
     assert out["attempt"]["status"] == "cancelled"
 
 
+def _awaiting_with_child(hid):
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    auth_attempts._cas_or_conflict(a["id"], "created", "advancing", 0)
+    store.insert_handoff(
+        hid, "c_1", "otp", "enter code", None, "github",
+        domain="example.com", attempt_id=a["id"], sequence=1, revision=1)
+    store.set_attempt_handoff(a["id"], hid)
+    auth_attempts._cas_or_conflict(a["id"], "advancing", "awaiting_human", 1)
+    return a["id"], int(store.get_auth_attempt(a["id"])["revision"])
+
+
+def test_wait_timeout_reobserves_desk_solved_challenge():
+    # Human typed the OTP straight into the desk: challenge gone, nothing bumped
+    # the attempt. The timeout path must peek and advance instead of waiting forever.
+    _cleanup()
+    aid, rev = _awaiting_with_child("h_desk_solved")
+    solved = {"ok": True, "observation": {"challenge_signals": [], "visible_fields": {}}}
+
+    async def go():
+        events.set_loop(asyncio.get_running_loop())
+        with mock.patch("lifecycle.get_computer", return_value=COMP), \
+             mock.patch("deskclient.observe_auth", return_value=solved):
+            return await auth_attempts.wait_attempt(
+                aid, after_revision=rev, timeout_s=1)
+
+    out = _run(go())
+    assert out["changed"] is True, out
+    # heuristic attempt (no proof_spec) ends unverified, never authenticated
+    assert out["attempt"]["status"] == "unverified", out
+    assert out["login_result"]["status"] == "unverified"
+    assert store.get_handoff("h_desk_solved")["status"] == "completed"
+
+
+def test_wait_timeout_challenge_still_up_keeps_waiting():
+    _cleanup()
+    aid, rev = _awaiting_with_child("h_still_up")
+    pending = {"ok": True, "observation": {"challenge_signals": ["otp"],
+                                           "visible_fields": {"code": True}}}
+
+    async def go():
+        events.set_loop(asyncio.get_running_loop())
+        with mock.patch("lifecycle.get_computer", return_value=COMP), \
+             mock.patch("deskclient.observe_auth", return_value=pending):
+            return await auth_attempts.wait_attempt(
+                aid, after_revision=rev, timeout_s=1)
+
+    out = _run(go())
+    assert out["changed"] is False
+    assert out["wait_status"] == "timeout"
+    assert out["attempt"]["status"] == "awaiting_human"
+    assert int(out["attempt"]["revision"]) == rev
+    assert store.get_handoff("h_still_up")["status"] == "pending"
+
+
 def json_dumps(obj):
     import json
     return json.dumps(obj)

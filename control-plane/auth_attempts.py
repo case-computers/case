@@ -285,6 +285,43 @@ def cancel_attempt(attempt_id, expected_revision=None):
     return pub
 
 
+def reobserve_if_solved(attempt_id):
+    """Humans can clear a challenge directly on the desk (the Drive UI has no
+    Assist surface), which bumps nothing — the attempt would wait forever.
+    Peek at the page; only when the challenge is gone, advance so it can prove.
+    Returns the advanced public attempt, or None when nothing changed."""
+    row = store.get_auth_attempt(attempt_id)
+    if not row or row["status"] != "awaiting_human":
+        return None
+    hid = row_get(row, "current_handoff_id")
+
+    from deskclient import observe_auth
+    from lifecycle import get_computer
+
+    try:
+        computer = get_computer(row["computer_id"])
+        if row_get(computer, "state") != "running":
+            return None
+        resp = observe_auth(computer)
+    except Exception:
+        return None
+    observation = (resp or {}).get("observation") if isinstance(resp, dict) else None
+    if observation is None and isinstance(resp, dict) and "challenge_signals" in resp:
+        observation = resp
+    if observation is None or _classify_kind(observation):
+        return None  # challenge still up (or unreadable) — keep waiting
+    try:
+        pub = advance_attempt(attempt_id, observation=observation)
+    except ApiError:
+        return None  # raced with an Assist submit; the waiter sees that change
+    # The pending child is answered — the human did it on the desk itself.
+    if hid and pub["status"] != "awaiting_human":
+        h = store.get_handoff(hid)
+        if h and h["status"] in ("pending", "validating"):
+            store.set_handoff_status(hid, "completed", answer=None)
+    return pub
+
+
 async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,
                        timeout_s=WAIT_TIMEOUT_DEFAULT_S):
     """Long-poll until the attempt cursor advances, the attempt ends, or timeout.
@@ -326,6 +363,12 @@ async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,
                 pub = attempt_public(_require(attempt_id))
                 if _cursor_changed(pub, after_revision, after_handoff_id):
                     return _wait_payload(pub, changed=True)
+                if pub["status"] == "awaiting_human":
+                    # Once per wait call, before reporting timeout: the human may
+                    # have solved the challenge on the desk directly.
+                    adv = await asyncio.to_thread(reobserve_if_solved, attempt_id)
+                    if adv and _cursor_changed(adv, after_revision, after_handoff_id):
+                        return _wait_payload(adv, changed=True)
                 return _wait_payload(pub, changed=False, wait_status="timeout")
             try:
                 type_, data = await asyncio.wait_for(
