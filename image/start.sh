@@ -29,7 +29,9 @@ XVFB_PID=$!
 for _ in $(seq 1 100); do [ -e /tmp/.X11-unix/X0 ] && break; sleep 0.1; done
 
 x11vnc -display :0 -forever -shared -nopw -quiet -bg
-/opt/deskd/bin/websockify --web /usr/share/novnc 6080 localhost:5900 &
+# log to file, not compose stdout: its per-connection "Plain non-SSL (ws://)"
+# lines read like TLS errors to people skimming `docker compose logs`
+/opt/deskd/bin/websockify --web /usr/share/novnc 6080 localhost:5900 >>/tmp/websockify.log 2>&1 &
 
 # Bare WM, no desktop environment. --compositor=off: xfwm4's XRender compositor
 # turns chromium's content area white on Xvfb. dbus session bus for xfconfd.

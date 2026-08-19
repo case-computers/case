@@ -30,6 +30,16 @@ SESSION = "mcp_" + secrets.token_hex(4)   # one per MCP process; keys cased's au
 mcp = FastMCP("case", stateless_http=True,
               host=BIND, port=int(os.environ.get("CASE_MCP_PORT", "8788")))
 
+if HTTP:
+    from starlette.requests import Request
+    from starlette.responses import PlainTextResponse
+
+    # Liveness probe for the compose healthcheck. /mcp itself answers a bare GET
+    # with 406 (no MCP Accept header), which reads like an error in the logs.
+    @mcp.custom_route("/health", methods=["GET"])
+    async def _health(request: Request) -> PlainTextResponse:
+        return PlainTextResponse("ok")
+
 
 def _headers(**extra):
     h = {"X-Case-Session": SESSION}

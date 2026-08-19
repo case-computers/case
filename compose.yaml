@@ -75,13 +75,11 @@ services:
       cased:
         condition: service_healthy
     restart: unless-stopped
-    # Bare GET /mcp answers 406 Not Acceptable (no MCP Accept header) — expected,
-    # not an error. Any HTTP answer means up; curl -f would never go healthy.
     healthcheck:
-      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8788/mcp"]
-      interval: 5s
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8788/health"]
+      interval: 30s
       timeout: 3s
-      retries: 12
+      retries: 3
 
   ui:
     build:
