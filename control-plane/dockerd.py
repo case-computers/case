@@ -88,7 +88,20 @@ def container_run_kwargs(cid, cpus, ram_mb, volume, token):
 
 
 def create_container(cid, cpus, ram_mb, volume, token):
-    return dc().containers.run(IMAGE, **container_run_kwargs(cid, cpus, ram_mb, volume, token))
+    kw = container_run_kwargs(cid, cpus, ram_mb, volume, token)
+    try:
+        return dc().containers.run(IMAGE, **kw)
+    except docker.errors.APIError as e:
+        if e.status_code != 409:
+            raise
+        # Docker can 404 a name on lookup yet 409 it on create: a container stuck
+        # mid-removal or dead after a daemon crash keeps the name reserved. The
+        # corpse is cattle (identity lives in the volume) — clear it, retry once.
+        try:
+            dc().api.remove_container(container_name(cid), force=True)
+        except Exception:
+            pass
+        return dc().containers.run(IMAGE, **kw)
 
 
 def container_ports(container, deadline=10):

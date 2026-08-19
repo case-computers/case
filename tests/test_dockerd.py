@@ -110,10 +110,42 @@ def test_vnc_url_hidden_when_computers_are_on_the_compose_network():
         _net(None)
 
 
+def test_create_clears_a_name_stuck_in_removal_and_retries_once():
+    # Docker can 404 a name on get yet 409 it on create (corpse mid-removal).
+    import docker as dockerpy
+
+    conflict = dockerpy.errors.APIError(
+        "conflict", response=type("R", (), {"status_code": 409})())
+    calls = {"run": 0, "removed": None}
+
+    class Containers:
+        def run(self, image, **kw):
+            calls["run"] += 1
+            if calls["run"] == 1:
+                raise conflict
+            return "container"
+
+    class Api:
+        def remove_container(self, name, force=False):
+            calls["removed"] = (name, force)
+
+    # dc() pings the cached client; without ping() it reconnects to real Docker.
+    fake = type("DC", (), {"containers": Containers(), "api": Api(),
+                           "ping": lambda self: True})()
+    old = dockerd._dc
+    dockerd._dc = fake
+    try:
+        assert dockerd.create_container("c_ab", 1, 2048, "vol", "tok") == "container"
+        assert calls == {"run": 2, "removed": ("case-c_ab", True)}
+    finally:
+        dockerd._dc = old
+
+
 if __name__ == "__main__":
     test_host_mode_dials_loopback_and_publishes_ports()
     test_compose_mode_uses_container_dns_and_no_host_ports()
     test_deskclient_accepts_sqlite_row()
     test_deskclient_url_follows_the_network()
     test_vnc_url_hidden_when_computers_are_on_the_compose_network()
+    test_create_clears_a_name_stuck_in_removal_and_retries_once()
     print("test_dockerd: ok")
