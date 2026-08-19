@@ -141,6 +141,14 @@ and the REST API (`http://<host>:4174/?token=…`). `CASE_TOKEN` does **not** lo
 `:8788`: that door is loopback-only in compose; hosted boxes put Caddy in front.
 HTTPS and DNS are not shipped here.
 
+### Live desktop view times out repeatedly
+
+The UI is plain HTTP, so the viewer's WebSocket is `ws://`. Browsers in
+HTTPS-Only/HTTPS-First mode (and some privacy extensions) silently upgrade it
+to `wss://`, the TLS handshake fails against this plain-HTTP server, and noVNC
+sits until it reports a timeout — server logs show nothing wrong. Add an
+exception for the host in the browser, or put a TLS proxy in front.
+
 ## What you get
 
 - `image/`: the desktop (`case-desk`)
