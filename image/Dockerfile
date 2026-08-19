@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Policies disable the service machinery itself; matching kill flags in start.sh.
 RUN printf 'export GOOGLE_API_KEY="no"\nexport GOOGLE_DEFAULT_CLIENT_ID="no"\nexport GOOGLE_DEFAULT_CLIENT_SECRET="no"\n' > /etc/chromium.d/apikeys \
     && mkdir -p /etc/chromium/policies/managed \
-    && printf '%s' '{"BrowserSignin":0,"SyncDisabled":true,"MetricsReportingEnabled":false,"SafeBrowsingProtectionLevel":0,"BackgroundModeEnabled":false,"ComponentUpdatesEnabled":false,"PromotionalTabsEnabled":false,"UrlKeyedAnonymizedDataCollectionEnabled":false}' \
+    && printf '%s' '{"BrowserSignin":0,"SyncDisabled":true,"MetricsReportingEnabled":false,"SafeBrowsingProtectionLevel":0,"BackgroundModeEnabled":false,"ComponentUpdatesEnabled":false,"PromotionalTabsEnabled":false,"UrlKeyedAnonymizedDataCollectionEnabled":false,"DefaultSearchProviderEnabled":true,"DefaultSearchProviderName":"DuckDuckGo","DefaultSearchProviderKeyword":"duckduckgo.com","DefaultSearchProviderSearchURL":"https://duckduckgo.com/?q={searchTerms}","DefaultSearchProviderSuggestURL":"https://duckduckgo.com/ac/?q={searchTerms}&type=list"}' \
        > /etc/chromium/policies/managed/case.json
 
 ARG NOVNC_VERSION=1.5.0
