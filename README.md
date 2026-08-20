@@ -6,8 +6,9 @@ brain (Claude, Cursor, Codex, or the Drive UI with your provider key).
 
 ![Case demo](.github/demo.gif)
 
-<!-- Full demo video: drag case-computer-demo.mp4 into this file in the GitHub
-     web editor and replace this comment with the generated user-images link. -->
+https://github.com/user-attachments/assets/ba42fc00-7b33-440b-9c2e-f6930afc57fc
+
+
 
 What the agent gets, over MCP:
 
