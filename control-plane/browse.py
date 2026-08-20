@@ -28,11 +28,11 @@ import re
 import shlex
 import time
 
+from config import DESK_W as SCREEN_W, DESK_H as SCREEN_H
 from errors import ApiError
 from deskclient import desk_json, eval_js
 
 MAX_ELS = 150
-SCREEN_W, SCREEN_H = 1280, 800
 
 # The shared walk. Defines __els = [{el, tag, type, name, value, href}] in
 # document order, visible interactive elements only. Password values never read.

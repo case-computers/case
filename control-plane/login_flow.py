@@ -4,7 +4,6 @@
 Extracted from cased.py so the composition root stays thin and captcha-auto wiring
 can move into lifespan without import-time side effects.
 """
-import json
 import time
 
 import auth_attempts
@@ -15,6 +14,7 @@ import links
 from config import log
 from deskclient import desk_json, eval_js, eval_value, screenshot_b64
 from store import store
+from util import row_get
 
 
 def _credential_proof_spec(cid, name, body_spec):
@@ -22,17 +22,7 @@ def _credential_proof_spec(cid, name, body_spec):
     if body_spec is not None:
         return body_spec
     crow = store.get_credential(cid, name)
-    if not crow:
-        return None
-    raw = crow["proof_spec"] if "proof_spec" in crow.keys() else None
-    if not raw:
-        return None
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-    return raw
+    return auth_attempts.parse_proof_spec(row_get(crow, "proof_spec")) if crow else None
 
 
 def _login_after_desk(row, cid, name, url, attempt, result):
@@ -293,8 +283,7 @@ def _route_blocker(row, blocker):
             current = store.get_handoff(current_id)
             if current and current["status"] in ("pending", "validating"):
                 return current_id
-        status = active["status"] if "status" in active.keys() else None
-        if status == "proving":
+        if row_get(active, "status") == "proving":
             return None
         pub = auth_attempts.raise_challenge(
             active["id"], blocker["kind"], blocker["prompt"],

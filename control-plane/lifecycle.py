@@ -10,7 +10,7 @@ transitioning it, so it deliberately bypasses the transition guard.
 """
 import secrets
 
-from config import IMAGE, MAX_RAM_MB, MAX_RUNNING, log
+from config import DESK_H, DESK_W, IMAGE, MAX_RAM_MB, MAX_RUNNING, log
 from errors import ApiError
 from events import emit
 from store import store
@@ -97,7 +97,7 @@ def computer_json(row, summaries=None, creds=None, pending=None):
         "id": row["id"], "name": row["name"], "state": row["state"], "image": row["image"],
         "created_at": row["created_at"], "last_active_at": row["last_active_at"],
         "resources": {"cpus": row["cpus"], "ram_mb": row["ram_mb"], "disk_volume": row["volume"]},
-        "display": {"width": 1280, "height": 800},
+        "display": {"width": DESK_W, "height": DESK_H},
         "vnc_url": _vnc_url(row),
         "vnc_port": row["vnc_port"] if row["state"] == "running" else None,
         "credentials": credentials,
@@ -108,11 +108,9 @@ def computer_json(row, summaries=None, creds=None, pending=None):
 
 
 def admit(ram_mb):
-    """Refuse a wake/create that the host cannot carry. Two guards, because a count
-    and a memory budget answer different questions: MAX_RUNNING is about how many
-    desktops one operator wants live at once, MAX_RAM_MB is about whether the next
-    one fits. Before sizing was settable the first implied the second; it does not
-    any more."""
+    """Refuse a wake/create that the host cannot carry. Two guards: MAX_RUNNING is
+    how many desktops the operator wants live at once, MAX_RAM_MB is whether the
+    next one fits in memory."""
     if store.active_count() >= MAX_RUNNING:
         raise ApiError(409, "too_many_running", f"max {MAX_RUNNING} running computers")
     if MAX_RAM_MB:
@@ -168,7 +166,7 @@ def destroy(cid):
     dockerd.destroy_infra(cid, row["volume"])
     store.delete_credentials(cid)
     # deletion is terminal and the infra is already gone, force it, so a concurrent
-    # wake that moved the row to 'waking' can't leave it un-deleted (M1).
+    # wake that moved the row to 'waking' can't leave it un-deleted.
     _force_state(cid, row["state"], "deleted")
 
 
@@ -188,19 +186,12 @@ def do_sleep(cid):
 
 
 def sleep_all():
-    """Sleep every awake desktop. Best effort, never raises.
+    """Sleep every awake desktop on shutdown. Best effort, never raises.
 
-    Called when cased is going down. The desktops are not compose services, so
-    `docker compose down` stops the control plane and leaves every desktop running:
-    RAM burnt by machines nothing is driving, and a DB that says "running" about
-    containers no one is watching. Parking them here makes the documented teardown
-    complete.
-
-    Data is not at risk either way, start.sh traps SIGTERM and calls deskd
-    /quiesce, so a plain `docker stop` still shuts Chromium down through CDP. What
-    this buys is that the graceful path is the *default* one, with the control
-    plane's own 10s stop timeout, rather than something the operator has to know.
-    """
+    The desktops are not compose services, so `docker compose down` would
+    otherwise leave them running with a DB that still says "running". Data is
+    safe either way (start.sh traps SIGTERM and quiesces Chromium); this just
+    makes the graceful path the default one."""
     slept = []
     for row in store.list_computers():
         if row["state"] not in ("running", "waking"):
@@ -240,7 +231,7 @@ def do_wake(cid):
         raise
     if not _try_set(cid, "running"):
         # a DELETE landed while we were waking → we rebuilt a container the delete didn't
-        # know about. Tear it down instead of leaking a zombie on a 'deleted' row (H1).
+        # know about. Tear it down instead of leaking a zombie on a 'deleted' row.
         dockerd.destroy_infra(cid, row["volume"])
         raise ApiError(409, "wake_lost_race", "computer was deleted/changed during wake")
 

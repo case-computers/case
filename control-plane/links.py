@@ -7,14 +7,13 @@ write); `vnc` tokens are multi-use until expiry (a noVNC session is dozens of
 asset requests plus a websocket, all carrying the same cookie).
 """
 import ipaddress
-import json
 import re
 import secrets
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit
 
 from store import store
-from util import iso_in, now
+from util import iso_in, now, row_get
 
 TTL_S = {"fill": 900, "vnc": 3600}
 TTL_MAX = {"fill": 3600, "vnc": 86400}
@@ -125,22 +124,12 @@ def verification_allowlist(computer_id, credential_name):
     row = store.get_credential(computer_id, credential_name)
     if not row:
         return []
-    keys = row.keys() if hasattr(row, "keys") else row
-    raw = row["verification_hosts"] if "verification_hosts" in keys else None
-    if raw:
-        try:
-            hosts = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, ValueError):
-            hosts = None
-        if isinstance(hosts, list):
-            out = [h.lower().rstrip(".") for h in hosts
-                   if isinstance(h, str) and h.strip()]
-            if out:
-                return out
-    try:
-        domains = json.loads(row["domains"] or "[]")
-    except (TypeError, ValueError):
-        domains = []
+    hosts = store.json_list(row_get(row, "verification_hosts"))
+    out = [h.lower().rstrip(".") for h in hosts or []
+           if isinstance(h, str) and h.strip()]
+    if out:
+        return out
+    domains = store.json_list(row["domains"]) or []
     return [d.lower().rstrip(".") for d in domains if isinstance(d, str) and d.strip()]
 
 

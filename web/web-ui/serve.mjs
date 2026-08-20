@@ -20,7 +20,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop } from './case-tools.mjs';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop } from './case-tools.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -141,34 +141,8 @@ export function mimeFor(p) {
 }
 
 // ---------- cased ----------
-function api(method, rel, { body, timeoutMs = 30000, raw = false, rawBody = null } = {}) {
-  return new Promise((resolve, reject) => {
-    const payload = rawBody != null ? rawBody : (body == null ? null : Buffer.from(JSON.stringify(body)));
-    const req = http.request({
-      hostname: CASE.hostname, port: CASE.port, method,
-      path: '/v1' + rel,
-      headers: {
-        accept: 'application/json',
-        ...(TOKEN ? { authorization: 'Bearer ' + TOKEN } : {}),
-        ...(payload ? { 'content-type': 'application/json', 'content-length': String(payload.length) } : {}),
-      },
-    }, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        const buf = Buffer.concat(chunks);
-        if (raw) return resolve({ status: res.statusCode || 0, buf });
-        let json = null;
-        try { json = JSON.parse(buf.toString('utf8')); } catch { /* not json */ }
-        resolve({ status: res.statusCode || 0, json, raw: buf.toString('utf8').slice(0, 300) });
-      });
-    });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
+// One HTTP client (case-tools.caseCall); default timeout here stays 30s.
+const api = (method, rel, opts = {}) => caseCall(method, rel, { timeoutMs: 30000, ...opts });
 
 function originHealth() {
   return new Promise((resolve, reject) => {
@@ -394,7 +368,7 @@ async function power(res, req, action) {
 const EXTRA_TOOLS = [
   { type: 'function', name: 'computer_list', description: 'List all computers with state, resources and credential names. Reuse an existing computer — only computer_create for an identity that should stay separate.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'computer_create', description: 'Create a persistent computer (Linux desktop + Chromium). Blocks until running. Computers are durable: logins, cookies and files survive sleep. Check computer_list first.', parameters: { type: 'object', properties: { name: { type: 'string' } }, additionalProperties: false } },
-  { type: 'function', name: 'computer_screenshot', description: 'Screenshot of the computer display (1280x800). Wakes if asleep. Prefer computer_snapshot for anything inside a web page; use this for canvas, visual layout, and anything outside the browser window.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
+  { type: 'function', name: 'computer_screenshot', description: 'Screenshot of the computer display (1280x800 by default). Wakes if asleep. Prefer computer_snapshot for anything inside a web page; use this for canvas, visual layout, and anything outside the browser window.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'computer_snapshot', description: 'Numbered list of visible interactive elements on the active browser tab. PREFER over screenshots for finding what to click: returns lines like [12] button "Save changes" — pass the number to computer_click_element or computer_fill. Re-snapshot after any click or navigation.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'computer_click_element', description: 'Click element [ref] from the last computer_snapshot. Pass name (quoted text from the snapshot line) so a changed page is refused with a fresh snapshot instead of a wrong click. text, if given, is typed into the element after the click.', parameters: { type: 'object', properties: { ref: { type: 'number' }, name: { type: 'string' }, text: { type: 'string' }, screenshot: { type: 'boolean' } }, required: ['ref'], additionalProperties: false } },
   { type: 'function', name: 'computer_fill', description: 'Fill a whole form in one call: fields=[{ref, value}] with refs from computer_snapshot. Never for passwords or OTP codes — vaulted computer_login owns those. submit=true submits the form at the end.', parameters: { type: 'object', properties: { fields: { type: 'array', items: { type: 'object', properties: { ref: { type: 'number' }, value: {} }, required: ['ref', 'value'], additionalProperties: false } }, submit: { type: 'boolean' } }, required: ['fields'], additionalProperties: false } },
@@ -705,7 +679,7 @@ async function chat(req, res) {
     thread.agent = id;
     emit({ type: 'claim', thread_id: thread.id, agent: id });
   };
-  const dev = { role: 'developer', content: `You operate Case computer ${id}${cname ? ` (named "${cname}" — that's you when the user addresses it)` : ''} via tools. Loop: computer_navigate, then computer_snapshot to see numbered clickable elements, then computer_click_element/computer_fill by ref. One snapshot per navigation or state change is enough — refs stay valid until the page changes, so several clicks can follow one snapshot. computer_wait_for instead of polling. Read page text with computer_eval document.body.innerText. Screenshots only for visual layout. Coordinates are 1280x800. Login walls: computer_login(credential=<vault name>, url=current page) — never ask the user for a password or type into password fields. Vault names on this computer: ${vault}. On handoff_pending, immediately auth_attempt_wait. You get ${ROUNDS} tool steps per turn; the conversation continues across turns, so if you run out say exactly where you stopped. Short final answer.` };
+  const dev = { role: 'developer', content: `You operate Case computer ${id}${cname ? ` (named "${cname}" — that's you when the user addresses it)` : ''} via tools. Loop: computer_navigate, then computer_snapshot to see numbered clickable elements, then computer_click_element/computer_fill by ref. One snapshot per navigation or state change is enough — refs stay valid until the page changes, so several clicks can follow one snapshot. computer_wait_for instead of polling. Read page text with computer_eval document.body.innerText. Screenshots only for visual layout. Coordinates are the display size (1280x800 by default). Login walls: computer_login(credential=<vault name>, url=current page) — never ask the user for a password or type into password fields. Vault names on this computer: ${vault}. On handoff_pending, immediately auth_attempt_wait. You get ${ROUNDS} tool steps per turn; the conversation continues across turns, so if you run out say exactly where you stopped. Short final answer.` };
   const hist = thread;
   const turnStart = hist.items.length;
   hist.items.push({ role: 'user', content: inputText });

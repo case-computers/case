@@ -335,7 +335,9 @@ def test_finalize_auth_observation_caps_page_state_and_signals():
     }
     obs = deskd.finalize_auth_observation(raw)
     assert len(obs["page_state"]) == 500
-    assert obs["challenge_signals"] == []  # truncated slice lost the phrase
+    # page_state is a preview; classification runs on the full text, so a
+    # challenge phrase past char 500 still registers.
+    assert "otp" in obs["challenge_signals"]
     raw["page_state"] = ("Please enter the verification code now. " + "y" * 400)
     obs = deskd.finalize_auth_observation(raw)
     assert "otp" in obs["challenge_signals"]

@@ -71,7 +71,8 @@ def container_run_kwargs(cid, cpus, ram_mb, volume, token):
         environment={"DESK_TOKEN": token,
                      # DESK_DEBUG=1 on cased mirrors chromium/websockify logs
                      # to every desktop's docker logs
-                     "DESK_DEBUG": (os.environ.get("DESK_DEBUG") or "").strip()},
+                     "DESK_DEBUG": (os.environ.get("DESK_DEBUG") or "").strip(),
+                     "DESK_RESOLUTION": (os.environ.get("DESK_RESOLUTION") or "").strip()},
         volumes={volume: {"bind": "/home/agent", "mode": "rw"}},
         mem_limit=f"{int(ram_mb)}m", nano_cpus=int(cpus * 1e9), shm_size="1g",
         labels={"managed-by": "cased"})

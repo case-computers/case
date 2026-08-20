@@ -15,7 +15,7 @@ import threading
 from cryptography.fernet import Fernet
 
 from config import CASE_HOME
-from util import now
+from util import now, row_get
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS computers (
@@ -239,28 +239,35 @@ class Store:
     # ---- credentials ----
     _PROFILE_UNSET = object()
 
+    @staticmethod
+    def json_list(raw):
+        """A JSON-column list value, or None on junk/non-list. The one parser for
+        credentials.verification_hosts / domains style columns."""
+        if raw is None:
+            return None
+        try:
+            v = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return None
+        return v if isinstance(v, list) else None
+
     def upsert_credential(self, cid, name, username, secret, totp_seed, otp_phone, domains,
                           probe_url=_PROFILE_UNSET, proof_spec=_PROFILE_UNSET,
                           verification_hosts=_PROFILE_UNSET):
-        """Write vault material. Auth-profile columns are preserved unless explicitly passed.
-
-        INSERT OR REPLACE used to wipe probe_url/proof_spec/verification_hosts on every
-        password update, callers that omit those fields keep the prior profile.
-        """
+        """Write vault material. Auth-profile columns (probe_url/proof_spec/
+        verification_hosts) are preserved unless explicitly passed, so a password
+        update never wipes the profile."""
         existing = self.get_credential(cid, name)
         if probe_url is self._PROFILE_UNSET:
-            probe_url = existing["probe_url"] if existing and "probe_url" in existing.keys() else None
+            probe_url = row_get(existing, "probe_url") if existing else None
         if proof_spec is self._PROFILE_UNSET:
-            proof_spec = existing["proof_spec"] if existing and "proof_spec" in existing.keys() else None
-        else:
-            if isinstance(proof_spec, dict):
-                proof_spec = json.dumps(proof_spec)
+            proof_spec = row_get(existing, "proof_spec") if existing else None
+        elif isinstance(proof_spec, dict):
+            proof_spec = json.dumps(proof_spec)
         if verification_hosts is self._PROFILE_UNSET:
-            verification_hosts = (existing["verification_hosts"]
-                                  if existing and "verification_hosts" in existing.keys() else None)
-        else:
-            if isinstance(verification_hosts, list):
-                verification_hosts = json.dumps(verification_hosts)
+            verification_hosts = row_get(existing, "verification_hosts") if existing else None
+        elif isinstance(verification_hosts, list):
+            verification_hosts = json.dumps(verification_hosts)
         created = existing["created_at"] if existing else now()
         last_verified = existing["last_verified_at"] if existing else None
         last_status = existing["last_status"] if existing else None
@@ -362,14 +369,30 @@ class Store:
 
     _ANSWER_UNCHANGED = object()
 
+    # Terminal handoff statuses; transition_handoff never moves a row out of one.
+    HANDOFF_TERMINAL = ("completed", "answered", "failed", "expired")
+
     def set_handoff_status(self, hid, status, answer=_ANSWER_UNCHANGED):
-        """Update status. answer omitted → leave unchanged; answer=None → clear; else set."""
+        """Raw status write, no guard and no revision bump. Test fixtures only —
+        production paths go through transition_handoff."""
         if answer is self._ANSWER_UNCHANGED:
             self.q("UPDATE handoffs SET status=? WHERE id=?", (status, hid))
         elif answer is None:
             self.q("UPDATE handoffs SET status=?, answer=NULL WHERE id=?", (status, hid))
         else:
             self.q("UPDATE handoffs SET status=?, answer=? WHERE id=?", (status, answer, hid))
+
+    def transition_handoff(self, hid, to, answer=_ANSWER_UNCHANGED):
+        """Guarded status write: compare-and-set from the row's current status and
+        revision (bumping it), never out of a terminal status. Returns the fresh row,
+        or None when the row is gone, already terminal, or another writer won —
+        callers must do side effects (events, credential health) only on a row."""
+        row = self.get_handoff(hid)
+        if not row or row["status"] in self.HANDOFF_TERMINAL:
+            return None
+        n = self.cas_handoff_status(hid, row["status"], to,
+                                    int(row["revision"] or 0), answer=answer)
+        return self.get_handoff(hid) if n == 1 else None
 
     def cas_handoff_status(self, hid, from_status, to_status, revision_expect, answer=_ANSWER_UNCHANGED):
         """Compare-and-set handoff status + bump revision. rowcount 1 = won the race."""

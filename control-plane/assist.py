@@ -133,21 +133,14 @@ def valid_session(raw_session):
 
 
 def session_cookie_header(session_raw, max_age=None):
-    """Set-Cookie value for the assist session. Path=/ so /desk sees it too."""
+    """Set-Cookie value for the assist session. Path=/ so /desk sees it too.
+
+    Only minted on the exchange hit, where the stored session expiry is also
+    now + SESSION_TTL_S — so the default max_age matches the DB exactly."""
     if max_age is None:
         max_age = SESSION_TTL_S
     return (f"{COOKIE}={session_raw}; Path=/; Max-Age={int(max_age)}; "
             "Secure; HttpOnly; SameSite=Lax")
-
-
-def session_max_age(handoff_id):
-    """Seconds left on the session cookie, must not outlive the stored expiry."""
-    row = store.get_assist_by_handoff(handoff_id)
-    if not row or not row["session_expires_at"]:
-        return 0
-    exp = datetime.strptime(row["session_expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
-        tzinfo=timezone.utc)
-    return max(int((exp - datetime.now(timezone.utc)).total_seconds()), 0)
 
 
 def resolve(raw_token, cookie_header=""):

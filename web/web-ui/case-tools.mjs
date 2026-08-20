@@ -14,7 +14,7 @@ import Anthropic from '@anthropic-ai/sdk';
 export const CASE_TOOLS = [
   { type: 'function', name: 'computer_navigate', description: 'Point the computer browser at url and block until the page has loaded. Returns {ok, url, title}. Then read with computer_eval("document.body.innerText"). Same-page #anchor jumps are not navigations.', parameters: { type: 'object', properties: { url: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['url'], additionalProperties: false } },
   { type: 'function', name: 'computer_eval', description: 'Evaluate JS in the active tab (CDP, promises awaited). Prefer this over screenshots for page content. Return plain values — DOM nodes are not serialisable. To read a page as prose, document.body.innerText. Do not drive location.assign from here; use computer_navigate.', parameters: { type: 'object', properties: { expression: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['expression'], additionalProperties: false } },
-  { type: 'function', name: 'computer_action', description: 'UI action on the 1280x800 desktop: click|double_click|move|drag|scroll|type|key|wait. Coordinates are pixels, origin top-left. keys uses xdotool syntax (ctrl+l, Return). For elements INSIDE a web page prefer computer_snapshot + computer_click_element; use this for the desktop itself, canvas, shortcuts, and scrolling.', parameters: { type: 'object', properties: { type: { type: 'string', enum: ['click', 'double_click', 'move', 'drag', 'scroll', 'type', 'key', 'wait'] }, x: { type: 'number' }, y: { type: 'number' }, text: { type: 'string' }, keys: { type: 'string' }, dy: { type: 'number' }, ms: { type: 'number' }, from_x: { type: 'number' }, from_y: { type: 'number' }, to_x: { type: 'number' }, to_y: { type: 'number' } }, required: ['type'], additionalProperties: false } },
+  { type: 'function', name: 'computer_action', description: 'UI action on the desktop (1280x800 by default): click|double_click|move|drag|scroll|type|key|wait. Coordinates are pixels, origin top-left. keys uses xdotool syntax (ctrl+l, Return). For elements INSIDE a web page prefer computer_snapshot + computer_click_element; use this for the desktop itself, canvas, shortcuts, and scrolling.', parameters: { type: 'object', properties: { type: { type: 'string', enum: ['click', 'double_click', 'move', 'drag', 'scroll', 'type', 'key', 'wait'] }, x: { type: 'number' }, y: { type: 'number' }, text: { type: 'string' }, keys: { type: 'string' }, dy: { type: 'number' }, ms: { type: 'number' }, from_x: { type: 'number' }, from_y: { type: 'number' }, to_x: { type: 'number' }, to_y: { type: 'number' } }, required: ['type'], additionalProperties: false } },
   { type: 'function', name: 'computer_exec', description: 'Run a shell command on the computer (bash, as user agent).', parameters: { type: 'object', properties: { command: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['command'], additionalProperties: false } },
 ];
 
@@ -52,10 +52,14 @@ export function caseToolPlan(name, args, cid) {
   return { error: `unknown tool ${name}` };
 }
 
-function caseCall(method, rel, { json: body, timeoutMs = 20000 } = {}) {
+// The one HTTP client for cased in JS: the chat tool loop and serve.mjs both
+// route through it. json/body are interchangeable JSON payload keys; rawBody
+// sends bytes as-is; raw:true resolves {status, buf} instead of parsed JSON.
+export function caseCall(method, rel, { json, body, rawBody = null, raw = false, timeoutMs = 20000 } = {}) {
   const u = new URL(rel.startsWith('http') ? rel : caseRoot() + rel);
   const lib = u.protocol === 'https:' ? https : http;
-  const payload = body == null ? null : Buffer.from(JSON.stringify(body));
+  const data = json ?? body;
+  const payload = rawBody != null ? rawBody : (data == null ? null : Buffer.from(JSON.stringify(data)));
   const token = (process.env.CASE_TOKEN || '').trim();
   return new Promise((resolve, reject) => {
     const req = lib.request({
@@ -72,10 +76,12 @@ function caseCall(method, rel, { json: body, timeoutMs = 20000 } = {}) {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
-        const raw = Buffer.concat(chunks).toString('utf8');
+        const buf = Buffer.concat(chunks);
+        if (raw) return resolve({ status: res.statusCode || 0, buf });
+        const text = buf.toString('utf8');
         let parsed = null;
-        try { parsed = JSON.parse(raw); } catch { /* not json */ }
-        resolve({ status: res.statusCode || 0, json: parsed, raw: raw.slice(0, 400) });
+        try { parsed = JSON.parse(text); } catch { /* not json */ }
+        resolve({ status: res.statusCode || 0, json: parsed, raw: text.slice(0, 400) });
       });
     });
     req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));

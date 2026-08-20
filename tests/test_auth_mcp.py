@@ -186,6 +186,10 @@ def test_auth_attempt_wait_bounded_timeout_no_login_retry():
     snap = {
         "id": "a_x", "status": "awaiting_human", "revision": 2,
         "current_handoff_id": "h_1",
+        "login_result": {
+            "status": "handoff_pending", "attempt_id": "a_x",
+            "handoff_id": "h_1", "revision": 2,
+        },
     }
     # First call: wait times out at REST; budget already expired → snapshot GET.
     with mock.patch.object(m, "call", side_effect=[_ok(timed), _ok(snap)]) as call, \
@@ -214,6 +218,10 @@ def test_auth_attempt_wait_caps_max_wait():
     snap = {
         "id": "a_cap", "status": "awaiting_human", "revision": 1,
         "current_handoff_id": "h_1",
+        "login_result": {
+            "status": "handoff_pending", "attempt_id": "a_cap",
+            "handoff_id": "h_1", "revision": 1,
+        },
     }
     with mock.patch.object(m, "call", side_effect=[_ok(timed), _ok(snap)]) as call, \
          mock.patch.object(m.time, "time", side_effect=[0.0, 0.0, 10_000.0]):

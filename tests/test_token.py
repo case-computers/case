@@ -39,8 +39,30 @@ def test_blank_token_is_open():
         os.environ.pop("CASE_TOKEN", None)
 
 
+def test_awake_touches_on_success_only():
+    # The shared desk-route preamble: touch fires after the body, never on failure —
+    # session_keeper reads last_active_at to avoid navigating over a live session.
+    from unittest import mock
+    row = {"id": "c_t", "state": "running"}
+    with mock.patch.object(cased.lifecycle, "ensure_running", return_value=row), \
+         mock.patch.object(cased.store, "touch") as touch:
+        with cased.awake("c_t", False) as got:
+            assert got is row
+            touch.assert_not_called()
+        touch.assert_called_once_with("c_t")
+    with mock.patch.object(cased.lifecycle, "ensure_running", return_value=row), \
+         mock.patch.object(cased.store, "touch") as touch:
+        try:
+            with cased.awake("c_t", False):
+                raise RuntimeError("desk blew up")
+        except RuntimeError:
+            pass
+        touch.assert_not_called()
+
+
 if __name__ == "__main__":
     test_open_when_unset()
     test_requires_matching_bearer()
     test_blank_token_is_open()
+    test_awake_touches_on_success_only()
     print("test_token: ok")

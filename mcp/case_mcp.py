@@ -79,7 +79,8 @@ def computer_list() -> dict:
 
 @mcp.tool()
 def computer_screenshot(computer_id: str) -> Image:
-    """Screenshot of the computer's display (1280x800). Wakes the computer if asleep."""
+    """Screenshot of the computer's display (1280x800 by default; see computer_list
+    display for the actual size). Wakes the computer if asleep."""
     r = call("GET", f"/computers/{computer_id}/screenshot", params={"wake": "true"})
     return Image(data=r.content, format="png")
 
@@ -92,7 +93,8 @@ def computer_action(computer_id: str, type: str, x: int = None, y: int = None,
                     to_x: int = None, to_y: int = None,
                     screenshot: bool = False) -> object:
     """Perform a UI action: click|double_click|move|drag|scroll|type|key|wait.
-    Coordinates are pixels, origin top-left of 1280x800. keys uses xdotool syntax
+    Coordinates are pixels, origin top-left of the display (1280x800 by default;
+    see computer_list display). keys uses xdotool syntax
     (e.g. 'ctrl+l', 'Return'). Set screenshot=true to get the post-action screen.
     For elements INSIDE a web page prefer computer_snapshot + computer_click_element
     (no coordinate guessing); use this for the desktop itself, canvas/custom-drawn
@@ -474,31 +476,15 @@ def auth_attempt_wait(attempt_id: str, since_revision: int = None,
     after_rev = 0 if since_revision is None else int(since_revision)
     after_hid = None
     deadline = time.time() + budget
+    # The status→LoginResult vocabulary lives server-side (auth_attempts.login_result,
+    # attached to every GET / wait payload); this loop only chains long-polls.
     while True:
         remaining = deadline - time.time()
         if remaining <= 0:
             snap = call("GET", f"/auth-attempts/{attempt_id}").json()
-            out = {
-                "wait_status": "timeout",
-                "changed": False,
-                "attempt": snap,
-                "attempt_id": snap["id"],
-                "revision": snap["revision"],
-            }
-            # Compat LoginResult fields for the agent.
-            if snap["status"] == "awaiting_human":
-                out["status"] = "handoff_pending"
-                out["handoff_id"] = snap.get("current_handoff_id")
-            elif snap["status"] == "authenticated":
-                out["status"] = "success"
-                out["proof_level"] = snap.get("proof_level")
-            elif snap["status"] in ("failed", "cancelled", "expired"):
-                out["status"] = "failed"
-            elif snap["status"] == "unverified":
-                out["status"] = "unverified"
-            else:
-                out["status"] = snap["status"]
-            return out
+            lr = snap.pop("login_result", None) or {}
+            return {"wait_status": "timeout", "changed": False, "attempt": snap,
+                    "attempt_id": snap["id"], "revision": snap["revision"], **lr}
         leg = max(1, min(int(remaining), 270))
         params = {"after_revision": after_rev, "timeout_s": leg}
         if after_hid is not None:
@@ -508,23 +494,10 @@ def auth_attempt_wait(attempt_id: str, since_revision: int = None,
         attempt = last["attempt"]
         after_rev = int(attempt.get("revision") or after_rev)
         after_hid = attempt.get("current_handoff_id")
-        # Prefer platform-mapped login_result when present.
         lr = last.get("login_result") or {}
-        if attempt["status"] in ("authenticated", "unverified", "failed",
-                                 "expired", "cancelled"):
-            out = {
-                "wait_status": "terminal",
-                "changed": True,
-                "attempt": attempt,
-                "attempt_id": attempt["id"],
-                "revision": attempt["revision"],
-            }
-            out.update(lr)
-            if "status" not in out:
-                out["status"] = ("success" if attempt["status"] == "authenticated"
-                                 else "failed" if attempt["status"] != "unverified"
-                                 else "unverified")
-            return out
+        if last.get("wait_status") == "terminal":
+            return {"wait_status": "terminal", "changed": True, "attempt": attempt,
+                    "attempt_id": attempt["id"], "revision": attempt["revision"], **lr}
         if last.get("wait_status") == "timeout":
             continue
         # Intermediate advance (new challenge / proving) — keep waiting inside budget.
@@ -533,16 +506,9 @@ def auth_attempt_wait(attempt_id: str, since_revision: int = None,
             # budget is nearly gone — then surface handoff_pending so the agent can
             # re-enter wait without asking the user.
             if deadline - time.time() < 5:
-                out = {
-                    "wait_status": "timeout",
-                    "changed": True,
-                    "attempt": attempt,
-                    "attempt_id": attempt["id"],
-                    "revision": attempt["revision"],
-                    "status": "handoff_pending",
-                    "handoff_id": attempt.get("current_handoff_id"),
-                }
-                return out
+                return {"wait_status": "timeout", "changed": True, "attempt": attempt,
+                        "attempt_id": attempt["id"], "revision": attempt["revision"],
+                        **lr}
             continue
         # Non-terminal progress (advancing/proving) — keep polling.
         continue

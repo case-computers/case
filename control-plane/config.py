@@ -15,18 +15,9 @@ MAX_RUNNING = int(os.environ.get("CASE_MAX_RUNNING", "8"))
 
 
 def _host_ram_budget_mb():
-    """75% of the host's RAM, or 0 (no budget) where we cannot read it.
-
-    MAX_RUNNING caps how *many* desktops are awake, which is only a stand-in for
-    memory while every desktop is the default 2 GB. Once a caller can ask for
-    8 GB, a count means nothing and the box OOMs instead of returning 409. So the
-    real guard is a memory budget, and it has to default to something sane
-    because nobody sets an env var they have never heard of.
-
-    /proc/meminfo is the container's view of the host (or, on a Mac, of the
-    Docker VM), which is exactly the ceiling we care about. macOS has no /proc,
-    so cased running natively there gets 0 and behaves as it always has.
-    """
+    """75% of the host's RAM via /proc/meminfo, or 0 (no budget) where unreadable
+    (e.g. cased running natively on macOS). The memory budget, not MAX_RUNNING,
+    is what stops variously-sized desktops from OOMing the box."""
     try:
         with open("/proc/meminfo") as f:
             total_kb = int(f.readline().split()[1])
@@ -50,6 +41,19 @@ BIND_PORT = int(os.environ.get("CASE_PORT") or 8787)
 VNC_PORT = int(os.environ.get("CASE_VNC_PORT") or 0) or None
 API_BASE = os.environ.get("CASE_API_BASE", f"http://127.0.0.1:{BIND_PORT}/v1")
 HANDOFF_TTL = timedelta(minutes=15)
+
+
+def _desk_resolution():
+    """DESK_RESOLUTION (WxH or WxHxDEPTH, image/start.sh syntax) → (w, h)."""
+    raw = (os.environ.get("DESK_RESOLUTION") or "").strip()
+    try:
+        w, h = raw.split("x")[:2]
+        return int(w), int(h)
+    except ValueError:
+        return 1280, 800
+
+
+DESK_W, DESK_H = _desk_resolution()
 
 # Brain = headless Claude Code, invoked by the scheduler. BYOK stays with the caller
 # (Case never owns LLM cost): an ANTHROPIC_API_KEY exported for cased is honoured

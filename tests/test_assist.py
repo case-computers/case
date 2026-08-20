@@ -483,6 +483,32 @@ def test_check_same_origin():
     }))
 
 
+def test_first_click_of_fresh_link_sets_session_cookie_over_http():
+    # Route-level: the emailed link's FIRST hit burns the token and must answer
+    # 200 with the case_assist cookie — a failure here strands the human on a
+    # burned token (the exchange is not retryable).
+    _cleanup()
+    _pending("h_otp", "otp", continuation="submit_value", revision=1)
+    raw, _ = assist.mint_assist_token("h_otp")
+
+    from fastapi.testclient import TestClient
+    client = TestClient(cased.app, raise_server_exceptions=False)
+    r = client.get(f"/assist/{raw}")
+    assert r.status_code == 200, r.text
+    set_cookie = r.headers.get("set-cookie") or ""
+    assert assist.COOKIE + "=" in set_cookie, set_cookie
+    assert f"Max-Age={assist.SESSION_TTL_S}" in set_cookie, set_cookie
+    # Follow-up with the cookie (passed by hand — Secure cookies don't survive
+    # the TestClient's http:// jar): 200, no new Set-Cookie.
+    sess = set_cookie.split(assist.COOKIE + "=", 1)[1].split(";", 1)[0]
+    r2 = client.get(f"/assist/{raw}", cookies={assist.COOKIE: sess})
+    assert r2.status_code == 200, r2.text
+    assert assist.COOKIE + "=" not in (r2.headers.get("set-cookie") or "")
+    # Burned token, no cookie → 410.
+    bare = TestClient(cased.app, raise_server_exceptions=False)
+    assert bare.get(f"/assist/{raw}").status_code == 410
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

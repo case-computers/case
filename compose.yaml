@@ -44,6 +44,8 @@ services:
       CASE_MAX_RAM_MB: ${CASE_MAX_RAM_MB:-}
       # DESK_DEBUG=1: desktops mirror chromium/websockify logs to docker logs
       DESK_DEBUG: ${DESK_DEBUG:-}
+      # Desktop resolution (WxH or WxHxDEPTH). Default 1280x800x24.
+      DESK_RESOLUTION: ${DESK_RESOLUTION:-}
       # Optional phone notifications + assist links (see .env.example)
       CASE_NTFY_URL: ${CASE_NTFY_URL:-https://ntfy.sh}
       CASE_NTFY_TOPIC: ${CASE_NTFY_TOPIC:-}

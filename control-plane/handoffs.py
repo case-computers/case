@@ -3,18 +3,19 @@
 
 A handoff pauses a run when the machine hits something only a human can clear
 (2FA/CAPTCHA/approval). This module owns handoff lifetime and the login-resume
-bridge; deskd only executes the mechanical login/resume. LOGIN_CTX maps an
-open login handoff → the credential to resume for deskd, and is a rebuildable
-cache, when `attempt_id` is set, the AuthAttempt row is the journey source of
-truth (challenge completion does not record credential success).
+bridge; deskd only executes the mechanical login/resume. LOGIN_CTX is a
+rebuildable cache mapping an open login handoff → the credential to resume;
+when `attempt_id` is set, the AuthAttempt row owns the journey (challenge
+completion does not record credential success).
 
 Continuation modes (typed state for Assist):
   submit_value , human supplies a code/answer; we may /login/resume with it
   verify_page  , human clears a challenge in the live desk; we confirm it is gone
   wait_external, reserved (no answer path yet)
 
-Status: pending → validating → completed|failed; TTL → expired.
-Legacy `answered` is treated as completed on read for one release.
+Status: pending → validating → completed|failed; TTL → expired. All status
+writes go through store.transition_handoff (CAS + revision bump). Legacy
+`answered` is treated as completed on read for one release.
 """
 import os
 
@@ -29,7 +30,7 @@ from events import emit
 from lifecycle import get_computer
 from notify import notifier
 from store import store
-from util import new_id
+from util import new_id, row_get
 
 
 def _public_host():
@@ -66,7 +67,7 @@ def _public_status(status):
 
 
 def handoff_json(row, with_screenshot=True):
-    # OTP / free-text codes are never returned, A11: secrets absent from API answers.
+    # OTP / free-text codes are never returned: secrets stay absent from API answers.
     # Only non-secret continuation markers (approve/deny/done) may appear in `answer`.
     raw_answer = row["answer"]
     public_answer = None
@@ -76,9 +77,8 @@ def handoff_json(row, with_screenshot=True):
     d = {"id": row["id"], "computer_id": row["computer_id"], "kind": row["kind"],
          "prompt": row["prompt"], "status": _public_status(row["status"]),
          "created_at": row["created_at"], "answer": public_answer, "domain": row["domain"],
-         "continuation": row["continuation"] if "continuation" in row.keys() else None,
-         "challenge_fingerprint": (row["challenge_fingerprint"]
-                                   if "challenge_fingerprint" in row.keys() else None)}
+         "continuation": row_get(row, "continuation"),
+         "challenge_fingerprint": row_get(row, "challenge_fingerprint")}
     if with_screenshot:
         d["screenshot_png_b64"] = row["screenshot"]
     return d
@@ -107,7 +107,7 @@ def _durable_answer(kind, continuation, value):
 
 def rebuild_login_ctx():
     """After a cased restart, repopulate the in-memory login map from pending login
-    handoffs, so answering one still resumes the login instead of silently dropping it (L3).
+    handoffs, so answering one still resumes the login instead of silently dropping it.
 
     Also resets interrupted `validating` rows back to `pending`, a mid-verify crash
     must not leave the handoff stuck where neither answer nor expire can finish it cleanly.
@@ -115,7 +115,7 @@ def rebuild_login_ctx():
     for h in store.pending_login_handoffs():
         LOGIN_CTX[h["id"]] = {"computer_id": h["computer_id"], "credential": h["login_credential"]}
         if h["status"] == "validating":
-            store.set_handoff_status(h["id"], "pending", answer=None)
+            store.transition_handoff(h["id"], "pending", answer=None)
 
 
 def create_handoff(computer_row, kind, prompt, screenshot=None, login_credential=None,
@@ -169,17 +169,14 @@ def request_handoff(cid, kind, prompt):
 
 
 def _attempt_id_of(row):
-    if row is None:
-        return None
-    if hasattr(row, "keys"):
-        return row["attempt_id"] if "attempt_id" in row.keys() else None
-    return row.get("attempt_id")
+    return row_get(row, "attempt_id") if row is not None else None
 
 
 def expire_stale():
     cutoff = (datetime.now(timezone.utc) - HANDOFF_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
     for h in store.stale_pending_handoffs(cutoff):
-        store.set_handoff_status(h["id"], "expired")
+        if store.transition_handoff(h["id"], "expired") is None:
+            continue   # another writer (answer/resume) won the race; not ours to expire
         ctx = LOGIN_CTX.pop(h["id"], None)
         aid = _attempt_id_of(h)
         if aid:
@@ -237,18 +234,18 @@ def _require_open_handoff(hid):
 
 
 def _continuation_of(row):
-    cont = row["continuation"] if "continuation" in row.keys() else None
-    return cont or continuation_for(row["kind"])
+    return row_get(row, "continuation") or continuation_for(row["kind"])
 
 
 def _complete(hid, *, answer=None, value_present=False):
     # Persist only non-secret markers (approve/deny/done); OTP codes stay out of SQLite.
     row = store.get_handoff(hid)
     stored = _durable_answer(row["kind"], _continuation_of(row), answer) if row else None
-    store.set_handoff_status(hid, "completed", answer=stored)
-    emit("handoff_answered", {"handoff_id": hid, "value_present": bool(value_present),
-                              "verified": True})
-    return store.get_handoff(hid)
+    done = store.transition_handoff(hid, "completed", answer=stored)
+    if done is not None:
+        emit("handoff_answered", {"handoff_id": hid, "value_present": bool(value_present),
+                                  "verified": True})
+    return done or store.get_handoff(hid)
 
 
 def _claim_validating(row, answer):
@@ -258,10 +255,7 @@ def _claim_validating(row, answer):
     auth_attempts.claim_challenge(row["id"], rev)
     # Never park an OTP in validating.answer, soft-fail / restart paths read this row.
     stored = _durable_answer(row["kind"], _continuation_of(row), answer)
-    if stored is not None:
-        store.set_handoff_status(row["id"], "validating", answer=stored)
-    else:
-        store.set_handoff_status(row["id"], "validating", answer=None)
+    store.transition_handoff(row["id"], "validating", answer=stored)
     return store.get_handoff(row["id"])
 
 
@@ -293,7 +287,7 @@ def _finish_attempt_child(hid, hrow, *, answer=None, value_present=False, ctx=No
 def _fail_attempt_child(hid, hrow, value, ctx=None):
     LOGIN_CTX.pop(hid, None)
     stored = _durable_answer(hrow["kind"], _continuation_of(hrow), value)
-    store.set_handoff_status(hid, "failed", answer=stored)
+    store.transition_handoff(hid, "failed", answer=stored)
     aid = _attempt_id_of(hrow)
     if aid:
         try:
@@ -340,7 +334,7 @@ def _resume_and_finish(hid, ctx, value, *, value_present=True, hrow=None):
 
     # Soft fail: challenge still present / bad code / transient, human can retry.
     # Never leave a one-time code sitting in answer.
-    store.set_handoff_status(hid, "pending", answer=None)
+    store.transition_handoff(hid, "pending", answer=None)
     return store.get_handoff(hid)
 
 
@@ -371,7 +365,7 @@ def submit_handoff_value(hid, value):
         if ctx:
             return _resume_and_finish(hid, ctx, value, value_present=True, hrow=row)
         # Soft fail, stay pending for retry; never keep the OTP in SQLite.
-        store.set_handoff_status(hid, "pending", answer=None)
+        store.transition_handoff(hid, "pending", answer=None)
         return store.get_handoff(hid)
 
     if ctx:
@@ -415,7 +409,7 @@ def verify_handoff_page(hid):
     computer = get_computer(row["computer_id"])
     if _page_still_challenged(computer):
         # Never claim login success; leave LOGIN_CTX for retry.
-        store.set_handoff_status(hid, "pending", answer=None)
+        store.transition_handoff(hid, "pending", answer=None)
         return store.get_handoff(hid)
 
     aid = _attempt_id_of(row)

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Typed handoff state + verified continuation (L3 restart + Assist foundation).
+"""Typed handoff state + verified continuation (restart recovery + Assist foundation).
 Run: .venv/bin/python tests/test_handoffs.py"""
 import os
 import sys
@@ -446,6 +446,45 @@ def test_attempt_child_completion_advances_without_credential_ok():
     finally:
         store.q("DELETE FROM auth_attempts WHERE id=?", ("a_child",))
         _cleanup("h_att")
+
+
+def test_transition_handoff_bumps_revision_and_guards_terminals():
+    _cleanup("h_tr")
+    try:
+        _persist("h_tr", "otp", "code?")
+        r0 = store.get_handoff("h_tr")
+        assert int(r0["revision"] or 0) == 0
+        # Every guarded write bumps revision — the Assist poll fingerprint depends on it.
+        r1 = store.transition_handoff("h_tr", "validating", answer=None)
+        assert r1["status"] == "validating" and r1["revision"] == 1, dict(r1)
+        r2 = store.transition_handoff("h_tr", "pending", answer=None)   # soft-fail retry
+        assert r2["status"] == "pending" and r2["revision"] == 2, dict(r2)
+        r3 = store.transition_handoff("h_tr", "expired")
+        assert r3["status"] == "expired" and r3["revision"] == 3
+        # Terminal is terminal: no revival, no double-expire.
+        assert store.transition_handoff("h_tr", "pending", answer=None) is None
+        assert store.transition_handoff("h_tr", "completed") is None
+        assert store.get_handoff("h_tr")["status"] == "expired"
+    finally:
+        _cleanup("h_tr")
+
+
+def test_expire_stale_loses_race_to_a_finished_answer():
+    # Sweeper reads a stale open row, but the answer path completes it first:
+    # the expiry write must lose and never fire failure side effects.
+    _cleanup("h_race")
+    try:
+        _persist("h_race", "otp", "code?", login_credential="mycred")
+        store.q("UPDATE handoffs SET created_at=? WHERE id=?", ("2000-01-01T00:00:00Z", "h_race"))
+        stale = [store.get_handoff("h_race")]
+        with mock.patch.object(store, "stale_pending_handoffs", return_value=stale), \
+             mock.patch.object(store, "record_credential_result") as rec:
+            store.transition_handoff("h_race", "completed", answer="done")  # answer wins
+            handoffs.expire_stale()
+        assert store.get_handoff("h_race")["status"] == "completed"
+        rec.assert_not_called()
+    finally:
+        _cleanup("h_race")
 
 
 if __name__ == "__main__":

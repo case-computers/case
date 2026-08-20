@@ -88,8 +88,7 @@ def attempt_public(row):
     """Public AuthAttempt, never secrets, OTP answers, or raw proof_spec."""
     if row is None:
         return None
-    keys = row.keys() if hasattr(row, "keys") else row
-    proof_spec = row["proof_spec"] if "proof_spec" in keys else None
+    proof_spec = row_get(row, "proof_spec")
     return {
         "id": row["id"],
         "computer_id": row["computer_id"],
@@ -179,10 +178,10 @@ def _wait_payload(pub, *, changed, wait_status=None):
         st = wait_status
     elif pub["status"] in TERMINAL_STATUSES:
         st = "terminal"
-    out = {"changed": bool(changed), "wait_status": st, "attempt": pub}
-    if pub["status"] in TERMINAL_STATUSES or pub["status"] == "awaiting_human":
-        out["login_result"] = login_result(pub)
-    return out
+    # login_result on every payload: the MCP client relays it verbatim instead of
+    # keeping its own copy of the status vocabulary.
+    return {"changed": bool(changed), "wait_status": st, "attempt": pub,
+            "login_result": login_result(pub)}
 
 
 def _totp(seed, at=None):
@@ -260,7 +259,8 @@ def start_attempt(computer_id, credential_name, target_url, proof_spec=None,
 
 
 def get_attempt(attempt_id):
-    return attempt_public(_require(attempt_id))
+    pub = attempt_public(_require(attempt_id))
+    return {**pub, "login_result": login_result(pub)}
 
 
 def cancel_attempt(attempt_id, expected_revision=None):
@@ -277,7 +277,7 @@ def cancel_attempt(attempt_id, expected_revision=None):
     if hid:
         h = store.get_handoff(hid)
         if h and h["status"] in ("pending", "validating"):
-            store.set_handoff_status(hid, "failed", answer=None)
+            store.transition_handoff(hid, "failed", answer=None)
             try:
                 import handoffs  # cycle: handoffs → auth_attempts on answer paths
                 handoffs.LOGIN_CTX.pop(hid, None)
@@ -319,7 +319,7 @@ def reobserve_if_solved(attempt_id):
     if hid and pub["status"] != "awaiting_human":
         h = store.get_handoff(hid)
         if h and h["status"] in ("pending", "validating"):
-            store.set_handoff_status(hid, "completed", answer=None)
+            store.transition_handoff(hid, "completed", answer=None)
     return pub
 
 

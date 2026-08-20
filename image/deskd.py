@@ -378,9 +378,9 @@ FOCUS_CODE = (f"(()=>{{{VIS}const c=[...document.querySelectorAll('{CODE_SEL}')]
               "if(!c)return false; c.focus(); if(c.select)c.select(); return true;})()")
 PAGE_TEXT = "(document.body ? document.body.innerText.slice(0, 5000) : '')"
 
-# Generic auth observation — no website names. challenge_signals are re-derived in
-# Python (challenge_signals_from_text) so unit tests own the phrase map; JS still
-# emits the full dict shape for a self-contained CDP eval.
+# Generic auth observation — no website names. The JS only collects raw material
+# (fields, frame markers, page text); challenge_signals are computed in Python
+# (challenge_signals_from_text) so the phrase map lives in exactly one place.
 OBSERVE_AUTH_JS = r"""
 (() => {
   const vis = e => {
@@ -410,26 +410,13 @@ OBSERVE_AUTH_JS = r"""
     srcs.some(s => /captcha/i.test(s))
     || !!document.querySelector('[class*="captcha" i], [id*="captcha" i]'));
   const text = (document.body ? document.body.innerText : '').slice(0, 5000);
-  const signals = [];
-  if (/captcha|verify you.?re human|not a robot/i.test(text)) signals.push('captcha');
-  if (/two.?factor|\b2fa\b|one.?time|verification code|authentication code|enter the code|\b\d\s?-?\s?digit code/i.test(text))
-    signals.push('otp');
-  if (/approve this|check your (phone|device)|confirm (it.?s you|this sign)|waiting for approval/i.test(text))
-    signals.push('approval');
-  if (/verify your email|confirm your email|check your email|email verification|we sent .{0,40}email|click the link .{0,40}email/i.test(text))
-    signals.push('email_verify');
-  if (/\bpasskey\b|security key|webauthn|use (your )?(fingerprint|face)|biometric/i.test(text))
-    signals.push('passkey');
-  if ((recaptcha || hcaptcha || arkose || turnstile || generic_captcha) && !signals.includes('captcha'))
-    signals.push('captcha');
   return {
     href: location.href,
     ready: document.readyState === 'complete',
     title: document.title || '',
     visible_fields: {user: !!u, pass: !!p, code: !!c},
     frame_markers: {recaptcha, hcaptcha, arkose, turnstile, generic_captcha},
-    challenge_signals: signals,
-    page_state: text.slice(0, 500),
+    page_state: text,
   };
 })()
 """
@@ -478,12 +465,15 @@ def challenge_signals_from_text(text, frame_markers=None):
 
 
 def finalize_auth_observation(raw):
-    """Normalize a JS observation dict; Python owns challenge_signals + page_state cap."""
+    """Normalize a JS observation dict; Python owns challenge_signals + page_state cap.
+
+    Signals are classified over the full harvested text (up to 5000 chars);
+    page_state is capped to 500 afterwards — it is a preview, not the classifier
+    input, so a challenge phrase past char 500 still registers."""
     obs = dict(raw or {})
     page = obs.get("page_state") or ""
     if not isinstance(page, str):
         page = str(page)
-    page = page[:500]
     fm = obs.get("frame_markers") or {}
     if not isinstance(fm, dict):
         fm = {}
@@ -507,7 +497,7 @@ def finalize_auth_observation(raw):
             "generic_captcha": bool(fm.get("generic_captcha")),
         },
         "challenge_signals": challenge_signals_from_text(page, fm),
-        "page_state": page,
+        "page_state": page[:500],
     }
 
 

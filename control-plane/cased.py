@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """cased, the Case control plane.
 
-REST on loopback by default (CASE_BIND/CASE_PORT). This module is the composition root: it owns the FastAPI
-app, the (thin) route table, and startup wiring. All behaviour lives in the modules
-it delegates to, lifecycle, handoffs, scheduler, deskclient, dockerd, store, events.
+REST on loopback by default (CASE_BIND/CASE_PORT). This module is the composition
+root: the FastAPI app, the (thin) route table, and startup wiring. Behaviour lives
+in the modules it delegates to — lifecycle, handoffs, scheduler, deskclient,
+dockerd, store, events.
 """
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import hmac
 import html
 import json
@@ -42,7 +43,7 @@ from errors import ApiError
 from events import sse_gen
 from notify import notifier
 from store import store
-from util import now
+from util import now, row_get
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -51,7 +52,7 @@ async def lifespan(_app):
     Names below (sweeper, blocker_poller) are resolved when this runs, not when it
     is defined, so they may live further down the file."""
     events.set_loop(asyncio.get_running_loop())
-    handoffs.rebuild_login_ctx()          # recover pending login handoffs across a restart (L3)
+    handoffs.rebuild_login_ctx()          # recover pending login handoffs across a restart
     auth_attempts.set_captcha_auto(
         lambda row, cid, name: login_flow._try_captcha_auto(
             row, cid, name, resume=True, record=False))
@@ -80,7 +81,7 @@ async def api_error(_, e: ApiError):
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(_, e):
-    # never echo the submitted body, it can carry a secret (A5). Report only where/why.
+    # never echo the submitted body, it can carry a secret. Report only where/why.
     details = [{"loc": er.get("loc"), "msg": er.get("msg"), "type": er.get("type")}
                for er in e.errors()]
     return JSONResponse({"error": {"code": "bad_request", "message": "request validation failed",
@@ -305,176 +306,148 @@ def health():
 
 # ---------- observation & action ----------
 
+@contextmanager
+def awake(cid, wake):
+    """The shared desk-route preamble: ensure_running, then touch on success.
+
+    Every route that drives the desk must touch last_active_at — session_keeper
+    reads it to avoid navigating over a live session."""
+    row = lifecycle.ensure_running(cid, wake)
+    yield row
+    store.touch(cid)
+
+
 @app.get("/v1/computers/{cid}/screenshot")
 def screenshot(cid: str, wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    content = desk_bytes(row, "GET", "/screenshot")   # raises ApiError(423) during injection
-    store.touch(cid)
-    return Response(content, media_type="image/png")
+    with awake(cid, wake) as row:
+        # desk_bytes raises ApiError(423) during credential injection
+        return Response(desk_bytes(row, "GET", "/screenshot"), media_type="image/png")
 
 
 @app.post("/v1/computers/{cid}/action")
 def action(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    out = desk_json(row, "POST", "/action", json=body, timeout=40)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return desk_json(row, "POST", "/action", json=body, timeout=40)
 
 
 @app.post("/v1/computers/{cid}/exec")
 def exec_(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    if "command" not in body:
-        raise ApiError(400, "bad_request", "body needs 'command'")
-    timeout = min(int(body.get("timeout_s") or 30), 600)
-    out = desk_json(row, "POST", "/exec", json=body, timeout=timeout + 15)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        if "command" not in body:
+            raise ApiError(400, "bad_request", "body needs 'command'")
+        timeout = min(int(body.get("timeout_s") or 30), 600)
+        return desk_json(row, "POST", "/exec", json=body, timeout=timeout + 15)
 
 
 @app.post("/v1/computers/{cid}/eval")
 def eval_(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    if "expression" not in body:
-        raise ApiError(400, "bad_request", "body needs 'expression'")
-    timeout = min(int(body.get("timeout_s") or 20), 120)
-    out = desk_json(row, "POST", "/eval", json=body, timeout=timeout + 15)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        if "expression" not in body:
+            raise ApiError(400, "bad_request", "body needs 'expression'")
+        timeout = min(int(body.get("timeout_s") or 20), 120)
+        return desk_json(row, "POST", "/eval", json=body, timeout=timeout + 15)
 
 
 @app.post("/v1/computers/{cid}/navigate")
 def navigate_(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    if "url" not in body:
-        raise ApiError(400, "bad_request", "body needs 'url'")
-    timeout = max(1, min(int(body.get("timeout_s") or 30), 120))   # never navigate then
-    out = navigate(row, body["url"], timeout)                      # report failure at t=0
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        if "url" not in body:
+            raise ApiError(400, "bad_request", "body needs 'url'")
+        timeout = max(1, min(int(body.get("timeout_s") or 30), 120))   # never navigate then
+        return navigate(row, body["url"], timeout)                     # report failure at t=0
 
 
 # ---------- element-level browsing (browse.py; control-plane composition) ----------
 
 @app.get("/v1/computers/{cid}/page")
 def page_(cid: str, wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    out = browse.snapshot(row)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return browse.snapshot(row)
 
 
 @app.post("/v1/computers/{cid}/click")
 def click_(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    if "ref" not in body:
-        raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
-    out = browse.click_element(row, int(body["ref"]), name=body.get("name"),
-                               text=body.get("text"),
-                               screenshot=bool(body.get("screenshot")))
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        if "ref" not in body:
+            raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
+        return browse.click_element(row, int(body["ref"]), name=body.get("name"),
+                                    text=body.get("text"),
+                                    screenshot=bool(body.get("screenshot")))
 
 
 @app.post("/v1/computers/{cid}/fill")
 def fill_(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    out = browse.fill(row, body.get("fields"), submit=bool(body.get("submit")))
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return browse.fill(row, body.get("fields"), submit=bool(body.get("submit")))
 
 
 @app.post("/v1/computers/{cid}/wait")
 def wait_(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    timeout = max(1, min(int(body.get("timeout_s") or 30), 120))
-    out = browse.wait_for(row, selector=body.get("selector"), text=body.get("text"),
-                          gone=bool(body.get("gone")),
-                          network_idle=bool(body.get("network_idle")), timeout_s=timeout)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        timeout = max(1, min(int(body.get("timeout_s") or 30), 120))
+        return browse.wait_for(row, selector=body.get("selector"), text=body.get("text"),
+                               gone=bool(body.get("gone")),
+                               network_idle=bool(body.get("network_idle")),
+                               timeout_s=timeout)
 
 
 @app.post("/v1/computers/{cid}/teach-tick")
 def teach_tick_(cid: str, wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    out = browse.teach_tick(row)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return browse.teach_tick(row)
 
 
 @app.post("/v1/computers/{cid}/tabs")
 def tabs_(cid: str, body: dict = Body(default={}), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    out = browse.tabs(row, action=body.get("action") or "list",
-                      target_id=body.get("target_id"), url=body.get("url"))
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return browse.tabs(row, action=body.get("action") or "list",
+                           target_id=body.get("target_id"), url=body.get("url"))
 
 
 @app.put("/v1/computers/{cid}/files", status_code=201)
 async def file_put(cid: str, path: str, request: Request, wake: bool = False):
     data = await request.body()
-    row = lifecycle.ensure_running(cid, wake)
-    out = desk_json(row, "PUT", "/file", params={"path": path}, data=data, timeout=120)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return desk_json(row, "PUT", "/file", params={"path": path}, data=data, timeout=120)
 
 
 @app.get("/v1/computers/{cid}/files")
 def file_get(cid: str, path: str, wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    content = desk_bytes(row, "GET", "/file", params={"path": path}, timeout=120)
-    store.touch(cid)
-    return Response(content, media_type="application/octet-stream")
+    with awake(cid, wake) as row:
+        content = desk_bytes(row, "GET", "/file", params={"path": path}, timeout=120)
+        return Response(content, media_type="application/octet-stream")
 
 
 # ---------- network capture ----------
 
 @app.post("/v1/computers/{cid}/capture")
 def capture_start(cid: str, body: dict = Body(...), wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    if "pattern" not in body:
-        raise ApiError(400, "bad_request", "body needs 'pattern'")
-    pattern = body["pattern"]
-    if len(pattern) > 200:
-        raise ApiError(400, "bad_request", "pattern too long")
-    out = desk_json(row, "POST", "/capture/start", json=body, timeout=20)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        if "pattern" not in body:
+            raise ApiError(400, "bad_request", "body needs 'pattern'")
+        if len(body["pattern"]) > 200:
+            raise ApiError(400, "bad_request", "pattern too long")
+        return desk_json(row, "POST", "/capture/start", json=body, timeout=20)
 
 
 @app.get("/v1/computers/{cid}/capture")
 def capture_get(cid: str, wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    out = desk_json(row, "GET", "/capture", timeout=20)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return desk_json(row, "GET", "/capture", timeout=20)
 
 
 @app.delete("/v1/computers/{cid}/capture")
 def capture_delete(cid: str, wake: bool = False):
-    row = lifecycle.ensure_running(cid, wake)
-    out = desk_json(row, "DELETE", "/capture", timeout=20)
-    store.touch(cid)
-    return out
+    with awake(cid, wake) as row:
+        return desk_json(row, "DELETE", "/capture", timeout=20)
 
 
 # ---------- credentials & login ----------
 
 def credential_json(row):
-    keys = row.keys() if hasattr(row, "keys") else row
-    proof_raw = row["proof_spec"] if "proof_spec" in keys else None
-    hosts_raw = row["verification_hosts"] if "verification_hosts" in keys else None
-    probe = row["probe_url"] if "probe_url" in keys else None
-    hosts = None
-    if hosts_raw:
-        try:
-            hosts = json.loads(hosts_raw) if isinstance(hosts_raw, str) else hosts_raw
-        except (TypeError, ValueError):
-            hosts = None
-        if not isinstance(hosts, list):
-            hosts = None
+    proof_raw = row_get(row, "proof_spec")
+    hosts = store.json_list(row_get(row, "verification_hosts"))
+    probe = row_get(row, "probe_url")
     return {"name": row["name"], "username": row["username"],
             "domains": json.loads(row["domains"]), "has_totp": row["totp_seed"] is not None,
             "has_otp_phone": row["otp_phone"] is not None, "created_at": row["created_at"],
@@ -554,10 +527,8 @@ def fill_form(token: str):
     if not row:
         return HTMLResponse(links.GONE_HTML, status_code=410)
     comp = store.get_computer(row["computer_id"])
-    # A bare id ("c_100c5af520") reads as machine noise, so a human skims past it and
-    # cannot tell they are filling the wrong computer's vault. Say the state and the id
-    # too: an agent that never named the computer leaves name == id, and then the state
-    # is the only thing distinguishing this box's computers from each other.
+    # Label with name, id and state so a human can tell which computer's vault
+    # they are filling — a bare id reads as machine noise.
     if comp:
         label = comp["name"] or comp["id"]
         if comp["name"] and comp["name"] != comp["id"]:
@@ -606,14 +577,12 @@ def _assist_cookie(request):
     return _cookie_value(request.headers.get("cookie"), assist.COOKIE)
 
 
-def _assist_set_cookie(view, set_sess):
+def _assist_set_cookie(set_sess):
     # Same-origin form submissions must retain provenance for check_same_origin;
     # this policy still strips the emailed Assist token on cross-origin requests.
     headers = {"Cache-Control": "no-store", "Referrer-Policy": "same-origin"}
     if set_sess:
-        bound = view["bound"]
-        headers["Set-Cookie"] = assist.session_cookie_header(
-            set_sess, max_age=assist.session_max_age(bound["id"]) or assist.SESSION_TTL_S)
+        headers["Set-Cookie"] = assist.session_cookie_header(set_sess)
     return headers
 
 
@@ -632,7 +601,7 @@ def assist_get(token: str, request: Request):
         return HTMLResponse(assist.GONE_HTML, status_code=410,
                             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
     body = assist.render_page(view, token)
-    return HTMLResponse(body, headers=_assist_set_cookie(view, set_sess))
+    return HTMLResponse(body, headers=_assist_set_cookie(set_sess))
 
 
 @app.get("/assist/{token}/state")
@@ -646,7 +615,7 @@ def assist_state(token: str, request: Request):
                                 status_code=410,
                                 headers={"Cache-Control": "no-store"})
         raise
-    headers = _assist_set_cookie(view, set_sess)
+    headers = _assist_set_cookie(set_sess)
     return JSONResponse(assist.state_payload(view), headers=headers)
 
 

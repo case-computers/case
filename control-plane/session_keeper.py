@@ -117,7 +117,7 @@ def _recently_active(row):
     """Live session the agent/human is using, do not navigate over them."""
     if not row or row["state"] != "running" or BUSY_S <= 0:
         return False
-    ts = _parse_iso(row["last_active_at"] if "last_active_at" in row.keys() else None)
+    ts = _parse_iso(row_get(row, "last_active_at"))
     if not ts:
         return False
     age = (datetime.now(timezone.utc) - ts).total_seconds()
