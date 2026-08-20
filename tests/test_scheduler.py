@@ -49,7 +49,9 @@ def test_jitter_stays_bounded():
     for _ in range(20):
         nxt = _dt(compute_next("interval", "0", 600))
         delta = (nxt - base).total_seconds()
-        assert 0 <= delta <= 600 + 5, delta
+        # -1: compute_next stores whole seconds, so truncation can land up to
+        # 0.999s before `base` when the jitter draw is 0.
+        assert -1 <= delta <= 600 + 5, delta
 
 
 def test_bad_schedule_spec_raises_bad_request():
