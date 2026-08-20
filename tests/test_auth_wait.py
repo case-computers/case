@@ -310,6 +310,30 @@ def test_wait_timeout_reobserves_desk_solved_challenge():
     assert store.get_handoff("h_desk_solved")["status"] == "completed"
 
 
+def test_wait_timeout_settings_page_mentions_2fa_still_advances():
+    # Real case: logged-in accounts.hetzner.com settings page lists
+    # "Two-factor authentication" in its sidebar → text signal says otp, but no
+    # code input is visible. That is a solved login, not an open challenge.
+    _cleanup()
+    aid, rev = _awaiting_with_child("h_settings_page")
+    settings = {"ok": True, "observation": {
+        "href": "https://accounts.example.com/account/mail",
+        "challenge_signals": ["otp"],
+        "visible_fields": {"user": True, "pass": True, "code": False}}}
+
+    async def go():
+        events.set_loop(asyncio.get_running_loop())
+        with mock.patch("lifecycle.get_computer", return_value=COMP), \
+             mock.patch("deskclient.observe_auth", return_value=settings):
+            return await auth_attempts.wait_attempt(
+                aid, after_revision=rev, timeout_s=1)
+
+    out = _run(go())
+    assert out["changed"] is True, out
+    assert out["attempt"]["status"] == "unverified", out
+    assert store.get_handoff("h_settings_page")["status"] == "completed"
+
+
 def test_wait_timeout_challenge_still_up_keeps_waiting():
     _cleanup()
     aid, rev = _awaiting_with_child("h_still_up")

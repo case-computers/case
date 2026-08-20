@@ -482,11 +482,17 @@ def _classify_kind(observation):
     signals = obs.get("challenge_signals") or []
     if not isinstance(signals, list):
         signals = []
+    vf = obs.get("visible_fields") or {}
+    if not isinstance(vf, dict):
+        vf = {}
     for tag in _SIGNAL_PRIORITY:
         if tag in signals:
+            # Text alone can't claim an OTP challenge: logged-in security-settings
+            # pages say "Two-factor authentication" too. Require a code input.
+            if tag == "otp" and not vf.get("code"):
+                continue
             return tag
-    vf = obs.get("visible_fields") or {}
-    if isinstance(vf, dict) and vf.get("code") and not vf.get("pass"):
+    if vf.get("code") and not vf.get("pass"):
         return "otp"
     return None
 
