@@ -4,6 +4,30 @@ Case gives AI agents a durable Linux desktop (Chromium, files, logins) on any ma
 with Docker. Sleep, wake, or reboot: the identity stays on the volume. You bring the
 brain (Claude, Cursor, Codex, or the Drive UI with your provider key).
 
+![Case demo](.github/demo.gif)
+
+<!-- Full demo video: drag case-computer-demo.mp4 into this file in the GitHub
+     web editor and replace this comment with the generated user-images link. -->
+
+What the agent gets, over MCP:
+
+- **A real desktop**: navigate, snapshot numbered clickable elements, click/fill
+  by ref, exec, files, network capture — no coordinate guessing.
+- **Vault logins**: the human saves a credential once (encrypted, via a one-time
+  link); the machine types it into the site's own login page. The agent and the
+  API never see the password.
+- **Human handoff**: 2FA codes, captchas and approvals pause the run and reach a
+  human — in Drive, or on their phone via a one-shot Assist link (ntfy).
+- **Skills**: the agent saves a completed task as a SKILL.md on the computer and
+  follows it next run. Procedural memory that survives reboots.
+- **Schedules**: recurring headless runs on the computer's own identity.
+
+```
+Drive UI (4174) ──┐
+agent / MCP (8788)┼─→ cased (8787: REST, vault, lifecycle) ─→ deskd (in-container:
+bin/case ─────────┘                                            display, input, Chromium)
+```
+
 ## Quick start
 
 Needs Docker 20.10+ with Compose v2.
@@ -154,9 +178,7 @@ No Docker:
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 for t in tests/test_*.py; do [ "$t" = tests/test_acceptance.py ] || .venv/bin/python "$t"; done
-node web/web-ui/test_serve.mjs
-node web/web-ui/test_nav.mjs
-node web/web-ui/test_deploy.mjs
+(cd web && npm ci && node web-ui/test_serve.mjs && node web-ui/test_nav.mjs && node web-ui/test_deploy.mjs)
 ```
 
 Acceptance tests need a running stack (`tests/test_acceptance.py`).
