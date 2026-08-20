@@ -126,61 +126,27 @@ def xdo(*args, timeout=15):
     subprocess.run(["xdotool", *args], env=denv(), check=True, timeout=timeout)
 
 
-def _glide_points(x0, y0, x1, y1):
-    """Eased waypoints so the pointer visibly travels in the live view instead
-    of teleporting. Short hops stay a single move."""
-    dist = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
-    if dist < 40:
-        return [(x1, y1)]
-    n = min(12, max(6, int(dist // 100)))
-    pts = []
-    for i in range(1, n + 1):
-        e = 1 - (1 - i / n) ** 3   # ease-out: fast start, soft landing
-        pts.append((round(x0 + (x1 - x0) * e), round(y0 + (y1 - y0) * e)))
-    return pts
-
-
-def mouse_xy():
-    out = subprocess.run(["xdotool", "getmouselocation"], env=denv(), check=True,
-                         timeout=5, capture_output=True, text=True).stdout
-    m = re.search(r"x:(\d+) y:(\d+)", out)
-    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-
-
-def glide(x, y):
-    """Animated mousemove to (x,y): one xdotool invocation chaining
-    mousemove/sleep, ~0.1-0.25s total. Falls back to a plain move."""
-    try:
-        x0, y0 = mouse_xy()
-        chain = []
-        for px, py in _glide_points(x0, y0, int(x), int(y)):
-            chain += ["mousemove", str(px), str(py), "sleep", "0.02"]
-        xdo(*chain[:-2])
-    except Exception:
-        xdo("mousemove", str(int(x)), str(int(y)))
-
-
 def do_action(a):
     t = a["type"]
     if t == "click":
         btn = {"left": "1", "middle": "2", "right": "3"}[a.get("button", "left")]
-        glide(a["x"], a["y"])
+        xdo("mousemove", str(int(a["x"])), str(int(a["y"])))
         xdo("click", btn)
     elif t == "double_click":
-        glide(a["x"], a["y"])
+        xdo("mousemove", str(int(a["x"])), str(int(a["y"])))
         xdo("click", "--repeat", "2", "--delay", "80", "1")
     elif t == "move":
-        glide(a["x"], a["y"])
+        xdo("mousemove", str(int(a["x"])), str(int(a["y"])))
     elif t == "drag":
         f, to = a["from"], a["to"]
-        glide(f["x"], f["y"])
+        xdo("mousemove", str(int(f["x"])), str(int(f["y"])))
         xdo("mousedown", "1")
         xdo("mousemove", "--sync", str(int((f["x"] + to["x"]) // 2)), str(int((f["y"] + to["y"]) // 2)))
         xdo("mousemove", "--sync", str(int(to["x"])), str(int(to["y"])))
         time.sleep(0.05)
         xdo("mouseup", "1")
     elif t == "scroll":
-        glide(a["x"], a["y"])
+        xdo("mousemove", str(int(a["x"])), str(int(a["y"])))
         dy = int(a["dy"])
         if dy:
             xdo("click", "--repeat", str(min(abs(dy), 50)), "--delay", "40", "5" if dy > 0 else "4")

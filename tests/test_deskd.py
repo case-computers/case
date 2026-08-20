@@ -17,22 +17,6 @@ sys.modules.setdefault("websocket", types.ModuleType("websocket"))
 import deskd  # noqa: E402
 
 
-def test_glide_points_end_on_target_and_ease():
-    pts = deskd._glide_points(0, 0, 600, 400)
-    assert pts[-1] == (600, 400)
-    assert 6 <= len(pts) <= 12
-    # ease-out: first hop covers more ground than the last
-    d = lambda p, q: ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) ** 0.5
-    assert d((0, 0), pts[0]) > d(pts[-2], pts[-1])
-    # monotonic approach — never overshoots past the target
-    dists = [d(p, (600, 400)) for p in pts]
-    assert dists == sorted(dists, reverse=True)
-
-
-def test_glide_points_short_hop_is_single_move():
-    assert deskd._glide_points(100, 100, 110, 130) == [(110, 130)]
-
-
 # ---- VIS: X keeps an opacity:0 password input on the email step; offsetParent alone
 # treats it as visible and makes login incorrectly one-step. ----
 
