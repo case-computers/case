@@ -693,17 +693,19 @@ async function chat(req, res) {
     : Promise.race([start(), goneP.then(() => ({ ok: false, error: 'stopped by user', act }))]);
   emit({ type: 'start', computer_id: id, thread_id: thread.id, title: thread.title, agent: thread.agent, model, effort });
   let vault = '(none)';
+  let cname = '';
   try {
     const cr = await api('GET', `/computers/${encodeURIComponent(id)}`, { timeoutMs: 6000 });
     const names = (cr.json?.credentials || []).map((c) => (typeof c === 'string' ? c : c.name)).filter(Boolean);
     if (names.length) vault = names.join(', ');
+    cname = cr.json?.name || '';
   } catch { /* prompt still usable without the list */ }
   const claim = () => {
     if (thread.agent) return;
     thread.agent = id;
     emit({ type: 'claim', thread_id: thread.id, agent: id });
   };
-  const dev = { role: 'developer', content: `You operate Case computer ${id} via tools. Loop: computer_navigate, then computer_snapshot to see numbered clickable elements, then computer_click_element/computer_fill by ref. One snapshot per navigation or state change is enough — refs stay valid until the page changes, so several clicks can follow one snapshot. computer_wait_for instead of polling. Read page text with computer_eval document.body.innerText. Screenshots only for visual layout. Coordinates are 1280x800. Login walls: computer_login(credential=<vault name>, url=current page) — never ask the user for a password or type into password fields. Vault names on this computer: ${vault}. On handoff_pending, immediately auth_attempt_wait. You get ${ROUNDS} tool steps per turn; the conversation continues across turns, so if you run out say exactly where you stopped. Short final answer.` };
+  const dev = { role: 'developer', content: `You operate Case computer ${id}${cname ? ` (named "${cname}" — that's you when the user addresses it)` : ''} via tools. Loop: computer_navigate, then computer_snapshot to see numbered clickable elements, then computer_click_element/computer_fill by ref. One snapshot per navigation or state change is enough — refs stay valid until the page changes, so several clicks can follow one snapshot. computer_wait_for instead of polling. Read page text with computer_eval document.body.innerText. Screenshots only for visual layout. Coordinates are 1280x800. Login walls: computer_login(credential=<vault name>, url=current page) — never ask the user for a password or type into password fields. Vault names on this computer: ${vault}. On handoff_pending, immediately auth_attempt_wait. You get ${ROUNDS} tool steps per turn; the conversation continues across turns, so if you run out say exactly where you stopped. Short final answer.` };
   const hist = thread;
   const turnStart = hist.items.length;
   hist.items.push({ role: 'user', content: inputText });
