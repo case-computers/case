@@ -4,9 +4,7 @@ Case gives AI agents a durable Linux desktop (Chromium, files, logins) on any ma
 with Docker. Sleep, wake, or reboot: the identity stays on the volume. You bring the
 brain (Claude, Cursor, Codex, or the Drive UI with your provider key).
 
-[![Case demo](.github/demo.gif)](https://github.com/user-attachments/assets/ba42fc00-7b33-440b-9c2e-f6930afc57fc)
-
-<p align="center"><a href="https://github.com/user-attachments/assets/ba42fc00-7b33-440b-9c2e-f6930afc57fc">▶ watch the full demo (2 min)</a></p>
+![Case demo](.github/demo.gif)
 
 What the agent gets, over MCP:
 
