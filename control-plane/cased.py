@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""cased, Case control plane (API_SPEC.md §3).
+"""cased, the Case control plane.
 
 REST on loopback by default (CASE_BIND/CASE_PORT). This module is the composition root: it owns the FastAPI
 app, the (thin) route table, and startup wiring. All behaviour lives in the modules
@@ -12,9 +12,6 @@ import hmac
 import html
 import json
 import os
-import re
-import secrets
-import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -97,98 +94,6 @@ async def internal_error(_, e):
                         status_code=500)
 
 
-# ---------- the console door ----------
-# Caddy's `handle /console/*` stamps `X-Case-Door: console` with header_up, which
-# REPLACES any client-supplied value, a browser cannot forge its way past this.
-# A request wearing that header may reach exactly the routes below and nothing else:
-# not exec, not eval, not files, not capture, not login, not computer-create, not the
-# plaintext-credentials route that /fill exists specifically to avoid, and not the
-# link routes (which would let a browser token revoke everyone else's access or renew
-# its own indefinitely). A browser token is not an agent token.
-#
-# The policy lives here rather than in Caddy: one list, in Python, unit-testable,
-# able to see method and path. A Caddy path-matcher would be a second copy of it in
-# a language with no tests.
-#
-# Declared ABOVE audit_mw on purpose. Starlette makes the LAST-declared middleware the
-# outermost, so audit_mw wraps this one and a request this guard rejects is still
-# written to the audit log, which is exactly the request worth having a record of.
-CONSOLE_ROUTES = [
-    ("GET",    re.compile(r"^/v1/computers$")),
-    ("GET",    re.compile(r"^/v1/runs$")),
-    ("GET",    re.compile(r"^/v1/runs/[^/]+/screenshot$")),
-    ("GET",    re.compile(r"^/v1/credentials$")),
-    ("GET",    re.compile(r"^/v1/handoffs$")),
-    ("POST",   re.compile(r"^/v1/handoffs/[^/]+/answer$")),
-    ("POST",   re.compile(r"^/v1/computers/[^/]+/wake$")),
-    ("POST",   re.compile(r"^/v1/computers/[^/]+/links$")),   # fill|vnc only, see mint_link
-    ("DELETE", re.compile(r"^/v1/computers/[^/]+$")),
-    ("GET",    re.compile(r"^/v1/connect$")),                 # one-shot MCP paste reveal
-    ("POST",   re.compile(r"^/v1/mcp/rotate$")),             # mint new cs_, spare caller console
-]
-DOOR_BLOCKED = {"error": {"code": "not_found", "message": "not_found"}}
-
-# Door-write helper (root via sudoers). Overridable in tests.
-DOOR_WRITE_BIN = os.environ.get("CASE_DOOR_WRITE", "/usr/local/bin/case-door-write")
-# Hosted boxes set this in /etc/caddy/case.env. Empty on a self-hosted box:
-# there is no console to go back to, so the Back button is simply dropped.
-DEFAULT_CONSOLE_ORIGIN = os.environ.get("CASE_CONSOLE_ORIGIN", "")
-TOKEN_RE = re.compile(r"^cs_[0-9a-f]{32}$")
-HOST_RE = links.HOSTNAME  # keep in sync: one hostname regex, owned by links.py
-
-
-def _link_token(request: Request):
-    """The console Link token from Authorization, if any. Used to spare the caller
-    on rotate, never logged."""
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("link "):
-        return auth[5:].strip() or None
-    return None
-
-
-def _paste_payload(host, token, seen_at=None):
-    return {
-        "host": host,
-        "token": token,
-        "seen_at": seen_at,
-        # Three shapes of ONE url, and `url` leads. claude.ai and Claude Desktop's
-        # connector UI take a URL and nothing else, no header field exists, so the
-        # bearer shapes these used to emit were usable only by someone who already had
-        # Claude Code. The token rides the path instead (deploy/Caddyfile @urltoken).
-        "paste": {
-            "url": f"https://{host}/mcp/{token}",
-            "claude": f"claude mcp add --transport http case https://{host}/mcp/{token}",
-            "json": ('{ "mcpServers": { "case": { "type": "http", '
-                     f'"url": "https://{host}/mcp/{token}" }} }} }}'),
-        } if token else None,
-    }
-
-
-def _door_write(host, token, origin):
-    """Rewrite case.env + restart caddy. Returns None on success, error string on failure."""
-    body = (f"CASE_MCP_HOST={host}\n"
-            f"CASE_MCP_TOKEN={token}\n"
-            f"CASE_CONSOLE_ORIGIN={origin}\n")
-    try:
-        r = subprocess.run(
-            ["sudo", "-n", DOOR_WRITE_BIN],
-            input=body, text=True, capture_output=True, timeout=60)
-    except FileNotFoundError:
-        return "door-write binary missing — install case-door-write + sudoers"
-    except subprocess.TimeoutExpired:
-        return "door-write timed out"
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
-        # never echo token-bearing stderr into API if helper misbehaves, helpers
-        # are written not to print secrets; still truncate hard.
-        return err[:200]
-    return None
-
-
-def _new_mcp_token():
-    return "cs_" + secrets.token_hex(16)
-
-
 def case_token():
     """Optional share token. Empty = open on the bind address (laptop default)."""
     return (os.environ.get("CASE_TOKEN") or "").strip()
@@ -220,25 +125,6 @@ async def token_guard(request: Request, call_next):
     return await call_next(request)
 
 
-@app.middleware("http")
-async def console_door_guard(request: Request, call_next):
-    # No header = loopback (bin/case, the operator) or the agent's own path through
-    # case-mcp. Both unchanged by this.
-    if request.headers.get("x-case-door") == "console":
-        # Starlette answers HEAD from every GET route; a reader that may GET may HEAD.
-        method = "GET" if request.method == "HEAD" else request.method
-        path = request.url.path
-        if not any(m == method and rx.match(path) for m, rx in CONSOLE_ROUTES):
-            return JSONResponse(status_code=404, content=DOOR_BLOCKED)
-    return await call_next(request)
-
-
-def from_console(request):
-    """True when Caddy's /console door stamped this request. Routes use it to demand
-    more of a browser than of the operator on loopback."""
-    return request.headers.get("x-case-door") == "console"
-
-
 # ---------- audit log ----------
 # One JSONL line per API call, ~/.case/audit/<date>.jsonl. Answers "what did the
 # agent do on this machine" without agents self-logging transcripts. Sessions are
@@ -247,14 +133,13 @@ def from_console(request):
 # and request bodies that can carry secrets are redacted, secrets never hit disk.
 # Redacted routes: /credentials (password/TOTP), /answer (OTP codes relayed by the
 # human), /files (uploaded file contents may hold tokens), /fill (the human
-# credential form posts the password itself). Matches API_SPEC §5.
+# credential form posts the password itself).
 
 def _redacted(path):
     return ("/credentials" in path or path.endswith("/answer")
             or path.endswith("/files") or path.startswith("/fill/")
             or path.endswith("/fill")   # agent form-fill bodies carry user data
-            or path.startswith("/assist/")
-            or path.endswith("/connect") or "/mcp/" in path)
+            or path.startswith("/assist/"))
 
 
 @app.middleware("http")
@@ -381,17 +266,8 @@ def get_computer_ep(cid: str):
 
 
 @app.delete("/v1/computers/{cid}", status_code=204)
-def delete_computer(cid: str, request: Request, body: dict = Body(default=None)):
-    row = lifecycle.get_computer(cid)
-    # Through the console door this is the most destructive thing a browser can do: it
-    # destroys the volume, and the volume is the identity. A client-side confirm() is
-    # not a control, so the name has to come back over the wire, one mis-aimed click
-    # on a link that was forwarded, screenshotted or left open cannot do this. Loopback
-    # (bin/case rm, the operator) is unchanged.
-    if from_console(request) and (body or {}).get("name") != row["name"]:
-        raise ApiError(400, "confirm_name",
-                       "deleting a computer destroys its volume — send "
-                       "{\"name\": \"<the computer's name>\"} to confirm")
+def delete_computer(cid: str):
+    lifecycle.get_computer(cid)
     lifecycle.destroy(cid)
     return Response(status_code=204)
 
@@ -638,7 +514,7 @@ def list_credentials(cid: str):
 
 @app.get("/v1/credentials")
 def list_all_credentials():
-    """Account-wide vault view for the console's CREDENTIALS tab. Still credential_json,
+    """Vault view across every computer on the box. Still credential_json,
     so this widens the audience, never the shape."""
     names = store.computer_names()
     return {"credentials": [{**credential_json(r), "computer_id": r["computer_id"],
@@ -657,9 +533,8 @@ def delete_credential(cid: str, name: str):
 
 # ---------- human links (fill + desk) ----------
 # Minted URLs are the only human auth on a box: no accounts, no sessions.
-# Minting stays loopback-only (bin/case or the Drive UI), /v1 is deliberately
-# NOT behind the public bearer door, because the
-# agent's token must not be able to answer handoffs or mint its own links.
+# Minting stays loopback-only (bin/case), because the agent's token must not
+# be able to answer handoffs or mint its own links.
 
 @app.post("/v1/computers/{cid}/links", status_code=201)
 def mint_link(cid: str, body: dict = Body(...)):
@@ -673,137 +548,11 @@ def mint_link(cid: str, body: dict = Body(...)):
     return links.mint(cid, kind, ttl)
 
 
-@app.post("/v1/links", status_code=201)
-def mint_box_link(body: dict = Body(...)):
-    """Box-scoped, console only. A console link belongs to the box, not to any one
-    computer: POST /v1/computers/{cid}/links 404s on a box with no computers, which is
-    exactly the state a brand-new box is in and exactly when the dashboard matters most.
-
-    Console is deliberately NOT accepted by the computer-scoped route, so a console
-    token, which is allowed to reach that route, to mint fill/vnc links, can never
-    mint itself a fresh console token and extend its own access forever."""
-    if body.get("kind") != "console":
-        raise ApiError(400, "bad_kind", "box-scoped links are console only")
-    # No ttl_s: console_check slides the expiry back out to the full TTL on every
-    # successful use, so any value here would be silently discarded on first load.
-    if "ttl_s" in body:
-        raise ApiError(400, "bad_request",
-                       "console links do not take ttl_s — every use slides the expiry")
-    return links.mint(None, "console")
-
-
-@app.delete("/v1/links")
-def revoke_links():
-    """Kill every outstanding human link on this box. MCP rotate calls it:
-    a link token is a bearer capability too, so rotate must mean all of them."""
-    return {"burned": store.burn_all_links()}
-
-
-@app.get("/v1/connect")
-def connect_reveal():
-    """One-shot MCP paste-line for the console Connect modal. Consumes the pending
-    Fernet copy; a second GET returns host + seen_at with token null."""
-    st = store.mcp_token_status()
-    host = st.get("host")
-    token, seen_at = store.mcp_token_take()
-    if not host:
-        # never seeded, still a 200 so the modal can say "ask the operator"
-        return _paste_payload(None, None, seen_at)
-    if token:
-        return _paste_payload(host, token, None)
-    return _paste_payload(host, None, seen_at)
-
-
-@app.post("/v1/mcp/seed")
-def mcp_seed(request: Request, body: dict = Body(...)):
-    """Loopback-only: writes the reveal copy after the MCP door is written. Never on the
-    console door, a browser Link must not deposit an arbitrary bearer."""
-    if from_console(request):
-        raise ApiError(404, "not_found", "not_found")
-    token = (body.get("token") or "").strip()
-    host = (body.get("host") or "").strip()
-    origin = (body.get("origin") or DEFAULT_CONSOLE_ORIGIN).strip()
-    if not TOKEN_RE.match(token):
-        raise ApiError(400, "bad_request", "token must be cs_ + 32 hex")
-    if not HOST_RE.match(host):
-        raise ApiError(400, "bad_request", "host must be a hostname")
-    if not origin.startswith("https://"):
-        raise ApiError(400, "bad_request", "origin must be an https URL")
-    store.mcp_token_put(token, host=host, origin=origin)
-    return {"ok": True}
-
-
-@app.post("/v1/mcp/rotate")
-def mcp_rotate(request: Request, body: dict = Body(...)):
-    """Console door: mint a new cs_, rewrite Caddy env, burn fill/desk links, spare
-    the caller's console Link, return the new paste once."""
-    if (body or {}).get("confirm") != "rotate":
-        raise ApiError(400, "confirm_rotate", "body must be {\"confirm\":\"rotate\"}")
-    st = store.mcp_token_status()
-    host = st.get("host")
-    origin = st.get("origin") or DEFAULT_CONSOLE_ORIGIN
-    if not host:
-        # fall back to the public Host header (console door keeps the FQDN)
-        host = (request.headers.get("host") or "").split(":")[0].strip().lower()
-    if not HOST_RE.match(host or ""):
-        raise ApiError(400, "bad_request", "box has no seeded host; POST /v1/mcp/seed with host first")
-    token = _new_mcp_token()
-    err = _door_write(host, token, origin)
-    if err:
-        raise ApiError(503, "door_write_failed", err)
-    caller = _link_token(request)
-    burned = store.burn_all_links(except_token=caller)
-    # Put then immediately take: the take is what stamps seen_at, so a reload of
-    # /v1/connect correctly says "already shown". We build the payload from the
-    # plaintext we already hold, so a concurrent /v1/connect winning the take
-    # cannot turn a completed rotation into a 500.
-    store.mcp_token_put(token, host=host, origin=origin)
-    store.mcp_token_take()
-    out = _paste_payload(host, token, None)
-    out["burned_links"] = burned
-    out["warning"] = ("old MCP paste-line is dead; outstanding /fill and /desk links "
-                      "were revoked. this console session stays up.")
-    return out
-
-
-def _fill_box_host(request: Request):
-    """Host for the console ?box= param.
-
-    Prefer box_meta (what mcp/seed recorded), then CASE_MCP_HOST,
-    then the request host so a mis-set env still sends the human home.
-    """
-    st = store.mcp_token_status()
-    return (st.get("host")
-            or os.environ.get("CASE_MCP_HOST")
-            or (request.url.hostname if request else None)
-            or "")
-
-
-def _fill_console_origin():
-    """Origin the console bookmark was minted against.
-
-    DEFAULT_CONSOLE_ORIGIN is import-time env only, cased does not load
-    /etc/caddy/case.env. Preview / non-default boxes store the live origin in
-    box_meta at seed time; that is the origin whose sessionStorage holds the
-    console Link token, so the Back button must use it (same source mcp_rotate
-    uses when rewriting case.env).
-    """
-    return store.mcp_token_status().get("origin") or DEFAULT_CONSOLE_ORIGIN
-
-
-def _fill_page(page_html, request: Request, status_code=200):
-    """DONE/GONE pages carry a Back-to-console button when we know the box host."""
-    return HTMLResponse(
-        links.with_console_back(page_html, _fill_box_host(request),
-                                origin=_fill_console_origin()),
-        status_code=status_code)
-
-
 @app.get("/fill/{token}")
-def fill_form(token: str, request: Request):
+def fill_form(token: str):
     row = links.valid(token, "fill")
     if not row:
-        return _fill_page(links.GONE_HTML, request, status_code=410)
+        return HTMLResponse(links.GONE_HTML, status_code=410)
     comp = store.get_computer(row["computer_id"])
     # A bare id ("c_100c5af520") reads as machine noise, so a human skims past it and
     # cannot tell they are filling the wrong computer's vault. Say the state and the id
@@ -826,7 +575,7 @@ def fill_form(token: str, request: Request):
 async def fill_submit(token: str, request: Request):
     row = links.valid(token, "fill")
     if not row:
-        return _fill_page(links.GONE_HTML, request, status_code=410)
+        return HTMLResponse(links.GONE_HTML, status_code=410)
     # plain <form method=post>: urlencoded, parsed by hand, no multipart dep
     form = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
     raw = [d for d in (form.get("domains") or "").split(",") if d.strip()]
@@ -839,11 +588,11 @@ async def fill_submit(token: str, request: Request):
     # burn BEFORE the write: valid()+burn are two statements, so a double submit could
     # otherwise pass both checks and write twice. Compare-and-set makes the loser a 410.
     if store.burn_link(token) == 0:
-        return _fill_page(links.GONE_HTML, request, status_code=410)
+        return HTMLResponse(links.GONE_HTML, status_code=410)
     store.upsert_credential(row["computer_id"], domains[0], username, secret,
                             (form.get("totp_seed") or "").strip() or None, None, domains)
     events.emit("credential_added", {"computer_id": row["computer_id"], "name": domains[0]})
-    return _fill_page(links.DONE_HTML, request)
+    return HTMLResponse(links.DONE_HTML)
 
 
 # ---------- Assist door (public /assist/*, token is the auth; no MCP bearer) ----------
@@ -1005,6 +754,8 @@ async def assist_done(token: str, request: Request):
 
 @app.get("/v1/desk/check")
 def desk_check_ep(request: Request):
+    """Forward-auth target for a reverse proxy serving /desk/* (the noVNC view).
+    200 lets the proxied request through; anything else is answered to the browser."""
     uri = request.headers.get("x-forwarded-uri", "")
     cookie = request.headers.get("cookie", "")
     link, set_tok = links.desk_check(uri, cookie)
@@ -1017,7 +768,7 @@ def desk_check_ep(request: Request):
         return Response("unauthorized", status_code=401)
     # The door is one fixed host port, so a live token is not enough: the computer it
     # was minted for must be the one actually sitting behind that port. Otherwise the
-    # partner meets whichever desktop happens to be awake, or a bare 502.
+    # human meets whichever desktop happens to be awake, or a bare 502.
     comp = store.get_computer(link["computer_id"])
     if not comp or comp["state"] != "running":
         return HTMLResponse(links.NOTREADY_HTML.replace("{why}", links.ASLEEP), status_code=409)
@@ -1026,7 +777,7 @@ def desk_check_ep(request: Request):
                             status_code=409)
     if not set_tok:
         return Response(status_code=200)      # cookie already good, let the request through
-    # First hit, token in the URL. Caddy's forward_auth only forwards a NON-2xx auth
+    # First hit, token in the URL. forward-auth proxies only forward a NON-2xx auth
     # response to the browser (2xx just continues upstream), so a 302 is the only way to
     # hand a human a cookie here, and it strips the token out of history and Referer.
     return Response(status_code=302, headers={
@@ -1036,15 +787,6 @@ def desk_check_ep(request: Request):
         "Set-Cookie": (f"case_desk={set_tok}; Path=/desk; Max-Age={links.seconds_left(link)}; "
                        "Secure; HttpOnly; SameSite=Lax"),
         "Cache-Control": "no-store"})
-
-
-@app.get("/v1/console/check")
-def console_check_ep(request: Request):
-    """Caddy forward_auth target for /console/*. 200 lets the request through to the
-    allowlisted /v1 route; anything else is answered to the browser."""
-    if links.console_check(request.headers.get("authorization")):
-        return Response(status_code=200)
-    raise ApiError(401, "unauthorized", "unauthorized")
 
 
 @app.get("/v1/auth-attempts/{aid}")
@@ -1169,10 +911,10 @@ def list_runs(sid: str):
     return scheduler.list_runs(sid)
 
 
-# ---------- runs (the console's ACTIVITY feed) ----------
+# ---------- runs (scheduled-run activity) ----------
 
 def run_json(row, names=None):
-    # artifact_path is a host path, the console gets a flag and fetches the bytes by id.
+    # artifact_path is a host path, clients get a flag and fetch the bytes by id.
     # `names` is store.computer_names(); list routes pass it so a 50-run feed resolves
     # its owners in one query rather than fifty.
     cid = row["computer_id"]

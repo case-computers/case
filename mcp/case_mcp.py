@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""case-mcp — MCP server, thin 1:1 wrapper over cased (API_SPEC.md §9).
+"""case-mcp — MCP server, thin 1:1 wrapper over cased.
 
 Credentials add/delete is deliberately NOT exposed: secrets enter via
 human-driven CLI/HTTP only, never through a model's tool call.
 
-Transport: stdio by default (scheduler brain, local dogfood, partner tunnels).
+Transport: stdio by default (scheduler brain, local clients).
 CASE_MCP_HTTP=1 → streamable-http, stateless. Binds 127.0.0.1 by default
 (CASE_MCP_BIND overrides; compose sets 0.0.0.0 and publishes 127.0.0.1:8788).
-Hosted boxes leave the default and put Caddy in front (TLS + bearer).
+Publishing it further is the operator's reverse proxy's job (TLS + bearer).
 """
 import base64
 import os
@@ -23,9 +23,9 @@ BASE = os.environ.get("CASE_URL", "http://127.0.0.1:8787/v1")
 HTTP = os.environ.get("CASE_MCP_HTTP") == "1"
 BIND = (os.environ.get("CASE_MCP_BIND") or "127.0.0.1").strip() or "127.0.0.1"
 # In HTTP mode this is one id for the whole box (stateless: no per-client session) —
-# the box has one partner, so the audit log stays as useful as it is over stdio.
+# a box serves one person, so the audit log stays as useful as it is over stdio.
 SESSION = "mcp_" + secrets.token_hex(4)   # one per MCP process; keys cased's audit log
-# stateless_http: no server-side session state, so a Caddy/systemd restart never
+# stateless_http: no server-side session state, so a proxy or service restart never
 # strands a client mid-session. Harmless over stdio.
 mcp = FastMCP("case", stateless_http=True,
               host=BIND, port=int(os.environ.get("CASE_MCP_PORT", "8788")))
@@ -303,7 +303,7 @@ def computer_login(computer_id: str, credential: str, url: str,
     Optional CAPTCHA auto-solve (CASE_DBC_*) is capability-gated; unsupported or
     terminal solver responses fail fast into the same handoff_pending path.
     Timeout 280s: deskd login ≤95s plus optional DBC solve (≤60s) + settle/verify
-    + resume; under Caddy's 300s door budget."""
+    + resume; under a typical 300s proxy read timeout."""
     body = {"credential": credential, "url": url}
     if idempotency_key is not None:
         body["idempotency_key"] = idempotency_key
@@ -439,8 +439,8 @@ def case_skill(computer_id: str, action: str, name: str = "", content: str = "")
 @mcp.tool()
 def computer_sleep(computer_id: str) -> dict:
     """Hibernate the computer. Disk state (sessions, cookies, files) survives, and it
-    wakes in seconds. Sleeping frees the host's RAM so other computers can run; on a
-    hosted box it does not reduce the bill. Sleep when a task is done."""
+    wakes in seconds. Sleeping frees the host's RAM so other computers can run.
+    Sleep when a task is done."""
     return call("POST", f"/computers/{computer_id}/sleep").json()
 
 
@@ -457,9 +457,9 @@ def auth_attempt_wait(attempt_id: str, since_revision: int = None,
     Do NOT ask the user to say "go". Do NOT re-call computer_login. Do NOT mint a
     standalone handoff_request for the OTP/captcha the platform already raised.
 
-    Chains short GET /auth-attempts/{id}/wait long-polls (≤270s each, under Caddy's
-    300s door) until the attempt is terminal or max_wait_s elapses (default 240,
-    cap 240 to stay under the door). Pass since_revision from the last login /
+    Chains short GET /auth-attempts/{id}/wait long-polls (≤270s each, under a
+    typical 300s proxy read timeout) until the attempt is terminal or max_wait_s
+    elapses (default 240, cap 240). Pass since_revision from the last login /
     wait response so intermediate challenges (captcha → OTP) wake the waiter.
 
     Returns a LoginResult-shaped dict on terminals / next handoff_pending:

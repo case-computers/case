@@ -143,8 +143,8 @@ def test_run_brain_malformed_template_is_clean_127():
 
 
 def test_busy_box_is_a_skip_not_a_raw_apierror():
-    # hosted boxes cap at CASE_MAX_RUNNING=1: a busy box must report a plain-English skip
-    # (never "ApiError: …") and must never sleep the other partner's live session.
+    # a box at CASE_MAX_RUNNING=1: a busy box must report a plain-English skip
+    # (never "ApiError: …") and must never sleep someone else's live session.
     import scheduler
     from errors import ApiError
     rec = {}

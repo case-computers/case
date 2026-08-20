@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Computer lifecycle + the state machine (API_SPEC.md §2).
+"""Computer lifecycle + the state machine.
 
-The spec defines the transitions; this module is the only place that enforces them.
+This module is the only place that enforces the state transitions.
 `set_state` reads the current state, rejects illegal edges, and writes with a
 compare-and-set so a concurrent transition (the sweeper thread vs an HTTP handler)
 can't be silently clobbered. Docker is the ground truth: `reconcile` *forces* the DB
@@ -17,9 +17,9 @@ from store import store
 import deskclient
 import dockerd
 
-# API_SPEC §2: creating → running ⇄ asleep, transient waking, terminal deleted.
+# creating → running ⇄ asleep, transient waking, terminal deleted.
 # 'running → waking' and 'waking → asleep' are recovery edges (a wake that finds the
-# container down / fails), spec-implied, kept explicit here.
+# container down / fails), kept explicit here.
 TRANSITIONS = {
     "creating": {"running", "deleted"},
     "running":  {"asleep", "waking", "deleted"},
@@ -52,8 +52,8 @@ def set_state(cid, to):
     if not can_transition(current, to):
         raise ApiError(409, "illegal_transition", f"{current} → {to} not allowed")
     if store.set_state(cid, to, expect=current) == 0:
-        # someone transitioned it between our read and write, don't emit a stale edge
-        # ponytail: CAS makes the write safe; orchestration races (wake vs sleep) remain,
+        # someone transitioned it between our read and write, don't emit a stale edge.
+        # The CAS makes the write safe; orchestration races (wake vs sleep) remain —
         # add per-cid locks only if they actually bite.
         return False
     emit("state_changed", {"computer_id": cid, "from": current, "to": to})

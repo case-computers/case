@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Acceptance tests A1–A10 (API_SPEC.md §10). Run order matters — pytest runs top-down.
+"""Acceptance tests A1–A10. Run order matters — pytest runs top-down.
 
 Requires: cased running on 127.0.0.1:8787 (logs at ~/.case/cased.log), image built.
 A7 is manual (phone). A8 is gated behind CASE_A8=1 (restarts the Docker VM).
@@ -56,8 +56,8 @@ def cid():
 def spare_slot():
     """Free the one desktop slot so a test can create a second computer.
 
-    Hosted boxes run CASE_MAX_RUNNING=1 *and* pin the noVNC host port
-    (CASE_VNC_PORT=6080, so Caddy's /desk door has a fixed upstream). Together those
+    A box behind a reverse proxy runs CASE_MAX_RUNNING=1 *and* pins the noVNC host
+    port (CASE_VNC_PORT=6080, so the /desk door has a fixed upstream). Together those
     mean a second *running* computer cannot exist there at all: create fails with
     "Bind for 127.0.0.1:6080 failed: port is already allocated". A Mac has the headroom
     and never notices, which is why these tests passed there and only there.
@@ -334,7 +334,7 @@ def test_fill_form_escapes_an_agent_chosen_name():
 
 
 def test_desk_check():
-    """The forward_auth contract Caddy relies on for /desk/*: query token redirects
+    """The forward-auth contract a reverse proxy relies on for /desk/*: query token redirects
     with the cookie, the cookie alone keeps the session, garbage stays out."""
     tok = api("POST", f"/computers/{cid()}/links", json={"kind": "vnc"}).json()["token"]
 
@@ -353,7 +353,7 @@ def test_desk_check():
     assert r.status_code == 401
 
     # a token is not enough: it must name the computer that is actually behind the
-    # door, or the partner meets whichever desktop happens to be awake
+    # door, or the human meets whichever desktop happens to be awake
     # desk-bind only ever has to exist and be asleep, so it never needs the slot at the
     # same time as accept-1 — but creating it does, because create starts the container.
     with spare_slot():

@@ -51,7 +51,7 @@ def _login_after_desk(row, cid, name, url, attempt, result):
                 failed = auth_attempts.fail_attempt(
                     aid, reason=auto.get("reason") or "captcha_auto_failed")
                 return auth_attempts.login_result(failed, reason=auto.get("reason"))
-        # ponytail: Twilio SMS-OTP auto-answer unbuilt until a credential sets otp_phone
+        # SMS-OTP auto-answer is deliberately unbuilt until a credential sets otp_phone
         pub = auth_attempts.raise_challenge(
             aid, result["kind"], result["prompt"],
             screenshot=result.get("screenshot_png_b64"),

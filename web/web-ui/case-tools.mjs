@@ -165,10 +165,6 @@ export const ANTHROPIC_MODELS = {
   'claude-haiku-4-5': 'claude-haiku-4-5',
 };
 
-export function isAnthropicModel(id) {
-  return String(id || '').startsWith('claude-');
-}
-
 export function chatAuth(headers = {}) {
   const anthropic = String(headers['x-anthropic-key'] || '').trim();
   const openai = String(headers['x-openai-key'] || '').trim();

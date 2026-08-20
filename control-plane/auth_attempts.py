@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Durable authentication attempts, orchestration (Wave 2).
+"""Durable authentication attempts, orchestration.
 
 One vault login that needs human help is one AuthAttempt spanning zero or more
 child Handoffs. MCP connections carry no workflow state; every call names an
-explicit attempt_id (API_SPEC § Durable authentication attempts).
+explicit attempt_id.
 
 deskd is observation/action only. This module owns attempt transitions, proof,
 and challenge binding. Captcha auto-solve stays in cased (optional hook) to
@@ -24,7 +24,8 @@ from util import new_id, row_get
 ACTIVE_STATUSES = frozenset(store.AUTH_ATTEMPT_ACTIVE)
 TERMINAL_STATUSES = frozenset({"authenticated", "unverified", "failed", "expired", "cancelled"})
 
-# Long-poll ceiling stays under Caddy MCP read_timeout (300s) and MCP wait budget.
+# Long-poll ceiling stays under a typical reverse-proxy read timeout (300s)
+# and the MCP wait budget.
 WAIT_TIMEOUT_MAX_S = 270
 WAIT_TIMEOUT_DEFAULT_S = 30
 

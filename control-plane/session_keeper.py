@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Session keeper, preflight persistent session health (VISION deferred → shipped).
+"""Session keeper, preflight persistent session health.
 
 Cadenced probe (default 6h, env `CASE_SESSION_KEEPER_INTERVAL_S`): for each credential
 with a `probe_url` and/or `proof_spec`, wake if needed, load the probe URL, observe/prove,
@@ -9,7 +9,7 @@ pinning it awake.
 Skips busy computers: active AuthAttempt, in-flight schedule brain, or a recently
 touched live session (last_active_at within CASE_SESSION_KEEPER_BUSY_S, default 15m).
 
-Heuristic-only "looks fine" is never recorded as durable `ok` (API_SPEC proof_level).
+Heuristic-only "looks fine" is never recorded as durable `ok`.
 Unhealthy → record `failed`; optionally open an AuthAttempt for human recovery later.
 """
 import os

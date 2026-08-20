@@ -573,7 +573,7 @@ let saveTimer = null;
 function saveThreads() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    const MAX_THREADS = 200; // ponytail: FIFO by updated; raise if users want deeper history
+    const MAX_THREADS = 200; // FIFO by updated; raise if users want deeper history
     if (THREADS.size > MAX_THREADS) {
       const stale = [...THREADS.values()].sort((a, b) => a.updated - b.updated)
         .slice(0, THREADS.size - MAX_THREADS);

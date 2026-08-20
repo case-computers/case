@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
 # assignment, NOT setdefault: _cleanup() truncates the links table, and an inherited
 # CASE_HOME (exported in a dev shell, or ~/.case/env) would point that at the real
-# vault and kill every outstanding partner link.
+# vault and kill every outstanding human link.
 os.environ["CASE_HOME"] = "/tmp/case-links-test"
 import links  # noqa: E402
 from store import store  # noqa: E402
@@ -108,13 +108,6 @@ def test_burn_link_is_compare_and_set():
     assert store.burn_link(t) == 0        # …so a racing second submit loses
 
 
-def test_burn_all_links_kills_every_live_token():
-    _cleanup()
-    a, b = links.mint("c_1", "fill")["token"], links.mint("c_1", "vnc")["token"]
-    assert store.burn_all_links() == 2
-    assert links.valid(a, "fill") is None and links.valid(b, "vnc") is None
-
-
 def test_seconds_left_never_outlives_the_token():
     _cleanup()
     row = store.get_link(links.mint("c_1", "vnc", ttl_s=120)["token"])
@@ -154,7 +147,7 @@ def test_fill_token_never_opens_the_desk():
     assert links.desk_check(f"/x?token={t}", "")[0] is None
 
 
-def test_assist_cookie_opens_desk_but_not_fill_or_console():
+def test_assist_cookie_opens_desk_but_not_fill():
     # Assist is a parallel capability: HttpOnly session cookie scoped to a live
     # handoff. It must unlock /desk for that computer and nothing else.
     import assist
@@ -170,10 +163,9 @@ def test_assist_cookie_opens_desk_but_not_fill_or_console():
     resp = _desk_check_ep("/desk/vnc.html", f"case_assist={session}")
     assert resp.status_code == 200, resp.status_code
 
-    # negatives: assist session is not a fill/vnc/console link token
+    # negatives: assist session is not a fill/vnc link token
     assert links.valid(session, "fill") is None
     assert links.valid(session, "vnc") is None
-    assert links.console_check(f"Link {session}") is None
     # a fill token still cannot open the desk (unchanged)
     fill = links.mint("c_assist", "fill")["token"]
     assert links.desk_check(f"/x?token={fill}", "")[0] is None
@@ -219,22 +211,6 @@ def test_verification_allowlist_prefers_verification_hosts():
     store.q("DELETE FROM credentials WHERE computer_id=?", ("c_allow",))
 
 
-def test_console_return_url_pins_box_host_and_drops_capabilities():
-    # After Save, the human needs a way home that does not depend on the burned
-    # fill token and does not put the console Link token into a new URL.
-    url = links.console_return_url("demo.case.example",
-                                   origin="https://console.example")
-    assert url == ("https://console.example/console"
-                   "?box=demo.case.example#credentials"), url
-    assert "#t=" not in url and "token" not in url.lower()
-    # reject anything the console page itself would refuse
-    for bad in ["evil.example", "demo.case.example.evil.com",
-                "https://demo.case.example", "", "localhost"]:
-        assert links.console_return_url(bad) == "", bad
-    assert links.console_return_url("demo.case.example",
-                                    origin="http://insecure.example") == ""
-
-
 def test_prune_expired_links_keeps_live():
     _cleanup()
     dead = links.mint("c_1", "fill", ttl_s=0)["token"]
@@ -242,20 +218,6 @@ def test_prune_expired_links_keeps_live():
     store.prune_expired_links()
     assert store.get_link(dead) is None
     assert store.get_link(live) is not None
-
-
-def test_with_console_back_injects_button_or_strips_placeholder():
-    done = links.with_console_back(links.DONE_HTML, "demo.case.example",
-                                   origin="https://console.example")
-    assert "← Back to console" in done
-    assert 'href="https://console.example/console?box=demo.case.example#credentials"' in done
-    assert "{back}" not in done
-    # no usable host → no broken link, and the placeholder must not leak into HTML
-    gone = links.with_console_back(links.GONE_HTML, "localhost")
-    assert "{back}" not in gone
-    assert "Back to console" not in gone
-    assert "Saved" in links.with_console_back(links.DONE_HTML, "x.case.example",
-                                              origin="https://console.example")
 
 
 if __name__ == "__main__":

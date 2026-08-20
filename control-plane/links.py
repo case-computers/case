@@ -1,35 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Human link tokens (/fill, /desk, /console), minted URLs are the whole auth.
+"""Human link tokens (/fill, /desk), minted URLs are the whole auth.
 
-The human side of a hosted box has no account system: a minted unguessable
+The human side of a box has no account system: a minted unguessable
 token IS the auth. `fill` tokens are single-use (they gate a credential
 write); `vnc` tokens are multi-use until expiry (a noVNC session is dozens of
-asset requests plus a websocket, all carrying the same cookie); `console`
-tokens are a bookmark, long-lived, box-scoped, and renewed by use.
+asset requests plus a websocket, all carrying the same cookie).
 """
 import ipaddress
 import json
-import os
 import re
 import secrets
 from datetime import datetime, timezone
-from html import escape as _html_escape
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit
 
 from store import store
 from util import iso_in, now
 
-# A console link is a bookmark, not an errand: 30 days, and every successful use
-# slides it forward (see console_check). A short TTL would lock every customer out
-# daily and turn the operator into a link-vending machine. An abandoned link still
-# dies on its own, and --rotate still kills it instantly.
-TTL_S = {"fill": 900, "vnc": 3600, "console": 2592000}
-# Per-kind ceiling. A single global min(ttl, 86400) would silently clamp the console's
-# 30 days to 1 day while console_check's slide pushed it back out to 30, three
-# different lifetimes for one token.
-TTL_MAX = {"fill": 3600, "vnc": 86400, "console": 2592000}
-# noVNC is served by websockify inside the container; Caddy strips /desk and
-# proxies to it. path=desk/websockify keeps the websocket behind the same door.
+TTL_S = {"fill": 900, "vnc": 3600}
+TTL_MAX = {"fill": 3600, "vnc": 86400}
+# noVNC is served by websockify inside the container; the reverse proxy strips /desk
+# and proxies to it. path=desk/websockify keeps the websocket behind the same door.
 VNC_ENTRY = "/desk/vnc.html?token={t}&autoconnect=1&resize=scale&path=desk/websockify"
 
 
@@ -39,10 +29,7 @@ def mint(cid, kind, ttl_s=None):
     token = secrets.token_urlsafe(32)
     expires = iso_in(ttl)
     store.insert_link(token, cid, kind, expires)
-    # No path for `console`: that page is static on Vercel, not on the box. A
-    # box-relative URL would send a browser to a door that answers 401 JSON, because
-    # a navigation carries no Authorization header. The caller composes the URL.
-    path = {"vnc": VNC_ENTRY.format(t=token), "fill": f"/fill/{token}"}.get(kind)
+    path = {"vnc": VNC_ENTRY.format(t=token), "fill": f"/fill/{token}"}[kind]
     return {"token": token, "kind": kind, "path": path, "expires_at": expires}
 
 
@@ -170,7 +157,7 @@ def strip_token(uri, prefix="/desk/"):
 
 
 def desk_check(forwarded_uri, cookie_header):
-    """Caddy forward_auth contract for /desk/*: returns (link_row|None, set_cookie_token|None).
+    """Forward-auth contract for /desk/*: returns (link_row|None, set_cookie_token|None).
 
     The first request carries ?token= in the URI; we answer with the row plus the
     token to hand back as a cookie, so the page's asset and websocket requests (which
@@ -189,23 +176,6 @@ def desk_check(forwarded_uri, cookie_header):
         if v:
             return v, None
     return None, None
-
-
-def console_check(auth_header):
-    """The console door's auth. `Authorization: Link <token>`, deliberately NOT
-    `Bearer`, so a console token can never be pasted into an agent config and a
-    leaked cs_ bearer can never open the console.
-
-    Sliding expiry: a live bookmark must not go stale under someone who is using it
-    every day. Revocation is unaffected, burn_all_links sets used_at, which valid()
-    checks first, and slide_link refuses to touch a burned row.
-    """
-    if not auth_header or not auth_header.startswith("Link "):
-        return None
-    row = valid(auth_header[5:].strip(), "console")
-    if row:
-        store.slide_link(row["token"], iso_in(TTL_S["console"]))
-    return row
 
 
 FILL_HTML = """<!doctype html><meta charset=utf-8>
@@ -233,65 +203,22 @@ FILL_HTML = """<!doctype html><meta charset=utf-8>
  </form>
 </main>"""
 
-# {back} is replaced by with_console_back(), a real button back to the Vercel
-# console, never a history.back(). After Save the fill token is burned, so the
-# browser's Back lands on "Link expired"; refreshing that page does too. The
-# console bookmark still lives in sessionStorage on the console origin, so a
-# ?box= link (no token in the URL) is enough to reopen the CREDENTIALS tab.
-_BACK_CSS = ("a.back{display:inline-block;margin-top:1.5rem;padding:.7rem 1.4rem;"
-             "border:0;border-radius:8px;background:#1c1917;color:#fff;"
-             "font-size:1rem;text-decoration:none}")
-
+# After Save the fill token is burned, so the browser's Back lands on
+# "Link expired"; refreshing that page does too.
 DONE_HTML = """<!doctype html><meta charset=utf-8><title>Saved — Case</title>
 <style>body{font:16px/1.5 system-ui;background:#f5f5f4;color:#1c1917}
-main{max-width:26rem;margin:16vh auto;text-align:center;padding:0 1rem}
-""" + _BACK_CSS + """</style>
+main{max-width:26rem;margin:16vh auto;text-align:center;padding:0 1rem}</style>
 <main><h1>Saved ✓</h1><p>The login is in the vault. This link is now dead —
-ask for a new one to add another.</p>{back}</main>"""
+ask for a new one to add another.</p></main>"""
 
 GONE_HTML = """<!doctype html><meta charset=utf-8><title>Link expired — Case</title>
 <style>body{font:16px/1.5 system-ui;background:#f5f5f4;color:#1c1917}
-main{max-width:26rem;margin:16vh auto;text-align:center;padding:0 1rem}
-""" + _BACK_CSS + """</style>
+main{max-width:26rem;margin:16vh auto;text-align:center;padding:0 1rem}</style>
 <main><h1>Link expired</h1><p>This link was already used or has expired.
-Ask for a fresh one.</p>{back}</main>"""
+Ask for a fresh one.</p></main>"""
 
-
-def console_return_url(box_host, origin=None, tab="credentials"):
-    """URL back to the static console for this box. Empty when we cannot form one.
-
-    Hosted-only: a self-hosted box has no console, so with no origin configured
-    this returns "" and the Back button is dropped.
-
-    Never embeds a console or fill token, the console page already holds its
-    Link token in sessionStorage on that origin. Putting a capability in this
-    href would put it in Referer logs on the next hop.
-    """
-    host = (box_host or "").strip().lower()
-    if not HOSTNAME.match(host):
-        return ""
-    # Caller passes the seeded box_meta origin when it has one (preview deploys);
-    # env is the fallback for boxes that never ran mcp/seed.
-    base = (origin or os.environ.get("CASE_CONSOLE_ORIGIN") or "").rstrip("/")
-    if not base.startswith("https://"):
-        return ""
-    frag = tab if tab in ("computers", "activity", "credentials") else "credentials"
-    return f"{base}/console?box={host}#{frag}"
-
-
-def with_console_back(page_html, box_host, origin=None, tab="credentials"):
-    """Inject the Back-to-console button, or strip the placeholder when we can't."""
-    href = console_return_url(box_host, origin=origin, tab=tab)
-    if not href:
-        return page_html.replace("{back}", "")
-    # href is built from a regex-pinned host + https origin, still escape for the
-    # attribute, so a future change to console_return_url cannot open an XSS hole.
-    btn = (f'<p><a class=back href="{_html_escape(href, quote=True)}">'
-           f'← Back to console</a></p>')
-    return page_html.replace("{back}", btn)
-
-# Served instead of Caddy's bare 502 when the door is open but there is nothing behind
-# it, the desktop is asleep, or its container predates the pinned VNC port.
+# Served instead of the proxy's bare 502 when the door is open but there is nothing
+# behind it, the desktop is asleep, or its container predates the pinned VNC port.
 NOTREADY_HTML = """<!doctype html><meta charset=utf-8><title>Desktop not ready — Case</title>
 <style>body{font:16px/1.5 system-ui;background:#f5f5f4;color:#1c1917}
 main{max-width:28rem;margin:16vh auto;text-align:center}

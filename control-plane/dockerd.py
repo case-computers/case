@@ -9,7 +9,6 @@ import os
 import time
 
 import docker
-from docker.errors import NotFound
 
 from config import IMAGE, VNC_PORT
 from errors import ApiError
@@ -82,10 +81,10 @@ def container_run_kwargs(cid, cpus, ram_mb, volume, token):
         kw["network"] = net
     else:
         kw["ports"] = {"8000/tcp": ("127.0.0.1", None),
-                       # ponytail: a fixed 6080 binding on every container only works because
-                       # hosted boxes run CASE_MAX_RUNNING=1, docker checks the bind at START,
-                       # and the lifecycle guard never runs two desktops at once. Per-container
-                       # ports if MAX_RUNNING ever rises on hosted.
+                       # a fixed CASE_VNC_PORT binding on every container only works
+                       # when CASE_MAX_RUNNING=1: docker checks the bind at START, and
+                       # the lifecycle guard never runs two desktops at once. Switch to
+                       # per-container ports before raising MAX_RUNNING with a pinned port.
                        "6080/tcp": ("127.0.0.1", VNC_PORT)}
     return kw
 

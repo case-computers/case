@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile } from './serve.mjs';
 import {
-  CASE_TOOLS, chatAuth, isAnthropicModel, resolveChatModel, openaiToolsToAnthropic,
+  CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
   histToAnthropicMessages, anthropicThinkingFor,
 } from './case-tools.mjs';
@@ -113,7 +113,7 @@ assert.equal(isLocalMode({ CASE_LOCAL: '1' }, 'example.com'), true);
 assert.equal(isLocalMode({ CASE_LOCAL: '0' }, '127.0.0.1'), false);
 assert.equal(isLocalMode({}, '127.0.0.1'), true);
 assert.equal(isLocalMode({}, 'cased'), true);
-assert.equal(isLocalMode({}, 'partner.example'), false);
+assert.equal(isLocalMode({}, 'remote.example'), false);
 assert.equal(liveCid('/live/c_abc12/vnc.html'), 'c_abc12');
 assert.equal(liveCid('/live/vnc.html'), '');
 assert.equal(liveDestPath('/live/c_abc12/vnc.html?autoconnect=1'), '/vnc.html?autoconnect=1');
@@ -174,8 +174,6 @@ assert.equal(extraPlan('computer_list', {}, 'c_ab').rel, '/computers');
 assert.equal(extraPlan('computer_create', { name: 'desk' }, 'c_ab').method, 'POST');
 assert.deepEqual(extraPlan('computer_create', { name: 'desk' }, 'c_ab').body, { name: 'desk' });
 
-assert.equal(isAnthropicModel('claude-sonnet-4-6'), true);
-assert.equal(isAnthropicModel('gpt-5.6-terra'), false);
 assert.deepEqual(chatAuth({ 'x-openai-key': 'sk-openai' }), { provider: 'openai', key: 'sk-openai' });
 assert.deepEqual(chatAuth({ 'x-anthropic-key': 'sk-ant-test' }), { provider: 'anthropic', key: 'sk-ant-test' });
 assert.deepEqual(chatAuth({}), { provider: '', key: '' });

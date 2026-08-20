@@ -24,4 +24,4 @@ at `case-<id>:6080` on the compose network.
 Run: `node web/web-ui/serve.mjs` → http://127.0.0.1:4174/  and  /deploy
 (or `docker compose up` from the repo root)
 
-Tests: `node web/web-ui/test_serve.mjs` and `node web/web-ui/test_nav.mjs`
+Tests: `node web/web-ui/test_serve.mjs`, `test_nav.mjs`, `test_deploy.mjs`

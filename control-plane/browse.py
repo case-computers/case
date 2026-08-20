@@ -3,7 +3,7 @@
 
 Same design as deskclient.navigate: composed in the control plane so it reaches
 every computer that exists today on a cased restart — no deskd change, no image
-rebuild, no golden re-snapshot (substrate fact 8).
+rebuild.
 
 Five capabilities:
   snapshot        numbered visible interactive elements (the token-cheap "what's

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Notification channel: notify(handoff) out, on_answer(handoff_id, value) in.
 
-Relay: POST assist links to CASE_HANDOFF_RELAY_URL (owner derived server-side
-from hashed cn_ credential; box never sends a recipient). Unset URL and
-credential: relay is disabled. CASE_NOTIFY_CHANNEL=ntfy keeps the phone-topic
-loop. Schedule reports use push(), ntfy when that channel is selected, else no-op.
-"""
+ntfy (https://ntfy.sh or self-hosted) is the channel: handoffs post to
+CASE_NTFY_TOPIC, answers come back over CASE_NTFY_ANSWER_TOPIC's SSE stream.
+With no topic configured every call is a warned no-op — handoffs still show up
+in the API and the Drive UI, they just don't reach a phone. Schedule reports
+use push()."""
 import base64
 import json
 import logging
@@ -17,11 +17,8 @@ import time
 import requests
 
 from config import API_BASE
-from events import emit
 
 log = logging.getLogger("cased.notify")
-
-RELAY_BACKOFF_S = (0.5, 2.0, 5.0)
 
 
 class Ntfy:
@@ -105,115 +102,10 @@ class Ntfy:
             time.sleep(5)
 
 
-class RelayNotifier:
-    """POST handoff assist links to the central Edge Function. Never sends a recipient."""
-
-    def __init__(self, url, credential):
-        self.url = (url or "").rstrip("/")
-        self.credential = credential or ""
-        if not self.url or not self.credential:
-            log.warning("handoff relay disabled (set CASE_HANDOFF_RELAY_URL and CASE_NOTIFY_CREDENTIAL)")
-
-    def notify(self, handoff, computer_name):
-        threading.Thread(target=self._send, args=(handoff, computer_name), daemon=True).start()
-
-    def _mark_failed(self, handoff):
-        # Leave the handoff pending, humans can still use console /desk / re-notify later.
-        emit("handoff_notify_failed", {
-            "handoff_id": handoff.get("id"),
-            "computer_id": handoff.get("computer_id"),
-            "notify_failed": True,
-            "status": "pending",
-        })
-
-    def _deliver(self, h, computer_name):
-        """One POST. Returns True on HTTP success. Raises on transport/HTTP error."""
-        if not self.url:
-            raise RuntimeError("CASE_HANDOFF_RELAY_URL unset")
-        if not self.credential:
-            raise RuntimeError("CASE_NOTIFY_CREDENTIAL unset")
-        assist_url = h.get("assist_url") or ""
-        if not assist_url:
-            raise RuntimeError("assist_url missing")
-        body = {
-            "handoff_id": h["id"],
-            "assist_url": assist_url,
-            "expires_at": h.get("expires_at") or "",
-            "kind": h.get("kind") or "",
-            "computer_name": computer_name or "",
-            "domain": h.get("domain") or "",
-        }
-        # Invariant: never attach recipient fields, relay derives owner from credential hash.
-        r = requests.post(
-            self.url,
-            json=body,
-            headers={
-                "Authorization": f"Bearer {self.credential}",
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
-        if r.status_code >= 400:
-            # Do not log body/Authorization/assist_url, status + handoff id only.
-            raise RuntimeError(f"relay HTTP {r.status_code} handoff_id={h.get('id')}")
-        return True
-
-    def _send(self, h, computer_name):
-        last_err = None
-        for i, delay in enumerate(RELAY_BACKOFF_S):
-            try:
-                self._deliver(h, computer_name)
-                return
-            except Exception as e:
-                last_err = e
-                log.warning("relay deliver attempt %d/3 failed handoff_id=%s: %s",
-                            i + 1, h.get("id"), e)
-                time.sleep(delay)
-        log.warning("relay deliver exhausted handoff_id=%s last=%s", h.get("id"), last_err)
-        self._mark_failed(h)
-
-    def push(self, text):
-        """Schedule reports stay off the handoff-email relay (handoff-only)."""
-        return
-
-    def listen(self, on_answer):
-        """No inbound answer channel on the relay, humans use /assist or console."""
-        return
-
-
 def build_notifier():
-    """Select notify backend.
-
-    Explicit CASE_NOTIFY_CHANNEL=ntfy|relay wins. When unset/empty (legacy
-    boxes): prefer Relay if CASE_NOTIFY_CREDENTIAL is enrolled, else fall
-    back to Ntfy when CASE_NTFY_TOPIC is set, else Relay fail-closed.
-    """
-    raw = os.environ.get("CASE_NOTIFY_CHANNEL")
-    channel = (raw or "").strip().lower()
-    cred = (os.environ.get("CASE_NOTIFY_CREDENTIAL") or "").strip()
-    topic = (os.environ.get("CASE_NTFY_TOPIC") or "").strip()
-
-    def _ntfy():
-        return Ntfy(os.environ.get("CASE_NTFY_URL", "https://ntfy.sh"),
-                    os.environ.get("CASE_NTFY_TOPIC"),
-                    os.environ.get("CASE_NTFY_ANSWER_TOPIC"), API_BASE)
-
-    def _relay():
-        return RelayNotifier(
-            os.environ.get("CASE_HANDOFF_RELAY_URL") or "",
-            os.environ.get("CASE_NOTIFY_CREDENTIAL"),
-        )
-
-    if channel == "ntfy":
-        return _ntfy()
-    if channel == "relay":
-        return _relay()
-    # Unset / empty / unknown: enrolled relay first, then legacy ntfy topic.
-    if cred:
-        return _relay()
-    if topic:
-        return _ntfy()
-    return _relay()
+    return Ntfy(os.environ.get("CASE_NTFY_URL", "https://ntfy.sh"),
+                os.environ.get("CASE_NTFY_TOPIC"),
+                os.environ.get("CASE_NTFY_ANSWER_TOPIC"), API_BASE)
 
 
 notifier = build_notifier()

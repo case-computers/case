@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Handoff engine, the human-fallback loop (API_SPEC §7, VISION: handoff).
+"""Handoff engine, the human-fallback loop.
 
 A handoff pauses a run when the machine hits something only a human can clear
 (2FA/CAPTCHA/approval). This module owns handoff lifetime and the login-resume
@@ -33,10 +33,9 @@ from util import new_id
 
 
 def _public_host():
-    """FQDN for assist URLs, same host the MCP/doors use (CASE_MCP_HOST on boxes)."""
-    return (os.environ.get("CASE_MCP_HOST")
-            or os.environ.get("CASE_PUBLIC_HOST")
-            or "").strip().rstrip("/")
+    """FQDN for assist URLs. Set CASE_PUBLIC_HOST when a reverse proxy fronts
+    the API; unset, assist links are simply not minted into notifications."""
+    return (os.environ.get("CASE_PUBLIC_HOST") or "").strip().rstrip("/")
 
 LOGIN_CTX = {}   # handoff_id -> {"computer_id", "credential"}
 
@@ -139,7 +138,7 @@ def create_handoff(computer_row, kind, prompt, screenshot=None, login_credential
     host = _public_host()
     assist_url = f"https://{host}/assist/{raw_token}" if host else ""
     if not host:
-        log.warning("CASE_MCP_HOST unset — assist_url empty; relay notify will fail closed")
+        log.warning("CASE_PUBLIC_HOST unset — notification carries no assist link")
     notifier.notify({
         "id": hid,
         "computer_id": computer_row["id"],

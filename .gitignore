@@ -4,35 +4,33 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# OS
+# OS / editors
 .DS_Store
+.idea/
+.vscode/
 
 # Local runtime state (the vault key + case.db live in ~/.case, never here — belt & braces)
 *.db
+*.sqlite*
 *.key
 *.log
 .case/
 
-# Operator deploy (non-secret knobs only — Hetzner token lives in hcloud CLI context)
-.env.operator.local
+# Local env files
 .env
 *.env.local
 
-# Generated partner client bundles (may contain IP + connect notes)
-deploy/bundles/
-
-# Operator fleet snapshots belong under ~/.case/ops/ — never commit
-**/fleet.json
-.case/ops/
-
 # Local git worktrees
 .worktrees/
-docs/
 
-# Local agent handoff notes (never product docs)
-context.md
+# Agent tooling state
+.claude/
 
-# Drive UI local server
-web/node_modules/
-# drive v2 local thread store
+# Node
+node_modules/
+
+# Drive UI local thread store
 web/web-ui/threads.json
+
+# Acceptance-test screenshots (written by tests/test_acceptance.py runs)
+tests/shots/

@@ -179,12 +179,9 @@ def test_assist_cookie_does_not_unlock_fill_or_console():
     _pending("h_cap", "captcha")
     raw, _ = assist.mint_assist_token("h_cap")
     session, _ = assist.exchange(raw)
-    # fill / console doors are separate capability surfaces
+    # the fill door is a separate capability surface
     assert links.valid(session, "fill") is None
     assert links.valid(session, "vnc") is None
-    assert links.valid(session, "console") is None
-    assert links.console_check(f"Link {session}") is None
-    assert links.console_check(f"Bearer {session}") is None
 
 
 def test_otp_submit_via_assist_completes_without_login_ctx():

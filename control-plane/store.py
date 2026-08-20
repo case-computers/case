@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Persistence + the Fernet credential vault (API_SPEC.md §5).
+"""Persistence + the Fernet credential vault.
 
 This module is the single owner of the schema: every SQL string and every
 column-order dependency lives here, behind domain methods. Callers pass and
 receive rows/dicts, never SQL. Secrets are encrypted/decrypted only inside this
-module, the vault boundary (VISION: identity) never leaks plaintext to callers
-except through credential_material(), which login uses.
+module — the vault boundary never leaks plaintext to callers except through
+credential_material(), which login uses.
 """
 import json
 import os
@@ -74,14 +74,6 @@ CREATE TABLE IF NOT EXISTS links (
   token TEXT PRIMARY KEY, computer_id TEXT, kind TEXT,
   created_at TEXT, expires_at TEXT, used_at TEXT
 );
-CREATE TABLE IF NOT EXISTS box_meta (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  mcp_token_enc BLOB,
-  mcp_token_seen_at TEXT,
-  mcp_token_created_at TEXT,
-  mcp_host TEXT,
-  mcp_console_origin TEXT
-);
 CREATE TABLE IF NOT EXISTS assist_tokens (
   handoff_id TEXT PRIMARY KEY,
   token_hash TEXT UNIQUE NOT NULL,
@@ -114,7 +106,7 @@ class Store:
         self.lock = threading.Lock()
 
     # (table, column, type), CREATE TABLE IF NOT EXISTS won't add columns to an
-    # existing table, and partner boxes carry a case.db older than every one of these.
+    # existing table, and a live box can carry a case.db older than every one of these.
     MIGRATIONS = [
         ("handoffs", "login_credential", "TEXT"),
         ("runs", "status", "TEXT"),
@@ -161,6 +153,7 @@ class Store:
 
     # ---- low-level (module-internal) ----
     def q(self, sql, args=()):
+        """Run one statement under the store lock; non-SELECTs auto-commit."""
         with self.lock:
             cur = self.db.execute(sql, args)
             if not sql.lstrip()[:6].upper().startswith("SELECT"):
@@ -175,9 +168,12 @@ class Store:
 
     # ---- vault ----
     def enc(self, s):
+        """Fernet-encrypt a secret for storage. None stays None."""
         return self.fernet.encrypt(s.encode()) if s is not None else None
 
     def dec(self, b):
+        """Decrypt a stored secret. Callers outside this module should not need
+        this — credential_material() is the sanctioned plaintext exit."""
         return self.fernet.decrypt(b).decode() if b is not None else None
 
     # ---- computers ----
@@ -276,20 +272,8 @@ class Store:
                 json.dumps(domains), created, last_verified, last_status,
                 probe_url, proof_spec, verification_hosts))
 
-    def set_credential_profile(self, cid, name, *, probe_url=None, proof_spec=None,
-                               verification_hosts=None):
-        """Update auth-profile fields only (probe/proof/verification hosts)."""
-        if proof_spec is not None and isinstance(proof_spec, dict):
-            proof_spec = json.dumps(proof_spec)
-        if verification_hosts is not None and isinstance(verification_hosts, list):
-            verification_hosts = json.dumps(verification_hosts)
-        return self.q(
-            "UPDATE credentials SET probe_url=?, proof_spec=?, verification_hosts=? "
-            "WHERE computer_id=? AND name=?",
-            (probe_url, proof_spec, verification_hosts, cid, name)).rowcount
-
     def record_credential_result(self, cid, name, status):
-        """The console's HEALTH column, without a nightly checker: every login already
+        """Credential health without a nightly checker: every login already
         produces a definitive answer, so keep the last one instead of discarding it."""
         self.q("UPDATE credentials SET last_verified_at=?, last_status=? "
                "WHERE computer_id=? AND name=?", (now(), status, cid, name))
@@ -368,7 +352,8 @@ class Store:
         return [r["id"] for r in self.all("SELECT id FROM handoffs WHERE status='pending'")]
 
     def stale_pending_handoffs(self, cutoff):
-        # validating that never finished (restart mid-verify) also ages out
+        """Open handoffs older than `cutoff`, for the TTL sweeper.
+        validating that never finished (restart mid-verify) also ages out."""
         return self.all("SELECT * FROM handoffs WHERE status IN ('pending','validating') "
                         "AND created_at < ?", (cutoff,))
 
@@ -418,6 +403,8 @@ class Store:
         return self.one("SELECT * FROM auth_attempts WHERE id=?", (aid,))
 
     def get_active_auth_attempt(self, computer_id):
+        """The newest non-terminal attempt on this computer, or None. At most one
+        should exist — login 409s while one is active."""
         qs = ",".join("?" * len(self.AUTH_ATTEMPT_ACTIVE))
         return self.one(
             f"SELECT * FROM auth_attempts WHERE computer_id=? AND status IN ({qs}) "
@@ -473,20 +460,6 @@ class Store:
         return self.q("UPDATE links SET used_at=? WHERE token=? AND used_at IS NULL",
                       (now(), token)).rowcount
 
-    def slide_link(self, token, expires_at):
-        """Push a live link's expiry forward. `used_at IS NULL` is deliberate: a link
-        revoked a moment ago must not be resurrected by a request already in flight."""
-        self.q("UPDATE links SET expires_at=? WHERE token=? AND used_at IS NULL",
-               (expires_at, token))
-
-    def burn_all_links(self, except_token=None):
-        """Revoke every live human link. Console rotate passes except_token so the
-        caller's bookmark survives; a full burn (no except_token) leaves it unset."""
-        if except_token:
-            return self.q("UPDATE links SET used_at=? WHERE used_at IS NULL AND token!=?",
-                          (now(), except_token)).rowcount
-        return self.q("UPDATE links SET used_at=? WHERE used_at IS NULL", (now(),)).rowcount
-
     def prune_expired_links(self):
         """Drop tokens that valid() would already reject. `<=` matches links.valid."""
         return self.q("DELETE FROM links WHERE expires_at <= ?", (now(),)).rowcount
@@ -521,59 +494,6 @@ class Store:
             "DELETE FROM assist_tokens WHERE expires_at <= ? "
             "AND (session_expires_at IS NULL OR session_expires_at <= ?)",
             (ts, ts)).rowcount
-
-    # ---- MCP door token (one-shot console reveal) ----
-    # Live auth stays in /etc/caddy/case.env (Caddy only). This row holds at most one
-    # Fernet-encrypted unrevealed copy so GET /v1/connect can show the paste-line once.
-
-    def mcp_token_put(self, plaintext, host=None, origin=None):
-        """Replace the pending reveal copy. Clears seen_at so Connect can show it again."""
-        enc = self.enc(plaintext)
-        ts = now()
-        row = self.one("SELECT id, mcp_host, mcp_console_origin FROM box_meta WHERE id=1")
-        if row:
-            h = host if host is not None else row["mcp_host"]
-            o = origin if origin is not None else row["mcp_console_origin"]
-            self.q("UPDATE box_meta SET mcp_token_enc=?, mcp_token_seen_at=NULL, "
-                   "mcp_token_created_at=?, mcp_host=?, mcp_console_origin=? WHERE id=1",
-                   (enc, ts, h, o))
-        else:
-            self.q("INSERT INTO box_meta (id, mcp_token_enc, mcp_token_seen_at, "
-                   "mcp_token_created_at, mcp_host, mcp_console_origin) "
-                   "VALUES (1, ?, NULL, ?, ?, ?)",
-                   (enc, ts, host, origin))
-
-    def mcp_token_take(self):
-        """Compare-and-set: return (plaintext, None) once, else (None, seen_at)."""
-        with self.lock:
-            row = self.db.execute(
-                "SELECT mcp_token_enc, mcp_token_seen_at FROM box_meta WHERE id=1"
-            ).fetchone()
-            if not row:
-                return None, None
-            if row["mcp_token_enc"] is None:
-                return None, row["mcp_token_seen_at"]
-            token = self.dec(row["mcp_token_enc"])
-            ts = now()
-            cur = self.db.execute(
-                "UPDATE box_meta SET mcp_token_enc=NULL, mcp_token_seen_at=? "
-                "WHERE id=1 AND mcp_token_enc IS NOT NULL", (ts,))
-            self.db.commit()
-            if cur.rowcount != 1:
-                row = self.db.execute(
-                    "SELECT mcp_token_seen_at FROM box_meta WHERE id=1").fetchone()
-                return None, row["mcp_token_seen_at"] if row else None
-            return token, None
-
-    def mcp_token_status(self):
-        row = self.one("SELECT mcp_token_enc, mcp_token_seen_at, mcp_host, "
-                       "mcp_console_origin FROM box_meta WHERE id=1")
-        if not row:
-            return {"has_pending": False, "seen_at": None, "host": None, "origin": None}
-        return {"has_pending": row["mcp_token_enc"] is not None,
-                "seen_at": row["mcp_token_seen_at"],
-                "host": row["mcp_host"],
-                "origin": row["mcp_console_origin"]}
 
     # ---- schedules ----
     def insert_schedule(self, sid, cid, name, prompt, kind, spec, jitter_s, next_run_at):

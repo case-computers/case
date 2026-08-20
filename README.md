@@ -65,24 +65,18 @@ to Claude (`--mcp-config`). Compose users should use the HTTP URL above.
 
 ### Laptop without Compose
 
-Use the host-side CLI instead of compose.
+Run the control plane on the host (needs a venv with `requirements.txt`), then
+Drive locally:
 
 ```bash
 bin/case up
-```
-
-Then run Drive locally:
-
-```bash
 CASE_LOCAL=1 CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
 ```
 
-MCP over stdio (venv python, full paths):
+### More knobs
 
-```bash
-export CASE_URL=http://127.0.0.1:8787/v1
-claude mcp add case -- $(pwd)/.venv/bin/python $(pwd)/mcp/case_mcp.py
-```
+Phone notifications for 2FA/approvals (ntfy), CAPTCHA auto-solve, scheduled
+runs: all optional, all documented in [.env.example](.env.example).
 
 ### Token hardening (optional)
 
@@ -138,7 +132,8 @@ on.
 
 Do not publish 4174/8787/8788 off loopback. Set `CASE_TOKEN` in `.env` for Drive
 and the REST API (`http://<host>:4174/?token=…`). `CASE_TOKEN` does **not** lock
-`:8788`: that door is loopback-only in compose; hosted boxes put Caddy in front.
+`:8788`: that door is loopback-only in compose; publish it only behind your own
+reverse proxy (TLS + bearer).
 HTTPS and DNS are not shipped here.
 
 ## What you get
@@ -149,8 +144,8 @@ HTTPS and DNS are not shipped here.
 - Drive UI: chat, live desk, files, credentials, teach-a-task
 - Deployer (`/deploy`): create, sleep, wake, delete computers
 
-Hosted fleet (DNS, HTTPS door, golden images) is a separate product. This repo is the
-box you can run yourself.
+The hosted fleet (DNS, HTTPS, managed images) is a separate product. This repo is
+the box you can run yourself.
 
 ## Tests
 
@@ -158,11 +153,10 @@ No Docker:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python tests/test_lifecycle.py
-.venv/bin/python tests/test_dockerd.py
-.venv/bin/python tests/test_token.py
+for t in tests/test_*.py; do [ "$t" = tests/test_acceptance.py ] || .venv/bin/python "$t"; done
 node web/web-ui/test_serve.mjs
 node web/web-ui/test_nav.mjs
+node web/web-ui/test_deploy.mjs
 ```
 
 Acceptance tests need a running stack (`tests/test_acceptance.py`).

@@ -67,10 +67,10 @@ def eval_value(row, expression, timeout_s=15, default=None):
     return v if v is not None else default
 
 
-# ponytail: built on /eval instead of a deskd /navigate route on purpose, wake
-# starts the *existing* container (lifecycle.do_wake), so a new deskd route would
-# reach only computers created after an image rebuild + golden re-snapshot. This
-# reaches every computer that exists today, on a cased restart.
+# Built on /eval instead of a deskd /navigate route on purpose: wake starts the
+# *existing* container (lifecycle.do_wake), so a new deskd route would reach only
+# computers created after an image rebuild. This reaches every computer that
+# exists today, on a cased restart.
 def navigate(row, url, timeout_s=30):
     """Load `url` in the browser tab and block until the new document is ready.
 

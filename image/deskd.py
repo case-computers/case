@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""deskd — in-container desk daemon (API_SPEC.md §4).
+"""deskd — in-container desk daemon.
 
 Owns the display: screenshot, input, exec, file I/O, credential injection,
 blocker detection. cased-only, bearer DESK_TOKEN. Secrets are never logged.

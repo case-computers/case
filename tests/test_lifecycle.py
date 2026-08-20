@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""The state machine (API_SPEC §2) reified in lifecycle.TRANSITIONS. Pure — no Docker.
+"""The state machine reified in lifecycle.TRANSITIONS. Pure — no Docker.
 Run: .venv/bin/python tests/test_lifecycle.py"""
 import os
 import sys
@@ -50,7 +50,7 @@ def test_creating_computer_is_not_actionable():
 
 
 def test_wake_respects_max_running():
-    # wake used to bypass the create-time cap; hosted CAX11 needs the same ceiling.
+    # wake used to bypass the create-time cap; a small host needs the same ceiling.
     import lifecycle
     old = lifecycle.MAX_RUNNING
     cid = "c_unittest_wake_cap"
@@ -72,7 +72,7 @@ def test_wake_respects_max_running():
 
 
 def test_sleep_blocked_when_auth_attempt_active():
-    # API_SPEC: POST …/sleep → 409 auth_in_progress while a non-terminal AuthAttempt exists.
+    # POST …/sleep → 409 auth_in_progress while a non-terminal AuthAttempt exists.
     cid = "c_unittest_sleep_pin"
     store.delete_computer(cid)
     store.q("DELETE FROM auth_attempts WHERE computer_id=?", (cid,))

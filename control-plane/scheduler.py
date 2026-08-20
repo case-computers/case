@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Scheduler + runner (VISION build-next #1: recurring tasks).
+"""Scheduler + runner: recurring tasks.
 
 A schedule = "at time T, wake computer X, run this task in headless Claude Code,
 report, sleep." The sweeper ticks every 20s and calls fire_due_schedules(). One run:
 reschedule-first (so a hung run never wedges the slot) → wake → brain → capture
 artifacts (screenshot to host + logbook entry on the machine) → sleep → record + ntfy.
-Recurrence is minimal: interval seconds, or daily 'HH:MM' local.
-ponytail: no cron expressions, add croniter only if someone needs '*/15 * * * 1-5'.
+Recurrence is deliberately minimal — interval seconds, or daily 'HH:MM' local;
+add croniter only if someone actually needs '*/15 * * * 1-5'.
 """
 import base64
 import os
@@ -27,7 +27,7 @@ from notify import notifier
 from store import store
 from util import new_id, now
 
-SCHED_RUNNING = set()   # ponytail: in-memory guard, fine for one cased process
+SCHED_RUNNING = set()   # in-memory guard, fine while one cased process runs
 _LOCK = threading.Lock()   # guards the check-then-add on SCHED_RUNNING (sweeper vs run-now)
 
 
@@ -79,7 +79,7 @@ def run_brain(cid, prompt):
     if any(MCP_CONFIG in t for t in argv) and not os.path.exists(MCP_CONFIG):
         return 127, f"mcp config not found at {MCP_CONFIG} — set CASE_MCP_CONFIG"
     # BYOK: stock path forces the caller's logged-in/subscription auth by blanking the
-    # key, UNLESS the partner explicitly set one (their key = their cost, still BYOK).
+    # key, UNLESS the operator explicitly set one (their key = their cost, still BYOK).
     # Template path owns its env untouched.
     env = os.environ
     if not BRAIN_CMD and not os.environ.get("ANTHROPIC_API_KEY"):
@@ -147,8 +147,8 @@ def run_schedule(sid):
             status = "ok" if code == 0 else "fail"
             artifact = capture_run_artifacts(cid, rid, s["name"], status, summary, started)  # awake
         except ApiError as e:
-            # hosted boxes run CASE_MAX_RUNNING=1, a busy box is "not now", not a failure,
-            # and must never sleep someone else's live session to make room.
+            # a box at CASE_MAX_RUNNING is "not now", not a failure, and a schedule
+            # must never sleep someone else's live session to make room.
             if e.code == "too_many_running":
                 status = "skipped"
                 summary = f"another computer is running (max {MAX_RUNNING} on this box)"

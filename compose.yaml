@@ -44,6 +44,15 @@ services:
       CASE_MAX_RAM_MB: ${CASE_MAX_RAM_MB:-}
       # DESK_DEBUG=1: desktops mirror chromium/websockify logs to docker logs
       DESK_DEBUG: ${DESK_DEBUG:-}
+      # Optional phone notifications + assist links (see .env.example)
+      CASE_NTFY_URL: ${CASE_NTFY_URL:-https://ntfy.sh}
+      CASE_NTFY_TOPIC: ${CASE_NTFY_TOPIC:-}
+      CASE_NTFY_ANSWER_TOPIC: ${CASE_NTFY_ANSWER_TOPIC:-}
+      CASE_PUBLIC_HOST: ${CASE_PUBLIC_HOST:-}
+      # Optional CAPTCHA auto-solve (see .env.example)
+      CASE_DBC_AUTHTOKEN: ${CASE_DBC_AUTHTOKEN:-}
+      CASE_DBC_USERNAME: ${CASE_DBC_USERNAME:-}
+      CASE_DBC_PASSWORD: ${CASE_DBC_PASSWORD:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - case-home:/data
@@ -69,6 +78,8 @@ services:
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_MCP_BIND: "0.0.0.0"
       CASE_MCP_PORT: "8788"
+      # CASE_MCP_SCHEDULES=1 unlocks the schedule_* tools (see .env.example)
+      CASE_MCP_SCHEDULES: ${CASE_MCP_SCHEDULES:-}
     command: ["python", "/app/mcp/case_mcp.py"]
     ports:
       - "127.0.0.1:8788:8788"

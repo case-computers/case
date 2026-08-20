@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Durable auth_attempts orchestration (API_SPEC § Durable authentication attempts).
+"""Durable auth_attempts orchestration.
 Run: .venv/bin/python tests/test_auth_attempts.py"""
 import json
 import os

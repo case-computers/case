@@ -39,12 +39,12 @@ MAX_RAM_MB = int(os.environ.get("CASE_MAX_RAM_MB") or _host_ram_budget_mb())
 # Sanity rails for caller-supplied sizing (the create form is a trust boundary).
 MIN_RAM_MB, MAX_COMPUTER_RAM_MB = 512, 65536
 MIN_CPUS, MAX_CPUS = 0.25, 32.0
-# Hosted/local default: loopback. Compose sets CASE_BIND=0.0.0.0 and publishes
+# Default: loopback. Compose sets CASE_BIND=0.0.0.0 and publishes
 # 127.0.0.1:8787 on the host so the API is laptop-only unless they change ports.
 BIND_HOST = os.environ.get("CASE_BIND", "127.0.0.1") or "127.0.0.1"
 BIND_PORT = int(os.environ.get("CASE_PORT") or 8787)
-# Hosted boxes pin the (single) desktop's noVNC to a fixed host port so Caddy can
-# proxy /desk/* to it. 0/unset = ephemeral port per container (local dev).
+# CASE_VNC_PORT pins the desktop's noVNC to a fixed host port so a reverse proxy
+# can serve /desk/* from it. 0/unset = ephemeral port per container (local dev).
 # `or 0` first: an env file line `CASE_VNC_PORT=` (empty) would otherwise ValueError at
 # import and restart-loop cased with only a traceback to explain it.
 VNC_PORT = int(os.environ.get("CASE_VNC_PORT") or 0) or None
@@ -52,7 +52,7 @@ API_BASE = os.environ.get("CASE_API_BASE", f"http://127.0.0.1:{BIND_PORT}/v1")
 HANDOFF_TTL = timedelta(minutes=15)
 
 # Brain = headless Claude Code, invoked by the scheduler. BYOK stays with the caller
-# (VISION #3: never own LLM cost): an ANTHROPIC_API_KEY exported for cased is honoured
+# (Case never owns LLM cost): an ANTHROPIC_API_KEY exported for cased is honoured
 # (their key, their bill); with none set the scheduler blanks it so the box's
 # logged-in/subscription auth is used. CASE_BRAIN_BIN must point at the real binary, a
 # shell alias (e.g. `ANTHROPIC_API_KEY= claude`) is invisible to subprocess.
