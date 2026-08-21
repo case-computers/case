@@ -65,6 +65,12 @@ xfdesktop &
 mkfifo /tmp/.chrome-stdin 2>/dev/null
 exec 9<>/tmp/.chrome-stdin
 
+# --restore-last-session and no start URL: the volume is the computer's identity, so
+# a wake should hand the agent back the tabs it was working in, not a blank browser.
+# Passing about:blank here instead would stack one more dead tab on every wake.
+# --renderer-process-limit caps process sprawl as tabs accumulate over a desk's life;
+# it does mean cross-site tabs can share a renderer, which matters less here than it
+# would elsewhere because --no-sandbox has already given up that isolation.
 chrome_loop() {
   while true; do
     chromium <&9 \
@@ -81,7 +87,9 @@ chrome_loop() {
       --disable-component-extensions-with-background-pages \
       --disable-features=NetworkTimeServiceQuerying,OptimizationHints \
       --start-maximized \
-      about:blank >>/tmp/chromium.log 2>&1
+      --restore-last-session \
+      --renderer-process-limit=8 \
+      >>/tmp/chromium.log 2>&1
     echo "[chrome_loop] chromium exited rc=$?" >>/tmp/chromium.log
     sleep 1
   done

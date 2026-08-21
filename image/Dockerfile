@@ -27,9 +27,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # at startup. Invalid dummy keys keep those services off without the "API keys
 # missing" infobar. Web logins (gmail.com etc.) are cookie logins, unaffected.
 # Policies disable the service machinery itself; matching kill flags in start.sh.
+# MemorySaverModeSavings (1 = balanced) rides along here because it is a policy too:
+# desks are long-lived and now restore their tabs across wakes, so background tabs
+# accumulate. Discarded tabs reload from cookies on return, which agents tolerate.
 RUN printf 'export GOOGLE_API_KEY="no"\nexport GOOGLE_DEFAULT_CLIENT_ID="no"\nexport GOOGLE_DEFAULT_CLIENT_SECRET="no"\n' > /etc/chromium.d/apikeys \
     && mkdir -p /etc/chromium/policies/managed \
-    && printf '%s' '{"BrowserSignin":0,"SyncDisabled":true,"MetricsReportingEnabled":false,"SafeBrowsingProtectionLevel":0,"BackgroundModeEnabled":false,"ComponentUpdatesEnabled":false,"PromotionalTabsEnabled":false,"UrlKeyedAnonymizedDataCollectionEnabled":false,"DefaultSearchProviderEnabled":true,"DefaultSearchProviderName":"DuckDuckGo","DefaultSearchProviderKeyword":"duckduckgo.com","DefaultSearchProviderSearchURL":"https://duckduckgo.com/?q={searchTerms}","DefaultSearchProviderSuggestURL":"https://duckduckgo.com/ac/?q={searchTerms}&type=list"}' \
+    && printf '%s' '{"BrowserSignin":0,"SyncDisabled":true,"MetricsReportingEnabled":false,"SafeBrowsingProtectionLevel":0,"BackgroundModeEnabled":false,"ComponentUpdatesEnabled":false,"PromotionalTabsEnabled":false,"UrlKeyedAnonymizedDataCollectionEnabled":false,"MemorySaverModeSavings":1,"DefaultSearchProviderEnabled":true,"DefaultSearchProviderName":"DuckDuckGo","DefaultSearchProviderKeyword":"duckduckgo.com","DefaultSearchProviderSearchURL":"https://duckduckgo.com/?q={searchTerms}","DefaultSearchProviderSuggestURL":"https://duckduckgo.com/ac/?q={searchTerms}&type=list"}' \
        > /etc/chromium/policies/managed/case.json
 
 ARG NOVNC_VERSION=1.5.0

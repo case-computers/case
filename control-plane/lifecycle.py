@@ -9,6 +9,7 @@ to match reality after a daemon restart, it corrects the machine rather than
 transitioning it, so it deliberately bypasses the transition guard.
 """
 import secrets
+import time
 
 from config import DESK_H, DESK_W, IMAGE, MAX_RAM_MB, MAX_RUNNING, log
 from errors import ApiError
@@ -210,6 +211,7 @@ def do_wake(cid):
     row = get_computer(cid)
     if row["state"] == "running" and dockerd.container_up(cid):
         return  # DB can lie after a daemon restart, only skip if the container really is up
+    t0 = time.monotonic()
     # Asleep computers don't count against the budget; waking one must, same as create.
     # (create already checks; wake used to bypass the cap and OOM a small box.)
     if row["state"] == "asleep":
@@ -225,7 +227,12 @@ def do_wake(cid):
                                      row["desk_token"])
         desk_port, vnc_port = dockerd.container_ports(dockerd.get_container(cid))
         store.set_ports(cid, desk_port, vnc_port)
+        t_container = time.monotonic() - t0
         deskclient.wait_desk(cid, desk_port, row["desk_token"], 30)
+        # The two halves of a wake bill very differently — container start is docker,
+        # the rest is Chromium coming up. Split them or you tune the wrong one.
+        log.info("wake %s: container %.2fs, deskd healthy %.2fs",
+                 cid, t_container, time.monotonic() - t0)
     except Exception:
         _try_set(cid, "asleep")   # tolerate a concurrent delete here too
         raise

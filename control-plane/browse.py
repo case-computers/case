@@ -11,6 +11,8 @@ Five capabilities:
   click_element   re-derive the same numbered list, verify the ref still matches,
                   scroll it into view, then fire a real OS-level click through
                   /action at the computed screen coordinates (isTrusted stays true)
+                  — and return the settled page with it, so the caller never has to
+                  spend a second LLM turn asking what the click did
   fill            batch-fill a form via native value setters + input/change events
                   (React-safe); refuses password fields — vault login owns those
   wait_for        server-side 0.4s poll for selector/text/network-idle, so agents
@@ -22,6 +24,13 @@ Determinism contract: snapshot and click_element run the SAME walk, and the walk
 emits elements in document order, so a ref from the last snapshot re-derives to
 the same element unless the page itself changed — in which case click_element
 refuses and returns a fresh snapshot instead of clicking the wrong thing.
+
+A ref is that document-order index, which is why snapshot can show any subset it
+likes without breaking anything. It shows the on-screen ones first: a big page has
+thousands of interactive elements and the cap has to fall somewhere, and falling on
+"whoever appears first in the HTML" spends it on chrome the reader scrolled past.
+Measured on a scrolled Wikipedia article: a third of what was on screen missed the
+cut. The shown numbers therefore skip.
 """
 import json
 import re
@@ -34,8 +43,9 @@ from deskclient import desk_json, eval_js
 
 MAX_ELS = 150
 
-# The shared walk. Defines __els = [{el, tag, type, name, value, href}] in
-# document order, visible interactive elements only. Password values never read.
+# The shared walk. Defines __els = [{el, tag, type, name, value, href, on}] in
+# document order, visible interactive elements only (`on` = 0 when the element is in
+# the viewport right now). Password values never read.
 _WALK = """
 const __sel='a[href],button,input,select,textarea,summary,label,'+
  '[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],'+
@@ -55,7 +65,8 @@ for(const el of document.querySelectorAll(__sel)){
     el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
   __els.push({el,tag,type:(el.type||el.getAttribute('role')||''),name,
     value:('value'in el&&el.type!=='password'&&tag!=='button')?String(el.value).slice(0,40):'',
-    href:tag==='a'?String(el.getAttribute('href')||'').slice(0,120):''});
+    href:tag==='a'?String(el.getAttribute('href')||'').slice(0,120):'',
+    on:(r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth)?0:1});
 }
 """
 
@@ -76,9 +87,15 @@ def _fmt(i, e):
 
 
 def snapshot(row, timeout_s=15):
-    """Numbered visible interactive elements of the active tab, document order."""
-    body = ("return {url:location.href,title:document.title,count:__els.length,"
-            "els:__els.slice(0,%d).map(({el,...r})=>r)};" % MAX_ELS)
+    """The active tab's interactive elements as numbered lines, everything on screen
+    first. Refs are indices into the whole walk, so the shown list can skip numbers."""
+    body = ("""
+const __by=__els.map((e,i)=>i);
+__by.sort((a,b)=>__els[a].on-__els[b].on||a-b);   // on screen first, document order within
+const __pick=__by.slice(0,%d).sort((a,b)=>a-b);   // then hand them back in reading order
+return {url:location.href,title:document.title,count:__els.length,
+  els:__pick.map(i=>{const{el,on,...r}=__els[i];return{i,...r};})};
+""" % MAX_ELS)
     r = eval_js(row, _iife(body), timeout_s)
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "snapshot failed"}
@@ -89,7 +106,7 @@ def snapshot(row, timeout_s=15):
     return {"ok": True, "url": v.get("url"), "title": v.get("title"),
             "count": v.get("count", len(els)),
             "truncated": (v.get("count", 0) > MAX_ELS),
-            "elements": [_fmt(i, e) for i, e in enumerate(els)]}
+            "elements": [_fmt(e.get("i", i), e) for i, e in enumerate(els)]}
 
 
 def _locate(row, ref, name, timeout_s=15):
@@ -113,10 +130,78 @@ return {ok:true,name:e.name,tag:e.tag,
     return r.get("value") if isinstance(r.get("value"), dict) else {"ok": False, "error": "bad locate result"}
 
 
-def click_element(row, ref, name=None, text=None, screenshot=False):
-    """Verify + scroll + real OS click. On stale ref: refuse and hand back a fresh
-    snapshot (a wrong click is worse than a slow click). text, when given, is typed
-    after the click (the click focuses the field)."""
+# Same sentinel trick deskclient.navigate uses, and for the same reason: a click that
+# navigates leaves the OLD document reporting readyState 'complete' for a beat, so
+# polling readyState alone snapshots the page the agent just left. Stamping the
+# document before the action turns that race into a check — a document without the
+# stamp is, by construction, the one the action produced.
+_STAMP = "window.__case_act"
+
+
+def _stamp(row):
+    try:
+        return bool(eval_js(row, f"{_STAMP}=1", 3).get("ok"))
+    except ApiError:
+        return False
+
+
+def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
+    """The page as it stands once the action stops moving it.
+
+    Two endings, and they need telling apart. If the stamp is gone the action
+    navigated: wait for the new document to finish and snapshot that. If the stamp is
+    still there after `settle_s`, nothing navigated and this page IS the answer — a
+    grace that long because a JS-driven navigation does not commit instantly. A 502
+    means the context was torn down mid-navigation, which is progress, so poll through.
+
+    This costs ~2 extra eval round trips at ~11ms each. The computer_snapshot call it
+    saves the agent is a whole model turn. Cheap side of a very lopsided trade.
+    """
+    if not stamped:
+        time.sleep(settle_s)   # no stamp to compare against; give the action time to land
+    deadline = time.time() + budget_s
+    grace = time.time() + settle_s
+    while time.time() < deadline:
+        time.sleep(0.25)
+        try:
+            r = eval_js(row, f"[{_STAMP}===undefined,document.readyState]", 3)
+        except ApiError as e:
+            if e.status != 502:
+                return None
+            continue           # context gone: the navigation we are waiting for
+        v = r.get("value")
+        if not isinstance(v, list):
+            break
+        navigated, ready = v[0], v[1]
+        if navigated and ready == "complete":
+            return snapshot(row)
+        if not navigated and time.time() >= grace:
+            fresh = snapshot(row)
+            # don't leave a uniquely-named global on a live page for site JS to find
+            try:
+                eval_js(row, f"delete {_STAMP}", 3)
+            except ApiError:
+                pass
+            return fresh
+    try:
+        return snapshot(row)   # never settled; a partial list still beats a blind turn
+    except ApiError:
+        return None
+
+
+def _attach_snapshot(row, res, want, stamped):
+    if not want:
+        return res
+    fresh = _settled_snapshot(row, stamped)
+    if fresh and fresh.get("ok"):
+        res["snapshot"] = fresh
+    return res
+
+
+def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_after=True):
+    """Verify + scroll + real OS click, then hand back the page it produced. On stale
+    ref: refuse and hand back a fresh snapshot (a wrong click is worse than a slow
+    click). text, when given, is typed after the click (the click focuses the field)."""
     loc = _locate(row, ref, name)
     if not loc.get("ok"):
         if loc.get("stale"):
@@ -129,6 +214,7 @@ def click_element(row, ref, name=None, text=None, screenshot=False):
     x, y = loc["x"], loc["y"]
     if not (0 <= x < SCREEN_W and 0 <= y < SCREEN_H):
         return {"ok": False, "error": f"element resolves off-screen ({x},{y})"}
+    stamped = snapshot_after and _stamp(row)
     out = desk_json(row, "POST", "/action",
                     json={"type": "click", "x": x, "y": y,
                           "screenshot": bool(screenshot) and not text},
@@ -141,10 +227,10 @@ def click_element(row, ref, name=None, text=None, screenshot=False):
     res = {"ok": True, "clicked": loc.get("name"), "tag": loc.get("tag"), "x": x, "y": y}
     if isinstance(out, dict) and out.get("screenshot_png_b64"):
         res["screenshot_png_b64"] = out["screenshot_png_b64"]
-    return res
+    return _attach_snapshot(row, res, snapshot_after, stamped)
 
 
-def fill(row, fields, submit=False, timeout_s=20):
+def fill(row, fields, submit=False, timeout_s=20, snapshot_after=True):
     """Batch form fill. fields=[{ref, value}]. Native setters + input/change events
     so React/Vue see the change. Password inputs are refused inside the page —
     vaulted computer_login owns credentials, always."""
@@ -190,10 +276,15 @@ if(__submit&&out.some(o=>o.ok)){
 }
 return {ok:out.every(o=>o.ok),fields:out};
 """
+    # Only the submit moves the page out from under the caller; after a plain fill the
+    # refs they already hold are still good, so don't spend the settle on one.
+    want = bool(snapshot_after and submit)
+    stamped = want and _stamp(row)
     r = eval_js(row, _iife(body), timeout_s)
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "fill failed"}
-    return r.get("value") if isinstance(r.get("value"), dict) else {"ok": False, "error": "bad fill result"}
+    out = r.get("value") if isinstance(r.get("value"), dict) else {"ok": False, "error": "bad fill result"}
+    return _attach_snapshot(row, out, want and out.get("ok"), stamped)
 
 
 def wait_for(row, selector=None, text=None, gone=False, network_idle=False, timeout_s=30):

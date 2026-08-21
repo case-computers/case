@@ -145,10 +145,12 @@ def computer_eval(computer_id: str, expression: str, timeout_s: int = 20) -> dic
 def computer_navigate(computer_id: str, url: str, timeout_s: int = 30) -> dict:
     """Point the computer's browser at url and block until the page has loaded.
     One call — do not follow it with readyState polling. Returns
-    {ok, url, title} (url is the final one, after redirects) or {ok:false, error}.
+    {ok, url, title, snapshot} (url is the final one, after redirects) or
+    {ok:false, error}. `snapshot` is the arrived page's numbered elements, already
+    there — DO NOT call computer_snapshot after this, you have it.
     The body is ready when this returns; `title` is best-effort and can be "" on
     pages that set it a beat late — that is not a signal to wait or retry.
-    Then read the page with computer_eval("document.body.innerText").
+    Read page text with computer_eval("document.body.innerText").
     Same-page '#anchor' jumps are not navigations; use computer_eval for those."""
     return call("POST", f"/computers/{computer_id}/navigate", params={"wake": "true"},
                 json={"url": url, "timeout_s": timeout_s},
@@ -163,8 +165,15 @@ def computer_snapshot(computer_id: str) -> dict:
     coordinate guessing. Returns {ok, url, title, count, elements} where each
     element is a line like '[12] button "Save changes"' or
     '[13] input(email) "" =\\'\\' — pass that number to computer_click_element or
-    computer_fill. Refs are re-derived per call (document order), so a ref is valid
-    until the page changes; after a click or navigation, snapshot again.
+    computer_fill. Everything currently on screen is included; on a big page the rest
+    is cut to a budget, so `count` can exceed the lines you get and the numbers SKIP —
+    that is normal, use the number on the line, never its position in the list. Scroll
+    and snapshot again to reach what was cut.
+    Refs are re-derived per call (document order), so a ref is valid
+    until the page changes. You rarely need this tool twice: computer_navigate,
+    computer_click_element and computer_fill(submit) all return the fresh snapshot
+    in their own result. Call this for the FIRST look at a page, or after something
+    changed it that Case did not do (a timer, a redirect you waited out).
     Screenshots are still right for canvas/custom-drawn UI, visual layout questions,
     and anything outside the browser window."""
     return call("GET", f"/computers/{computer_id}/page", params={"wake": "true"}).json()
@@ -180,7 +189,9 @@ def computer_click_element(computer_id: str, ref: int, name: str = None,
     The element is scrolled into view and clicked with a real OS-level mouse event
     (isTrusted true). text, when given, is typed into the element after the click
     (click focuses it) — for one field that beats computer_fill.
-    One call replaces the screenshot→guess-coordinates→click→screenshot loop."""
+    On success the result carries `snapshot`: the page as it stands after the click,
+    settled. DO NOT call computer_snapshot after this — read the refs from there and
+    click again. One call is the whole act-then-look loop."""
     body = {"ref": ref}
     if name is not None:
         body["name"] = name
@@ -202,7 +213,8 @@ def computer_fill(computer_id: str, fields: list, submit: bool = False) -> dict:
     NEVER for passwords or OTP codes — password fields are refused inside the page;
     vaulted computer_login owns credentials. Per-field results come back in
     {fields:[{ref, ok, ...}]}; a failed ref usually means the page changed —
-    re-snapshot."""
+    re-snapshot. With submit=true the result also carries `snapshot` of the page the
+    submit landed on, so don't call computer_snapshot after one."""
     body = {"fields": fields}
     if submit:
         body["submit"] = True

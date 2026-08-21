@@ -56,6 +56,19 @@ def test_snapshot_formats_numbered_lines():
     assert "=" in out["elements"][2], out["elements"]   # input value shown
 
 
+def test_snapshot_numbers_lines_by_document_index_not_list_position():
+    """The shown list is the on-screen elements first, so on a big page it is a subset
+    with gaps. The number on the line is the ref click_element re-derives — take it
+    from the element, never from where it landed in the list."""
+    els = [dict(ELS[0], i=0), dict(ELS[1], i=97), dict(ELS[2], i=412)]
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "url": "u", "title": "t", "count": 3752, "els": els}})
+    out = browse.snapshot(ROW)
+    assert out["truncated"] is True and out["count"] == 3752, out
+    assert out["elements"][1].startswith("[97] "), out["elements"]
+    assert out["elements"][2].startswith("[412] "), out["elements"]
+
+
 def test_snapshot_truncation_flagged():
     browse.eval_js = fake_eval({"ok": True, "value": {
         "url": "u", "title": "t", "count": 400, "els": ELS}})
@@ -139,7 +152,8 @@ def test_fill_requires_ref_and_value():
 def test_fill_passes_fields_and_returns_page_result():
     browse.eval_js = fake_eval({"ok": True, "value": {
         "ok": True, "fields": [{"ref": 2, "ok": True, "name": "Work email"}]}})
-    out = browse.fill(ROW, [{"ref": 2, "value": "jane@x.com"}], submit=True)
+    out = browse.fill(ROW, [{"ref": 2, "value": "jane@x.com"}], submit=True,
+                      snapshot_after=False)   # this is about the script, not the settle
     assert out["ok"] is True, out
     expr = browse.eval_js.calls[0]
     assert '"jane@x.com"' in expr and "__submit=true" in expr
@@ -268,6 +282,118 @@ def test_teach_tick_502_nav_churn_is_quiet():
     browse.eval_js = fake_eval(ApiError(502, "eval_error", "context destroyed"))
     out = browse.teach_tick(ROW)
     assert out["ok"] and out["gap"] == 502, out
+
+
+# ---------- act then observe: the page rides back with the action ----------
+
+def fake_eval_map(rules):
+    """Answer by what an expression asks for, not by call order — the settle loop
+    polls an indeterminate number of times. Per-needle results are consumed in order
+    and the last one repeats."""
+    calls, used = [], {k: 0 for k in rules}
+
+    def _eval(row, expression, timeout_s=20):
+        calls.append(expression)
+        for needle, results in rules.items():
+            if needle in expression:
+                r = results[min(used[needle], len(results) - 1)]
+                used[needle] += 1
+                if isinstance(r, Exception):
+                    raise r
+                return r if isinstance(r, dict) else {"ok": True, "value": r}
+        raise AssertionError(f"unexpected eval: {expression[:90]}")
+    _eval.calls = calls
+    return _eval
+
+
+LOCATE = "const __i="
+STAMP = "__case_act=1"
+POLL = "__case_act===undefined"
+UNSTAMP = "delete window.__case_act"
+SNAP = "count:__els.length"
+FILL = "const __fields="
+
+
+def _snap_value(url, els=()):
+    return {"ok": True, "value": {"url": url, "title": "T", "count": len(els), "els": list(els)}}
+
+
+def test_click_returns_the_page_it_navigated_to():
+    # the saving is a whole LLM turn: the agent never has to ask "what happened?"
+    browse.eval_js = fake_eval_map({
+        LOCATE: [{"ok": True, "value": {"ok": True, "name": "Go", "tag": "a", "x": 1, "y": 2}}],
+        STAMP: [{"ok": True, "value": 1}],
+        POLL: [{"ok": True, "value": [True, "complete"]}],       # stamp gone = new document
+        SNAP: [_snap_value("https://next.test", ELS[:1])],
+    })
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Go")
+    assert out["ok"], out
+    assert out["snapshot"]["url"] == "https://next.test", out
+    assert out["snapshot"]["elements"][0] == '[0] a "Home" -> /', out
+
+
+def test_click_snapshot_never_hands_back_the_page_it_left():
+    """The bug this stamp exists for: the old document reports readyState 'complete'
+    for a beat after the click, so polling readyState alone snapshots the page the
+    agent just navigated away from."""
+    browse.eval_js = fake_eval_map({
+        LOCATE: [{"ok": True, "value": {"ok": True, "name": "Go", "tag": "a", "x": 1, "y": 2}}],
+        STAMP: [{"ok": True, "value": 1}],
+        POLL: [{"ok": True, "value": [False, "complete"]},       # old doc, already complete
+               {"ok": True, "value": [False, "complete"]},
+               ApiError(502, "eval_error", "context destroyed"),  # navigation commits
+               {"ok": True, "value": [True, "loading"]},
+               {"ok": True, "value": [True, "complete"]}],
+        SNAP: [_snap_value("https://next.test")],
+    })
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Go")
+    assert out["snapshot"]["url"] == "https://next.test", out
+
+
+def test_click_that_changes_nothing_still_returns_the_current_page():
+    # an in-page click never navigates; after the grace, this page IS the answer
+    browse.eval_js = fake_eval_map({
+        LOCATE: [{"ok": True, "value": {"ok": True, "name": "Tab", "tag": "button",
+                                        "x": 1, "y": 2}}],
+        STAMP: [{"ok": True, "value": 1}],
+        POLL: [{"ok": True, "value": [False, "complete"]}],
+        SNAP: [_snap_value("https://same.test", ELS)],
+        UNSTAMP: [{"ok": True, "value": None}],
+    })
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Tab")
+    assert out["snapshot"]["url"] == "https://same.test", out
+    # the page is left as it was found: no uniquely-named global for site JS to see
+    assert any(UNSTAMP in c for c in browse.eval_js.calls), browse.eval_js.calls
+
+
+def test_click_snapshot_can_be_turned_off():
+    browse.eval_js = fake_eval({"ok": True, "value": {"ok": True, "name": "n", "tag": "a",
+                                                      "x": 1, "y": 2}})
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, snapshot_after=False)
+    assert out["ok"] and "snapshot" not in out, out
+    assert len(browse.eval_js.calls) == 1, browse.eval_js.calls   # the locate walk, nothing more
+
+
+def test_fill_snapshots_only_when_it_submitted():
+    filled = {"ok": True, "value": {"ok": True, "fields": [{"ref": 2, "ok": True}]}}
+    # a plain fill leaves the caller's refs valid — don't spend the settle on it
+    browse.eval_js = fake_eval_map({FILL: [filled]})
+    out = browse.fill(ROW, [{"ref": 2, "value": "a@b.c"}])
+    assert out["ok"] and "snapshot" not in out, out
+    assert len(browse.eval_js.calls) == 1, browse.eval_js.calls
+    # a submit moves the page, and that is exactly when the caller is blind
+    browse.eval_js = fake_eval_map({
+        FILL: [filled],
+        STAMP: [{"ok": True, "value": 1}],
+        POLL: [{"ok": True, "value": [True, "complete"]}],
+        SNAP: [_snap_value("https://after.test")],
+    })
+    out = browse.fill(ROW, [{"ref": 2, "value": "a@b.c"}], submit=True)
+    assert out["snapshot"]["url"] == "https://after.test", out
 
 
 def test_teach_tick_504_still_raises():

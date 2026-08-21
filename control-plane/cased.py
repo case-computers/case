@@ -354,7 +354,12 @@ def navigate_(cid: str, body: dict = Body(...), wake: bool = False):
         if "url" not in body:
             raise ApiError(400, "bad_request", "body needs 'url'")
         timeout = max(1, min(int(body.get("timeout_s") or 30), 120))   # never navigate then
-        return navigate(row, body["url"], timeout)                     # report failure at t=0
+        out = navigate(row, body["url"], timeout)                      # report failure at t=0
+        if out.get("ok") and body.get("snapshot", True):
+            fresh = browse.snapshot(row)      # navigate already waited for readyState
+            if fresh.get("ok"):
+                out["snapshot"] = fresh
+        return out
 
 
 # ---------- element-level browsing (browse.py; control-plane composition) ----------
@@ -372,13 +377,15 @@ def click_(cid: str, body: dict = Body(...), wake: bool = False):
             raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
         return browse.click_element(row, int(body["ref"]), name=body.get("name"),
                                     text=body.get("text"),
-                                    screenshot=bool(body.get("screenshot")))
+                                    screenshot=bool(body.get("screenshot")),
+                                    snapshot_after=bool(body.get("snapshot", True)))
 
 
 @app.post("/v1/computers/{cid}/fill")
 def fill_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        return browse.fill(row, body.get("fields"), submit=bool(body.get("submit")))
+        return browse.fill(row, body.get("fields"), submit=bool(body.get("submit")),
+                           snapshot_after=bool(body.get("snapshot", True)))
 
 
 @app.post("/v1/computers/{cid}/wait")
