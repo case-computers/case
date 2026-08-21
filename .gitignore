@@ -1,0 +1,36 @@
+# Python
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local runtime state (the vault key + case.db live in ~/.case, never here — belt & braces)
+*.db
+*.sqlite*
+*.key
+*.log
+.case/
+
+# Local env files
+.env
+*.env.local
+
+# Local git worktrees
+.worktrees/
+
+# Agent tooling state
+.claude/
+
+# Node
+node_modules/
+
+# Drive UI local thread store
+web/web-ui/threads.json
+
+# Acceptance-test screenshots (written by tests/test_acceptance.py runs)
+tests/shots/

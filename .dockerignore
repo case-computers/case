@@ -1,0 +1,17 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.worktrees
+.claude
+**/.case
+*.db
+*.sqlite*
+*.key
+*.log
+node_modules
+web/web-ui/threads.json
+.env
+*.env.local
+tests/shots

@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: MIT
+# The tests that need neither Docker nor a running cased. The acceptance suite
+# (tests/test_acceptance.py) needs a real desktop container and stays local-only.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements-dev.txt
+
+      - name: Unit tests (no Docker)
+        run: |
+          # Everything except the acceptance suite, which needs a real desktop
+          # container. Enumerated from disk so a new test file is never silently
+          # left out of CI.
+          fail=0
+          for f in tests/test_*.py; do
+            case "$f" in tests/test_acceptance.py) continue ;; esac
+            echo "--- $f"
+            .venv/bin/python "$f" || fail=1
+          done
+          exit $fail
+
+      - name: Drive UI tests
+        run: |
+          npm --prefix web ci --omit=dev    # serve.mjs imports openai at module load
+          node web/web-ui/test_serve.mjs
+          node web/web-ui/test_nav.mjs
+          node web/web-ui/test_deploy.mjs
+
+  # Case is dual-licensed and sold commercially, which is only possible if the
+  # project can sublicense every contribution. Deliberately no third-party CLA
+  # bot: the one everyone used was archived in March 2026, and a licensing gate
+  # is the last place to inherit an abandoned dependency. A contributor signs
+  # by adding their own username to CLA-SIGNERS in their first pull request.
+  cla:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Contributor has signed the CLA
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # No process substitution and POSIX classes only: this must behave the
+          # same in any shell anyone runs it in, including locally.
+          test -n "$AUTHOR" || { echo "no pull request author in the event"; exit 1; }
+          if grep -v '^[[:space:]]*#' CLA-SIGNERS | grep -qxF "$AUTHOR"; then
+            echo "$AUTHOR has signed the CLA."
+            exit 0
+          fi
+          cat <<EOF
+          $AUTHOR has not signed the CLA.
+
+          Case is dual-licensed (AGPL for the box, MIT for the clients) and is
+          also offered under a commercial license. That is only possible if the
+          project can sublicense every contribution, so we ask each contributor
+          to sign once. You keep your copyright: it is a license, not an
+          assignment.
+
+          To sign: read CLA.md, then add a line containing exactly
+
+              $AUTHOR
+
+          to the CLA-SIGNERS file, and push it as part of this pull request.
+          That is the whole process, and you never have to do it again.
+          EOF
+          exit 1
+
+  spdx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every source file declares its license
+        run: |
+          missing=0
+          while read -r f; do
+            grep -q 'SPDX-License-Identifier' "$f" || { echo "no SPDX header: $f"; missing=1; }
+          done < <(git ls-files \
+                     'control-plane/*.py' 'image/*.py' 'image/*.sh' \
+                     'mcp/*.py' 'tests/*.py' 'web/**/*.mjs' 'bin/case')
+          [ "$missing" = 0 ] || {
+            echo "New files take the SPDX id of their directory. See LICENSE.md."
+            exit 1
+          }

@@ -1,0 +1,120 @@
+# Self-host Case: cased + Drive UI + deployer on localhost.
+# Requires Docker Desktop or Colima already running.
+#
+#   docker compose up --build
+#   open http://127.0.0.1:4174/deploy   # computers
+#   open http://127.0.0.1:4174          # Drive (chat)
+#   claude mcp add --transport http case http://127.0.0.1:8788/mcp
+#
+# API/MCP only (no Drive): docker compose up cased mcp --build
+# Optional share token: CASE_TOKEN=… in .env (required if you publish ports off localhost).
+
+name: case
+
+networks:
+  case:
+    name: case
+
+volumes:
+  case-home:
+  ui-data:
+
+services:
+  desk-image:
+    image: ${CASE_IMAGE:-case-desk:0.1}
+    build: ./image
+    command: ["/bin/true"]
+    network_mode: none
+    restart: "no"
+
+  cased:
+    build:
+      context: .
+      dockerfile: Dockerfile.cased
+    image: case-control:0.1
+    environment:
+      CASE_HOME: /data
+      CASE_DOCKER_NETWORK: case
+      CASE_BIND: "0.0.0.0"
+      CASE_IMAGE: ${CASE_IMAGE:-case-desk:0.1}
+      CASE_TOKEN: ${CASE_TOKEN:-}
+      CASE_MAX_RUNNING: ${CASE_MAX_RUNNING:-4}
+      # Total RAM the awake desktops may hold. Unset = 75% of what the engine sees,
+      # which on a Mac is the Docker VM, not the Mac.
+      CASE_MAX_RAM_MB: ${CASE_MAX_RAM_MB:-}
+      # DESK_DEBUG=1: desktops mirror chromium/websockify logs to docker logs
+      DESK_DEBUG: ${DESK_DEBUG:-}
+      # Desktop resolution (WxH or WxHxDEPTH). Default 1280x800x24.
+      DESK_RESOLUTION: ${DESK_RESOLUTION:-}
+      # Optional phone notifications + assist links (see .env.example)
+      CASE_NTFY_URL: ${CASE_NTFY_URL:-https://ntfy.sh}
+      CASE_NTFY_TOPIC: ${CASE_NTFY_TOPIC:-}
+      CASE_NTFY_ANSWER_TOPIC: ${CASE_NTFY_ANSWER_TOPIC:-}
+      CASE_PUBLIC_HOST: ${CASE_PUBLIC_HOST:-}
+      # Optional CAPTCHA auto-solve (see .env.example)
+      CASE_DBC_AUTHTOKEN: ${CASE_DBC_AUTHTOKEN:-}
+      CASE_DBC_USERNAME: ${CASE_DBC_USERNAME:-}
+      CASE_DBC_PASSWORD: ${CASE_DBC_PASSWORD:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - case-home:/data
+    ports:
+      - "127.0.0.1:8787:8787"
+    networks: [case]
+    depends_on:
+      desk-image:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # cased sleeps every desktop on SIGTERM, and each one gets up to 10s to stop.
+    # The default 10s grace would SIGKILL cased halfway through that.
+    stop_grace_period: 120s
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.cased
+    image: case-control:0.1
+    environment:
+      CASE_MCP_HTTP: "1"
+      CASE_URL: http://cased:8787/v1
+      CASE_TOKEN: ${CASE_TOKEN:-}
+      CASE_MCP_BIND: "0.0.0.0"
+      CASE_MCP_PORT: "8788"
+      # CASE_MCP_SCHEDULES=1 unlocks the schedule_* tools (see .env.example)
+      CASE_MCP_SCHEDULES: ${CASE_MCP_SCHEDULES:-}
+    command: ["python", "/app/mcp/case_mcp.py"]
+    ports:
+      - "127.0.0.1:8788:8788"
+    networks: [case]
+    depends_on:
+      cased:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8788/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: case-ui:0.1
+    environment:
+      CASE_URL: http://cased:8787/v1
+      CASE_DOCKER_NETWORK: case
+      CASE_BIND: "0.0.0.0"
+      CASE_TOKEN: ${CASE_TOKEN:-}
+      CASE_THREADS: /data/threads.json
+      CASE_LOCAL: "1"
+      PORT: "4174"
+    volumes:
+      - ui-data:/data
+    ports:
+      - "127.0.0.1:4174:4174"
+    networks: [case]
+    depends_on:
+      cased:
+        condition: service_healthy
+    restart: unless-stopped

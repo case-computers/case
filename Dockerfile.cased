@@ -1,0 +1,16 @@
+# Control plane. Talks to the host Docker engine via the mounted socket.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY control-plane /app/control-plane
+COPY mcp /app/mcp
+ENV PYTHONPATH=/app/control-plane
+ENV CASE_HOME=/data
+ENV CASE_BIND=0.0.0.0
+EXPOSE 8787
+HEALTHCHECK --interval=5s --timeout=3s --retries=12 \
+  CMD curl -sf http://127.0.0.1:8787/health || exit 1
+CMD ["python", "/app/control-plane/cased.py"]

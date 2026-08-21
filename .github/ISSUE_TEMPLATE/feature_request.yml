@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+name: Feature request
+description: Something Case should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Case makes hard or impossible?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. The problem matters more than the proposed shape.
+  - type: markdown
+    attributes:
+      value: |
+        Out of scope, so it will be closed: visual workflow builders (n8n-style
+        graphs). A schedule here is one sentence of natural language.
