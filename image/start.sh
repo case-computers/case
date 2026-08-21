@@ -4,14 +4,30 @@
 # Traps SIGTERM (docker stop = sleep) so Chromium exits cleanly and flushes its profile.
 
 RES="${DESK_RESOLUTION:-1280x800x24}"
+# Xvfb needs WxHxD and dies on bare WxH; depth 24 is the only one deskd's
+# XWD->PNG grab supports (32bpp), so it is also the only default we append.
+case "$RES" in *x*x*) ;; *) RES="${RES}x24" ;; esac
 
 # libXcursor honors this in every X client — the one switch that themes the
 # cursor everywhere (chromium reads it via GTK settings too, seeded below).
 export XCURSOR_THEME=case XCURSOR_SIZE=32
 
-# Seed per-user desktop config when missing (first boot, or volumes from older
-# images); never overwrite — the volume is the user's.
-seed() { [ -f "$2" ] || { mkdir -p "$(dirname "$2")"; cp "$1" "$2"; }; }
+# Seed per-user desktop config from /usr/share/case. Two rules fight here: never
+# stomp the user's own tweaks, but a shipped look change has to actually land.
+# LOOK settles it. The volume outlives the image (it IS the computer's identity),
+# so a desk created before a look change keeps writing back its old xfconf files
+# and a missing-only seed silently skips every one of them — leaving the new
+# wallpaper/panel/dock sitting unused in the image. Bump LOOK whenever the
+# assets change: every desk force-seeds exactly once (resetting desktop tweaks
+# that one time), then goes back to leaving the user alone.
+LOOK=v2
+STAMP=~/.config/.case-look
+if [ "$(cat "$STAMP" 2>/dev/null)" = "$LOOK" ]; then
+  seed() { [ -f "$2" ] || { mkdir -p "$(dirname "$2")"; cp "$1" "$2"; }; }
+else
+  echo "[start] look $LOOK — re-seeding desktop config" >&2
+  seed() { mkdir -p "$(dirname "$2")"; cp -f "$1" "$2"; }
+fi
 seed /usr/share/case/gtk-settings.ini ~/.config/gtk-3.0/settings.ini
 seed /usr/share/case/xfce4-panel.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
 seed /usr/share/case/xfwm4.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
@@ -20,6 +36,7 @@ seed /usr/share/case/xfce4-desktop.xml ~/.config/xfce4/xfconf/xfce-perchannel-xm
 seed /usr/share/applications/chromium.desktop ~/.config/xfce4/panel/launcher-10/chromium.desktop
 seed /usr/share/applications/thunar.desktop ~/.config/xfce4/panel/launcher-11/thunar.desktop
 seed /usr/share/applications/debian-xterm.desktop ~/.config/xfce4/panel/launcher-12/debian-xterm.desktop
+mkdir -p "$(dirname "$STAMP")" && echo "$LOOK" > "$STAMP"
 
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0   # stale after docker stop; blocks Xvfb on wake
 # -fbdir /dev/shm: mmap the framebuffer to a file deskd reads for screenshots
