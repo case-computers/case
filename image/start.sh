@@ -22,11 +22,12 @@ export XCURSOR_THEME=case XCURSOR_SIZE=32
 # that one time), then goes back to leaving the user alone.
 LOOK=v2
 STAMP=~/.config/.case-look
+seeded=1
 if [ "$(cat "$STAMP" 2>/dev/null)" = "$LOOK" ]; then
-  seed() { [ -f "$2" ] || { mkdir -p "$(dirname "$2")"; cp "$1" "$2"; }; }
+  seed() { [ -f "$2" ] || { mkdir -p "$(dirname "$2")" && cp "$1" "$2"; } || seeded=0; }
 else
   echo "[start] look $LOOK — re-seeding desktop config" >&2
-  seed() { mkdir -p "$(dirname "$2")"; cp -f "$1" "$2"; }
+  seed() { mkdir -p "$(dirname "$2")" && cp -f "$1" "$2" || seeded=0; }
 fi
 seed /usr/share/case/gtk-settings.ini ~/.config/gtk-3.0/settings.ini
 seed /usr/share/case/xfce4-panel.xml ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
@@ -36,7 +37,9 @@ seed /usr/share/case/xfce4-desktop.xml ~/.config/xfce4/xfconf/xfce-perchannel-xm
 seed /usr/share/applications/chromium.desktop ~/.config/xfce4/panel/launcher-10/chromium.desktop
 seed /usr/share/applications/thunar.desktop ~/.config/xfce4/panel/launcher-11/thunar.desktop
 seed /usr/share/applications/debian-xterm.desktop ~/.config/xfce4/panel/launcher-12/debian-xterm.desktop
-mkdir -p "$(dirname "$STAMP")" && echo "$LOOK" > "$STAMP"
+# stamp only on a clean seed: a partial force-copy must retry next start, not
+# flip to missing-only and leave the desk on a mixed old/new look
+[ "$seeded" = 1 ] && mkdir -p "$(dirname "$STAMP")" && echo "$LOOK" > "$STAMP"
 
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0   # stale after docker stop; blocks Xvfb on wake
 # -fbdir /dev/shm: mmap the framebuffer to a file deskd reads for screenshots

@@ -157,6 +157,7 @@ def test_fill_passes_fields_and_returns_page_result():
     assert out["ok"] is True, out
     expr = browse.eval_js.calls[0]
     assert '"jane@x.com"' in expr and "__submit=true" in expr
+    assert "out.every(o=>o.ok)" in expr and "out.some" not in expr
     assert "vault-only" in expr   # the password refusal ships inside the page script
 
 
@@ -394,6 +395,23 @@ def test_fill_snapshots_only_when_it_submitted():
     })
     out = browse.fill(ROW, [{"ref": 2, "value": "a@b.c"}], submit=True)
     assert out["snapshot"]["url"] == "https://after.test", out
+
+
+def test_click_unstamped_does_not_treat_missing_marker_as_navigation():
+    """If the stamp never landed, __case_act===undefined is this document, not a
+    new one. Polling it as 'navigated' would snapshot as soon as readyState is
+    complete, which the page we started on already is."""
+    browse.eval_js = fake_eval_map({
+        LOCATE: [{"ok": True, "value": {"ok": True, "name": "Tab", "tag": "button",
+                                        "x": 1, "y": 2}}],
+        STAMP: [{"ok": False, "error": "eval failed"}],
+        "document.readyState": [{"ok": True, "value": "complete"}],
+        SNAP: [_snap_value("https://same.test", ELS)],
+    })
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Tab")
+    assert out["snapshot"]["url"] == "https://same.test", out
+    assert not any(POLL in c for c in browse.eval_js.calls), browse.eval_js.calls
 
 
 def test_teach_tick_504_still_raises():

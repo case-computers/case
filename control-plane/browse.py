@@ -154,11 +154,29 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
     grace that long because a JS-driven navigation does not commit instantly. A 502
     means the context was torn down mid-navigation, which is progress, so poll through.
 
+    If the stamp never landed, `__case_act===undefined` is the starting document,
+    not proof of navigation. Wait out the grace and snapshot whatever is complete.
+
     This costs ~2 extra eval round trips at ~11ms each. The computer_snapshot call it
     saves the agent is a whole model turn. Cheap side of a very lopsided trade.
     """
     if not stamped:
-        time.sleep(settle_s)   # no stamp to compare against; give the action time to land
+        time.sleep(settle_s)
+        deadline = time.time() + budget_s
+        while time.time() < deadline:
+            time.sleep(0.25)
+            try:
+                r = eval_js(row, "document.readyState", 3)
+            except ApiError as e:
+                if e.status != 502:
+                    return None
+                continue
+            if r.get("value") == "complete":
+                break
+        try:
+            return snapshot(row)
+        except ApiError:
+            return None
     deadline = time.time() + budget_s
     grace = time.time() + settle_s
     while time.time() < deadline:
@@ -268,7 +286,7 @@ for(const f of __fields){
     out.push({ref:f.ref,ok:true,name:e.name});
   }catch(err){out.push({ref:f.ref,ok:false,error:String(err).slice(0,80)});}
 }
-if(__submit&&out.some(o=>o.ok)){
+if(__submit&&out.length&&out.every(o=>o.ok)){
   const first=__els[__fields[0].ref];
   const form=first&&first.el.form;
   if(form){form.requestSubmit?form.requestSubmit():form.submit();}
