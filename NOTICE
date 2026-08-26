@@ -47,6 +47,7 @@ cryptography                            Apache-2.0 or BSD-3-Clause
 requests                                Apache-2.0
 websocket-client                        Apache-2.0
 mcp (Model Context Protocol SDK)        MIT
+Pillow                                  MIT-CMU
 pytest                                  MIT
 
 --------------------------------------------------------------------------------

@@ -318,10 +318,16 @@ def awake(cid, wake):
 
 
 @app.get("/v1/computers/{cid}/screenshot")
-def screenshot(cid: str, wake: bool = False):
+def screenshot(cid: str, wake: bool = False, marks: bool = False):
     with awake(cid, wake) as row:
         # desk_bytes raises ApiError(423) during credential injection
-        return Response(desk_bytes(row, "GET", "/screenshot"), media_type="image/png")
+        content = desk_bytes(row, "GET", "/screenshot")
+        if marks:
+            try:
+                content = browse.overlay_marks(content, browse.element_rects(row))
+            except Exception:
+                pass
+        return Response(content, media_type="image/png")
 
 
 @app.post("/v1/computers/{cid}/action")
@@ -379,6 +385,22 @@ def click_(cid: str, body: dict = Body(...), wake: bool = False):
                                     text=body.get("text"),
                                     screenshot=bool(body.get("screenshot")),
                                     snapshot_after=bool(body.get("snapshot", True)))
+
+
+@app.post("/v1/computers/{cid}/hover")
+def hover_(cid: str, body: dict = Body(...), wake: bool = False):
+    with awake(cid, wake) as row:
+        if "ref" not in body:
+            raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
+        return browse.hover(row, int(body["ref"]), name=body.get("name"))
+
+
+@app.post("/v1/computers/{cid}/upload")
+def upload_(cid: str, body: dict = Body(...), wake: bool = False):
+    with awake(cid, wake) as row:
+        if "ref" not in body or "path" not in body:
+            raise ApiError(400, "bad_request", "body needs 'ref' and 'path'")
+        return browse.upload(row, int(body["ref"]), body["path"], name=body.get("name"))
 
 
 @app.post("/v1/computers/{cid}/fill")

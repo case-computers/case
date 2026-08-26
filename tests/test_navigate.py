@@ -123,6 +123,61 @@ def test_url_is_json_quoted_into_the_expression():
     assert '"https://x.test/a\'b\\"c"' in ev.seen[0], ev.seen[0]
 
 
+def test_empty_interactive_count_hydrates_and_reloads():
+    ev = fake([
+        ["https://x.test/", "T", 0],
+        0,
+        {"ok": True, "value": None},
+        4,
+    ])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test", timeout_s=8)
+    assert out["ok"] is True, out
+    assert any("location.reload()" in e for e in ev.seen), ev.seen
+    assert any("querySelectorAll('a,button,input,select,textarea')" in e for e in ev.seen)
+
+
+def test_two_element_arrival_skips_hydrate():
+    ev = fake([["https://x.test/final", "Title"]])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test", timeout_s=5)
+    assert out["ok"] is True
+    assert not any("location.reload()" in e for e in ev.seen)
+
+
+def test_arrival_carries_page_text():
+    deskclient.eval_js = fake([
+        ["https://x.test/final", "Title"],
+        "Hello from the page",
+    ])
+    out = deskclient.navigate(ROW, "https://x.test", timeout_s=5)
+    assert out["ok"] is True
+    assert out["text"] == "Hello from the page", out
+
+
+def test_hydrate_arrival_carries_page_text():
+    ev = fake([
+        ["https://x.test/", "T", 0],
+        4,
+        "hydrated body",
+    ])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test", timeout_s=8)
+    assert out["ok"] is True
+    assert out["text"] == "hydrated body", out
+    assert not any("location.reload()" in e for e in ev.seen)
+
+
+def test_page_text_eval_failure_is_omitted():
+    deskclient.eval_js = fake([
+        ["https://x.test/final", "Title"],
+        ApiError(502, "eval_error", "context destroyed"),
+    ])
+    out = deskclient.navigate(ROW, "https://x.test", timeout_s=5)
+    assert out["ok"] is True
+    assert "text" not in out, out
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

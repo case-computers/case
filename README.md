@@ -9,7 +9,9 @@ brain (Claude, Cursor, Codex, or the Drive UI with your provider key).
 What the agent gets, over MCP:
 
 - **A real desktop**: navigate, snapshot numbered clickable elements, click/fill
-  by ref, exec, files, network capture — no coordinate guessing.
+  by ref, hover menus, upload files under `/home/agent`, marked screenshots,
+  exec, files, network capture — no coordinate guessing. Navigate and click
+  return the first 2000 characters of page text.
 - **Vault logins**: the human saves a credential once (encrypted, via a one-time
   link); the machine types it into the site's own login page. The agent and the
   API never see the password.

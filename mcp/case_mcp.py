@@ -78,10 +78,13 @@ def computer_list() -> dict:
 
 
 @mcp.tool()
-def computer_screenshot(computer_id: str) -> Image:
+def computer_screenshot(computer_id: str, marks: bool = False) -> Image:
     """Screenshot of the computer's display (1280x800 by default; see computer_list
-    display for the actual size). Wakes the computer if asleep."""
-    r = call("GET", f"/computers/{computer_id}/screenshot", params={"wake": "true"})
+    display for the actual size). Wakes the computer if asleep.
+    marks=true draws numbered boxes matching snapshot refs (drawn on the PNG in
+    the control plane — the live page is not modified)."""
+    r = call("GET", f"/computers/{computer_id}/screenshot",
+             params={"wake": "true", "marks": "true" if marks else "false"})
     return Image(data=r.content, format="png")
 
 
@@ -145,12 +148,12 @@ def computer_eval(computer_id: str, expression: str, timeout_s: int = 20) -> dic
 def computer_navigate(computer_id: str, url: str, timeout_s: int = 30) -> dict:
     """Point the computer's browser at url and block until the page has loaded.
     One call — do not follow it with readyState polling. Returns
-    {ok, url, title, snapshot} (url is the final one, after redirects) or
-    {ok:false, error}. `snapshot` is the arrived page's numbered elements, already
-    there — DO NOT call computer_snapshot after this, you have it.
+    {ok, url, title, text, snapshot} (url is the final one, after redirects) or
+    {ok:false, error}. `text` is the first 2000 chars of the page; only eval
+    innerText when you need more. `snapshot` is the arrived page's numbered
+    elements — DO NOT call computer_snapshot after this, you have it.
     The body is ready when this returns; `title` is best-effort and can be "" on
     pages that set it a beat late — that is not a signal to wait or retry.
-    Read page text with computer_eval("document.body.innerText").
     Same-page '#anchor' jumps are not navigations; use computer_eval for those."""
     return call("POST", f"/computers/{computer_id}/navigate", params={"wake": "true"},
                 json={"url": url, "timeout_s": timeout_s},
@@ -165,12 +168,10 @@ def computer_snapshot(computer_id: str) -> dict:
     coordinate guessing. Returns {ok, url, title, count, elements} where each
     element is a line like '[12] button "Save changes"' or
     '[13] input(email) "" =\\'\\' — pass that number to computer_click_element or
-    computer_fill. Everything currently on screen is included; on a big page the rest
-    is cut to a budget, so `count` can exceed the lines you get and the numbers SKIP —
-    that is normal, use the number on the line, never its position in the list. Scroll
-    and snapshot again to reach what was cut.
-    Refs are re-derived per call (document order), so a ref is valid
-    until the page changes. You rarely need this tool twice: computer_navigate,
+    computer_fill. Starred lines (`*[n]`) appeared since the last snapshot
+    (autocomplete/typeahead); click one, do not press Enter. Refs are
+    re-derived per call (document order), so a ref is valid until the page
+    changes. You rarely need this tool twice: computer_navigate,
     computer_click_element and computer_fill(submit) all return the fresh snapshot
     in their own result. Call this for the FIRST look at a page, or after something
     changed it that Case did not do (a timer, a redirect you waited out).
@@ -184,14 +185,16 @@ def computer_click_element(computer_id: str, ref: int, name: str = None,
                            text: str = None, screenshot: bool = False) -> dict:
     """Click element [ref] from the last computer_snapshot. Pass name (the quoted
     text from the snapshot line) so a changed page is caught: on mismatch this
-    REFUSES to click and returns {ok:false, stale:true, snapshot} — use the fresh
-    snapshot and retry with the right ref; never click blind after a refusal.
+    REFUSES to click and returns {ok:false, stale:true, snapshot} unless exactly
+    one current element matches name — then it heals and clicks ({healed:true}).
+    Use the fresh snapshot after a refusal; never click blind.
     The element is scrolled into view and clicked with a real OS-level mouse event
-    (isTrusted true). text, when given, is typed into the element after the click
+    (isTrusted true). A click that opens a new tab activates it and returns
+    switched_tab. Returns the first 2000 chars of page text after the click.
+    text, when given, is typed into the element after the click
     (click focuses it) — for one field that beats computer_fill.
-    On success the result carries `snapshot`: the page as it stands after the click,
-    settled. DO NOT call computer_snapshot after this — read the refs from there and
-    click again. One call is the whole act-then-look loop."""
+    On success the result also carries `snapshot`: the page as it stands after the
+    click, settled. DO NOT call computer_snapshot after this."""
     body = {"ref": ref}
     if name is not None:
         body["name"] = name
@@ -201,6 +204,29 @@ def computer_click_element(computer_id: str, ref: int, name: str = None,
         body["screenshot"] = True
     return call("POST", f"/computers/{computer_id}/click",
                 params={"wake": "true"}, json=body, timeout=60).json()
+
+
+@mcp.tool()
+def computer_hover(computer_id: str, ref: int, name: str = None) -> dict:
+    """Hover the OS pointer over snapshot [ref] without clicking — opens menus
+    that only appear on hover. Pass name so a changed page is refused."""
+    body = {"ref": ref}
+    if name is not None:
+        body["name"] = name
+    return call("POST", f"/computers/{computer_id}/hover",
+                params={"wake": "true"}, json=body, timeout=40).json()
+
+
+@mcp.tool()
+def computer_upload(computer_id: str, ref: int, path: str, name: str = None) -> dict:
+    """Assign a file already on the computer (path under /home/agent/, ≤5MB) to
+    snapshot [ref], which must be input[type=file]. Never send file bytes through
+    this tool — write the file with computer_file_put or computer_exec first."""
+    body = {"ref": ref, "path": path}
+    if name is not None:
+        body["name"] = name
+    return call("POST", f"/computers/{computer_id}/upload",
+                params={"wake": "true"}, json=body, timeout=90).json()
 
 
 @mcp.tool()
