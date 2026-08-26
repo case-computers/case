@@ -47,7 +47,17 @@ export function caseToolPlan(name, args, cid) {
   }
   if (name === 'computer_exec') {
     const t = Math.min(Math.max(Number(a.timeout_s) || 30, 1), 600);
-    return { method: 'POST', path: `/computers/${id}/exec?wake=true`, json: { command: a.command, timeout_s: t }, timeoutMs: (t + 30) * 1000, act: 'exec' };
+    // Spool the full output to a file inside the computer and show the model only the
+    // head of it. A noisy command otherwise lands whole in history and is re-sent on
+    // every later round of the turn; the file keeps the rest reachable with cat/grep/tail.
+    // The exit code has to be echoed explicitly — the redirect swallows it otherwise.
+    const log = `/tmp/case-out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.log`;
+    // Subshell, not a brace group: `exit 1` in the agent's command would otherwise
+    // kill this shell before the exit line is echoed, and `{ cmd\n; }` is a syntax error.
+    const command = `( ${a.command}\n) > ${log} 2>&1; __rc=$?; echo "exit=$__rc";`
+      + ` wc -l < ${log} | tr -d ' ' | sed 's/^/lines=/'; head -c 1500 ${log};`
+      + ` find /tmp -name 'case-out-*.log' -mmin +120 -delete 2>/dev/null || true`;
+    return { method: 'POST', path: `/computers/${id}/exec?wake=true`, json: { command, timeout_s: t }, timeoutMs: (t + 30) * 1000, act: 'exec', logPath: log };
   }
   return { error: `unknown tool ${name}` };
 }
@@ -99,7 +109,11 @@ export async function runCaseTool(name, args, cid) {
     if (r.status >= 400) {
       return { ok: false, status: r.status, error: r.json || r.raw, act: plan.act };
     }
-    return { ok: true, act: plan.act, result: r.json ?? { ok: true } };
+    const result = r.json ?? { ok: true };
+    if (plan.logPath && result && typeof result === 'object') {
+      result.full_output = `${plan.logPath} — only the first 1500 bytes are above; cat/grep/tail this file for the rest`;
+    }
+    return { ok: true, act: plan.act, result };
   } catch (err) {
     return { ok: false, error: err.message || 'cased unreachable', act: plan.act };
   }
@@ -253,7 +267,28 @@ export function tracesFromAnthropicMessage(message) {
   return { thinks, calls, texts };
 }
 
-export function histToAnthropicMessages(items) {
+export function userContentText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return content == null ? '' : String(content);
+  return content.map((c) => {
+    if (typeof c === 'string') return c;
+    if (c?.type === 'input_text' || c?.type === 'text') return c.text || '';
+    return '';
+  }).filter(Boolean).join('\n');
+}
+
+function openaiPartToAnthropic(c) {
+  if (typeof c === 'string') return c ? { type: 'text', text: c } : null;
+  if (c?.type === 'input_text' || c?.type === 'text') return c.text ? { type: 'text', text: c.text } : null;
+  if (c?.type === 'input_image') {
+    const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(c.image_url || '');
+    if (!m) return null;
+    return { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } };
+  }
+  return null;
+}
+
+export function histToAnthropicMessages(items, { media = false } = {}) {
   const messages = [];
   let pendingAssistant = [];
   let pendingResults = [];
@@ -268,10 +303,22 @@ export function histToAnthropicMessages(items) {
     pendingResults = [];
   };
   for (const it of items || []) {
-    if (it.role === 'user' && typeof it.content === 'string' && !it.type) {
+    if (it.shot) continue;
+    if (it.role === 'user' && it.content != null && !it.type) {
       flushAssistant();
       flushResults();
-      messages.push({ role: 'user', content: String(it.content) });
+      if (media && Array.isArray(it.content)) {
+        const parts = it.content.map(openaiPartToAnthropic).filter(Boolean);
+        if (parts.length) {
+          messages.push({
+            role: 'user',
+            content: parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts,
+          });
+          continue;
+        }
+      }
+      const text = userContentText(it.content);
+      if (text) messages.push({ role: 'user', content: text });
     } else if (it.type === 'function_call') {
       flushResults();
       let input = {};
@@ -313,8 +360,59 @@ function clipJson(v, n = 8000) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+/** Retry a provider round on rate limits (429/529), honoring the server's
+ * suggested wait ("try again in Xs" / retry-after), capped at 60s. History is
+ * only mutated after a round completes, so replaying a failed round is safe. */
+function abortError(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const err = new Error(signal?.reason ? String(signal.reason) : 'stopped by user');
+  err.name = 'AbortError';
+  return err;
+}
+
+function abortableDelay(ms, signal) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      signal.removeEventListener('abort', stop);
+      resolve();
+    };
+    const stop = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', stop);
+      reject(abortError(signal));
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', stop, { once: true });
+    if (signal.aborted) stop();
+  });
+}
+
+export async function withRateRetry(fn, emit, tries = 5, signal) {
+  for (let a = 0; ; a++) {
+    if (signal?.aborted) throw abortError(signal);
+    try { return await fn(); }
+    catch (err) {
+      if (signal?.aborted) throw err;
+      const status = err?.status ?? err?.response?.status;
+      const limited = status === 429 || status === 529
+        || /rate limit|overloaded/i.test(err?.message || '');
+      if (!limited || a >= tries - 1) throw err;
+      const m = /try again in ([\d.]+)s/i.exec(err?.message || '');
+      const hdr = Number(err?.headers?.['retry-after']
+        ?? err?.response?.headers?.get?.('retry-after'));
+      let wait = m ? Number(m[1]) : Number.isFinite(hdr) && hdr > 0 ? hdr : 2 ** a;
+      wait = Math.min(Math.max(wait + 0.5, 1), 60);
+      emit?.({ type: 'think', text: `rate limited — retrying in ${Math.ceil(wait)}s` });
+      await abortableDelay(wait * 1000, signal);
+    }
+  }
+}
+
 export async function anthropicToolLoop({
   key, model, effort, system, messages, tools, emit, rounds, runTool, actFor, stopped,
+  beforeRound, tokenBudget, signal,
 }) {
   const client = new Anthropic({ apiKey: key });
   const antTools = openaiToolsToAnthropic(tools);
@@ -330,39 +428,55 @@ export async function anthropicToolLoop({
   };
   let text = '';
   let finished = false;
+  const spend = { in: 0, cached: 0, out: 0 };
+  const overBudget = () => Number(tokenBudget) > 0 && spend.in > tokenBudget;
   const round = async (p) => {
     const ctx = newAnthropicStreamCtx();
     let thinkDelta = false;
     let textDelta = false;
     const stream = client.messages.stream(p);
-    for await (const ev of stream) {
-      const nd = anthropicEventToNdjson(ev, ctx);
-      if (!nd) continue;
-      if (nd.type === 'think_delta') thinkDelta = true;
-      if (nd.type === 'text_delta') textDelta = true;
-      if (nd.type === 'tool') nd.act = actFor(nd.name, {}) || nd.name;
-      if (nd.type === 'tool_args') nd.act = actFor(nd.name || 'tool', nd.args || {}) || nd.name;
-      emit(nd);
+    const abort = () => stream.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      for await (const ev of stream) {
+        const nd = anthropicEventToNdjson(ev, ctx);
+        if (!nd) continue;
+        if (nd.type === 'think_delta') thinkDelta = true;
+        if (nd.type === 'text_delta') textDelta = true;
+        if (nd.type === 'tool') nd.act = actFor(nd.name, {}) || nd.name;
+        if (nd.type === 'tool_args') nd.act = actFor(nd.name || 'tool', nd.args || {}) || nd.name;
+        emit(nd);
+      }
+      const message = await stream.finalMessage();
+      const traces = tracesFromAnthropicMessage(message);
+      if (!thinkDelta) {
+        for (const t of traces.thinks) emit({ type: 'think', text: t });
+      }
+      return { message, traces, textDelta };
+    } finally {
+      signal?.removeEventListener('abort', abort);
     }
-    const message = await stream.finalMessage();
-    const traces = tracesFromAnthropicMessage(message);
-    if (!thinkDelta) {
-      for (const t of traces.thinks) emit({ type: 'think', text: t });
-    }
-    return { message, traces, textDelta };
   };
-  for (let i = 0; i < rounds && !finished; i++) {
+  for (let i = 0; i < rounds && !finished && !overBudget(); i++) {
     if (stopped?.()) break;
+    beforeRound?.(messages);
     let result;
     try {
-      result = await round(params);
+      result = await withRateRetry(() => round(params), emit, 5, signal);
     } catch (err) {
+      if (signal?.aborted) throw err;
       if (!params.output_config) throw err;
       const rest = { ...params };
       delete rest.output_config;
-      result = await round(rest);
+      result = await withRateRetry(() => round(rest), emit, 5, signal);
     }
     const { message, traces, textDelta } = result;
+    const u = message.usage || {};
+    spend.in += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0)
+      + (u.cache_creation_input_tokens || 0);
+    spend.cached += u.cache_read_input_tokens || 0;
+    spend.out += u.output_tokens || 0;
     text = traces.texts.join('\n').trim();
     if (!traces.calls.length) {
       finished = true;
@@ -393,5 +507,5 @@ export async function anthropicToolLoop({
     }
     messages.push({ role: 'user', content: results });
   }
-  return { text, finished };
+  return { text, finished, spend, overBudget: overBudget() };
 }

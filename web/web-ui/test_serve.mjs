@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: MIT
 // Pure-unit checks for the drive v2 server helpers. Run: node web/web-ui/test_serve.mjs
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile } from './serve.mjs';
+import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
-  histToAnthropicMessages, anthropicThinkingFor,
+  histToAnthropicMessages, anthropicThinkingFor, caseToolPlan, withRateRetry,
 } from './case-tools.mjs';
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
@@ -272,5 +275,164 @@ assert.equal(pageFile('/'), '/index.html');
 assert.equal(pageFile('/deploy'), '/deploy.html');
 assert.equal(pageFile('/deploy/'), '/deploy.html');
 assert.equal(pageFile('/index.html'), '/index.html');
+assert.equal(pageFile('/serve.mjs'), '');
+assert.equal(pageFile('/threads.json'), '');
+assert.equal(pageFile('/../secrets'), '');
+assert.equal(pageFile('/deploy.html'), '/deploy.html');
+
+{
+  const msgs = histToAnthropicMessages([
+    { role: 'user', content: [{ type: 'input_text', text: 'steer mid-turn' }] },
+    { role: 'user', content: [{ type: 'input_image', detail: 'high', image_url: 'data:image/png;base64,xx' }] },
+  ]);
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].content, 'steer mid-turn');
+}
+{
+  const msgs = histToAnthropicMessages([
+    { role: 'user', shot: '/tmp/x.png', content: [{ type: 'input_text', text: '[screenshot]' }] },
+    { role: 'user', content: 'after the shot' },
+  ]);
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].content, 'after the shot');
+}
+
+// STOP keeps the turn — rewind only on provider errors, not disconnect.
+{
+  const serveSrc = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  const caseToolsSrc = fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8');
+  const chatFn = serveSrc.slice(serveSrc.indexOf('async function chat('), serveSrc.indexOf('// ---------- noVNC'));
+  assert.match(chatFn, /if \(stopped\(\) \|\| res\.destroyed\) return/);
+  const outOfSteps = [...chatFn.matchAll(/if \(!finished(?: && !stopped\(\))?\)/g)];
+  assert.equal(outOfSteps.length, 2, 'Anthropic + OpenAI out-of-steps gates');
+  assert.ok(outOfSteps.every((m) => m[0].includes('!stopped()')), 'STOP is not out-of-rounds');
+  assert.ok(!/turnStart/.test(chatFn), 'no turn rollback on provider error');
+  assert.match(chatFn, /histCloseOpenCalls\(hist\.items\)/);
+  assert.match(chatFn, /withRateRetry\(round, emit, 5, gone\.signal\)/);
+  assert.match(chatFn, /res\.on\('close', \(\) => \{ clientGone\(\); gone\.abort\(\); \}\)/);
+  assert.match(chatFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);
+  assert.ok(!/responses\.create\(params\)/.test(chatFn), 'every round is abortable');
+  assert.match(chatFn, /summary !== 'auto' && !gone\.signal\.aborted/, 'an abort never retries as a summary fallback');
+  assert.match(chatFn, /gone\.signal\.removeEventListener\('abort', relay\)/, 'round listener is unlinked');
+  assert.match(serveSrc, /takeSteers\(thread\.id\)/, 'steer inbox drained in the loop');
+  assert.match(serveSrc, /type: 'steer'/, 'steer emits to the stream');
+  assert.match(serveSrc, /beforeRound:/, 'anthropic loop drains steers each round');
+  assert.match(serveSrc, /pushSteerItems\(thread\.items, leftover\)/, 'last-round steers persist with the turn');
+  assert.match(chatFn, /prompt_cache_key: thread\.id/);
+  assert.match(serveSrc, /CASE_TURN_TOKENS/);
+  assert.match(chatFn, /tokenBudget: TURN_TOKEN_BUDGET/);
+  assert.match(chatFn, /signal: gone\.signal/);
+  assert.match(caseToolsSrc, /tokenBudget/);
+  assert.match(caseToolsSrc, /stream\.abort\(\)/, 'Anthropic stream is canceled on disconnect');
+  assert.match(caseToolsSrc, /withRateRetry\(\(\) => round\(params\), emit, 5, signal\)/);
+  assert.match(chatFn, /if \(!stopped\(\)\) emit\(\{ type: 'error'/);
+  assert.match(html, /\/api\/chat\/steer/);
+  assert.match(html, /steerPrompt/);
+  assert.ok(!/truncation:\s*['"]auto['"]/.test(chatFn), 'no truncation:auto');
+  assert.ok(!/compactHistory|SUMMARIZE_PROMPT|CASE_COMPACT_AT/.test(serveSrc), 'no compaction');
+}
+
+{
+  assert.equal(clip('abc', 8000), 'abc');
+  const long = 'A'.repeat(4000) + 'B'.repeat(4000) + '"truncated":true}';
+  const cut = clip(long, 200);
+  assert.ok(cut.startsWith('AAA'), 'head kept');
+  assert.ok(cut.endsWith('"truncated":true}'), 'tail kept — this is what a blind cut lost');
+  assert.match(cut, /chars elided/);
+  assert.ok(cut.length < 300, 'stays near the budget');
+  assert.equal(clip({ a: 1 }), '{"a":1}');
+}
+
+{
+  const snaps = { last: '' };
+  const snap = { ok: true, act: 'snapshot', result: { url: 'https://x/', elements: ['[1] button "Go"'] } };
+  assert.deepEqual(snapshotElide('computer_snapshot', snap, snaps), snap, 'first snapshot passes through');
+  const again = snapshotElide('computer_snapshot', JSON.parse(JSON.stringify(snap)), snaps);
+  assert.equal(again.result.unchanged, true);
+  assert.equal(again.result.url, 'https://x/');
+  assert.ok(!again.result.elements, 'element list dropped');
+  const moved = { ok: true, act: 'snapshot', result: { url: 'https://x/2', elements: ['[1] link "Next"'] } };
+  assert.deepEqual(snapshotElide('computer_snapshot', moved, snaps), moved, 'changed page passes through');
+  const other = { ok: true, act: 'eval', result: { value: 1 } };
+  assert.deepEqual(snapshotElide('computer_eval', other, snaps), other, 'only snapshots are elided');
+  const failed = { ok: false, act: 'snapshot', error: 'boom' };
+  assert.deepEqual(snapshotElide('computer_snapshot', failed, snaps), failed, 'errors pass through');
+}
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'case-shots-'));
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const item = stashShot(png, dir);
+  assert.ok(item.shot.startsWith(dir));
+  assert.ok(item.shot.endsWith('.png'));
+  assert.ok(fs.existsSync(item.shot));
+  assert.ok(JSON.stringify(item).length < 400, 'the history item is a pointer, not the png');
+  const hydrated = hydrateShots([item], dir);
+  assert.equal(hydrated[0].content[0].type, 'input_image');
+  assert.equal(hydrated[0].content[0].detail, 'high');
+  assert.ok(hydrated[0].content[0].image_url.startsWith('data:image/png;base64,'));
+  const missing = hydrateShots([{ role: 'user', shot: path.join(dir, 'nope.png'), content: [{ type: 'input_text', text: '[screenshot]' }] }], dir);
+  assert.equal(missing[0].content[0].type, 'input_text');
+  const outside = hydrateShots([{ role: 'user', shot: '/etc/passwd', content: [{ type: 'input_text', text: '[screenshot]' }] }], dir);
+  assert.equal(outside[0].content[0].type, 'input_text', 'paths outside the shots dir are refused');
+  const legacy = [{ role: 'user', content: [{ type: 'input_image', detail: 'high', image_url: 'data:image/png;base64,' + png }] }];
+  const moved = migrateShots(legacy, dir);
+  assert.ok(moved[0].shot);
+  assert.notEqual(moved, legacy);
+  assert.equal(migrateShots(moved, dir), moved, 'already migrated — no second write');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  let n = 0;
+  const out = await withRateRetry(async () => {
+    n += 1;
+    if (n < 3) {
+      const err = new Error('rate limit: try again in 0s');
+      err.status = 429;
+      throw err;
+    }
+    return 'ok';
+  }, () => {}, 5);
+  assert.equal(out, 'ok');
+  assert.equal(n, 3);
+}
+
+{
+  const ctl = new AbortController();
+  let n = 0;
+  const started = Date.now();
+  await assert.rejects(
+    withRateRetry(async () => {
+      n += 1;
+      const err = new Error('rate limited');
+      err.status = 429;
+      throw err;
+    }, () => ctl.abort(), 5, ctl.signal),
+    (err) => err?.name === 'AbortError',
+  );
+  assert.equal(n, 1, 'disconnect stops retries before another provider request');
+  assert.ok(Date.now() - started < 500, 'disconnect interrupts the backoff sleep');
+}
+
+{
+  const run = (cmd) => {
+    const plan = caseToolPlan('computer_exec', { command: cmd }, 'c_1');
+    return { out: execFileSync('bash', ['-c', plan.json.command], { encoding: 'utf8' }), log: plan.logPath };
+  };
+  const a = run('printf "one\\ntwo\\n"; exit 3');
+  assert.match(a.out, /exit=3/, 'exit code survives the redirect');
+  assert.match(a.out, /lines=2/);
+  assert.match(a.out, /one\ntwo/);
+  const b = run('echo oops >&2');
+  assert.match(b.out, /exit=0/);
+  assert.match(b.out, /oops/, 'stderr is captured too');
+  const c = run('seq 1 100000');
+  assert.match(c.out, /lines=100000/);
+  assert.ok(c.out.length < 3000, 'head only, not 100k lines of history');
+  assert.match(fs.readFileSync(c.log, 'utf8'), /\n100000\n$/, 'the file has the rest');
+  assert.match(run('cd /usr && pwd').out, /\/usr/, 'the command still runs in one shell');
+  for (const { log } of [a, b, c]) fs.rmSync(log, { force: true });
+}
 
 console.log('web-ui serve: all checks pass');

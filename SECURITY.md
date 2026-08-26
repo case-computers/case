@@ -17,6 +17,9 @@ Case holds logins. These are promises, with code you can read.
   `127.0.0.1:4174`. Set `CASE_TOKEN` before exposing those ports.
 - **Audit log** (`~/.case/audit/<date>.jsonl`): one line per API call; request
   bodies that can carry secrets are redacted; response bodies are never logged.
+- **Drive screenshots persist on disk** under `~/.case/drive/shots` (Compose:
+  `ui-data` via `CASE_HOME=/data`). They are content-addressed and kept until
+  you delete the files or the volume. Deleting a thread does not erase them.
 
 ## Self-host trust model
 

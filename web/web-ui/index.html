@@ -300,6 +300,14 @@ body.teaching .deskwrap::before{
 }
 .ask textarea::placeholder{color:var(--faint)}
 /* narrow panel: squeeze the textarea, never the SEND button */
+.qline{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.qline[hidden]{display:none}
+.qchip{display:inline-flex;align-items:center;gap:6px;max-width:100%;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--faint);
+  border:1px dashed var(--ink);padding:4px 6px 4px 8px}
+.qchip .qtxt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:38ch}
+.qchip .qx{border:0;background:transparent;cursor:pointer;color:var(--faint);font-size:12px;padding:0 2px}
+.qchip .qx:hover{color:var(--ink)}
 .ask{min-width:0}
 .ask textarea{min-width:0}
 .ask .btn{flex-shrink:0}
@@ -537,6 +545,7 @@ body.acting .deskwrap::before{
               </button>
               <div class="cfg-pop" id="cfgPop" hidden></div>
             </div>
+            <div class="qline" id="qline" hidden></div>
             <div class="ask">
               <button type="button" class="plus" id="plusBtn" aria-haspopup="menu" aria-expanded="false" aria-label="More actions">+</button>
               <div class="plus-pop" id="plusPop" hidden>
@@ -1204,11 +1213,49 @@ const glowOff=()=>{inflight=0;body.classList.remove('acting');};
 let chatCtl=null;
 $('stopBtn').addEventListener('click',()=>{if(chatCtl)chatCtl.abort();});
 
-$('go').addEventListener('submit',async e=>{
+/* Prompts typed mid-turn queue up; the next fires when the turn ends. Without
+   this a second submit 409s server-side and its cleanup hides the STOP button
+   for the turn still running. */
+const promptQ=[];
+const paintQ=()=>{
+  const ql=$('qline');
+  ql.hidden=!promptQ.length;
+  ql.innerHTML='';
+  promptQ.forEach((p,i)=>{
+    const chip=document.createElement('span');
+    chip.className='qchip';
+    chip.innerHTML='<span class="qtxt"></span><button type="button" class="qx" aria-label="Remove queued prompt">×</button>';
+    chip.querySelector('.qtxt').textContent=p;
+    chip.querySelector('.qx').addEventListener('click',()=>{promptQ.splice(i,1);paintQ();});
+    ql.appendChild(chip);
+  });
+};
+$('go').addEventListener('submit',e=>{
   e.preventDefault();
   const t=q.value.trim();
   if(!t)return;
   if(!currentKey()){openKey();return;}
+  q.value='';q.style.height='auto';
+  if(chatCtl){steerPrompt(t);return;}
+  sendPrompt(t);
+});
+/* Mid-turn message: try to inject into the running turn; fall back to the
+   local queue if the turn just ended (409) or the server is unreachable. */
+async function steerPrompt(t){
+  const tid=activeTid&&activeTid!=='__pending'?activeTid:'';
+  if(!tid){promptQ.push(t);paintQ();return;}
+  try{
+    const r=await fetch('/api/chat/steer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread_id:tid,input:t})});
+    if(!r.ok){promptQ.push(t);paintQ();return;}
+    const art=document.createElement('article');
+    art.className='turn you';
+    art.innerHTML='<div class="k">YOU</div><p></p>';
+    art.querySelector('p').textContent=t;
+    inner.appendChild(art);
+    stick(true);
+  }catch{promptQ.push(t);paintQ();}
+}
+async function sendPrompt(t){
   const es=$('emptyState');if(es)es.remove();
   /* the task exists the moment you hit enter, born on the computer you are sat at */
   if(!activeTid){
@@ -1228,7 +1275,6 @@ $('go').addEventListener('submit',async e=>{
   art.innerHTML='<div class="k">YOU</div><p></p>';
   art.querySelector('p').textContent=t;
   inner.appendChild(art);
-  q.value='';q.style.height='auto';
   const reply=document.createElement('article');
   reply.className='turn';
   reply.innerHTML='<div class="k sys">'+esc(String(comp&&comp.name||'BOX').toUpperCase())+'</div>'
@@ -1324,6 +1370,7 @@ $('go').addEventListener('submit',async e=>{
           glow(false);
           if(ev.ok&&(row.dataset.name==='computer_exec'||ev.name==='computer_exec'))pulseFiles();
         }
+        else if(ev.type==='steer'){/* injected mid-turn; bubble already rendered locally */}
         else if(ev.type==='text_delta'&&ev.text){thinkBlock.open=false;addText(ev.text);}
         else if(ev.type==='text'||(ev.type==='done'&&ev.text)){thinkBlock.open=false;setText(ev.text);if(ev.type==='done')glowOff();}
         else if(ev.type==='done'){glowOff();}
@@ -1343,8 +1390,9 @@ $('go').addEventListener('submit',async e=>{
     caret.remove();
     if(activeTid==='__pending')activeTid=''; // stream died before the thread was born
     refresh(); // state may have changed (wake on first tool); threads re-sync too
+    if(promptQ.length){const n=promptQ.shift();paintQ();sendPrompt(n);}
   }
-});
+}
 
 /* ---------- teach a task ---------- */
 const teach={on:false,goal:'',events:[],lastHref:'',suppress:false,timer:null,gapNoted:false};
