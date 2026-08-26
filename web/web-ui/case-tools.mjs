@@ -368,10 +368,38 @@ function clipJson(v, n = 8000) {
 /** Retry a provider round on rate limits (429/529), honoring the server's
  * suggested wait ("try again in Xs" / retry-after), capped at 60s. History is
  * only mutated after a round completes, so replaying a failed round is safe. */
-export async function withRateRetry(fn, emit, tries = 5) {
+function abortError(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const err = new Error(signal?.reason ? String(signal.reason) : 'stopped by user');
+  err.name = 'AbortError';
+  return err;
+}
+
+function abortableDelay(ms, signal) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      signal.removeEventListener('abort', stop);
+      resolve();
+    };
+    const stop = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', stop);
+      reject(abortError(signal));
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', stop, { once: true });
+    if (signal.aborted) stop();
+  });
+}
+
+export async function withRateRetry(fn, emit, tries = 5, signal) {
   for (let a = 0; ; a++) {
+    if (signal?.aborted) throw abortError(signal);
     try { return await fn(); }
     catch (err) {
+      if (signal?.aborted) throw err;
       const status = err?.status ?? err?.response?.status;
       const limited = status === 429 || status === 529
         || /rate limit|overloaded/i.test(err?.message || '');
@@ -382,14 +410,14 @@ export async function withRateRetry(fn, emit, tries = 5) {
       let wait = m ? Number(m[1]) : Number.isFinite(hdr) && hdr > 0 ? hdr : 2 ** a;
       wait = Math.min(Math.max(wait + 0.5, 1), 60);
       emit?.({ type: 'think', text: `rate limited — retrying in ${Math.ceil(wait)}s` });
-      await new Promise((r) => setTimeout(r, wait * 1000));
+      await abortableDelay(wait * 1000, signal);
     }
   }
 }
 
 export async function anthropicToolLoop({
   key, model, effort, system, messages, tools, emit, rounds, runTool, actFor, stopped,
-  beforeRound, tokenBudget,
+  beforeRound, tokenBudget, signal,
 }) {
   const client = new Anthropic({ apiKey: key });
   const antTools = openaiToolsToAnthropic(tools);
@@ -413,33 +441,41 @@ export async function anthropicToolLoop({
     let thinkDelta = false;
     let textDelta = false;
     const stream = client.messages.stream(p);
-    for await (const ev of stream) {
-      const nd = anthropicEventToNdjson(ev, ctx);
-      if (!nd) continue;
-      if (nd.type === 'think_delta') thinkDelta = true;
-      if (nd.type === 'text_delta') textDelta = true;
-      if (nd.type === 'tool') nd.act = actFor(nd.name, {}) || nd.name;
-      if (nd.type === 'tool_args') nd.act = actFor(nd.name || 'tool', nd.args || {}) || nd.name;
-      emit(nd);
+    const abort = () => stream.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      for await (const ev of stream) {
+        const nd = anthropicEventToNdjson(ev, ctx);
+        if (!nd) continue;
+        if (nd.type === 'think_delta') thinkDelta = true;
+        if (nd.type === 'text_delta') textDelta = true;
+        if (nd.type === 'tool') nd.act = actFor(nd.name, {}) || nd.name;
+        if (nd.type === 'tool_args') nd.act = actFor(nd.name || 'tool', nd.args || {}) || nd.name;
+        emit(nd);
+      }
+      const message = await stream.finalMessage();
+      const traces = tracesFromAnthropicMessage(message);
+      if (!thinkDelta) {
+        for (const t of traces.thinks) emit({ type: 'think', text: t });
+      }
+      return { message, traces, textDelta };
+    } finally {
+      signal?.removeEventListener('abort', abort);
     }
-    const message = await stream.finalMessage();
-    const traces = tracesFromAnthropicMessage(message);
-    if (!thinkDelta) {
-      for (const t of traces.thinks) emit({ type: 'think', text: t });
-    }
-    return { message, traces, textDelta };
   };
   for (let i = 0; i < rounds && !finished && !overBudget(); i++) {
     if (stopped?.()) break;
     beforeRound?.(messages);
     let result;
     try {
-      result = await withRateRetry(() => round(params), emit);
+      result = await withRateRetry(() => round(params), emit, 5, signal);
     } catch (err) {
+      if (signal?.aborted) throw err;
       if (!params.output_config) throw err;
       const rest = { ...params };
       delete rest.output_config;
-      result = await withRateRetry(() => round(rest), emit);
+      result = await withRateRetry(() => round(rest), emit, 5, signal);
     }
     const { message, traces, textDelta } = result;
     const u = message.usage || {};

@@ -955,6 +955,7 @@ async function chat(req, res) {
         emit,
         rounds: ROUNDS,
         tokenBudget: TURN_TOKEN_BUDGET,
+        signal: gone.signal,
         stopped,
         beforeRound: (msgs) => {
           const nudges = takeSteers(thread.id);
@@ -1083,7 +1084,7 @@ async function chat(req, res) {
           emit({ type: 'steer', text: n });
         }
       }
-      const { response, traces, textDelta } = await withRateRetry(round, emit);
+      const { response, traces, textDelta } = await withRateRetry(round, emit, 5, gone.signal);
       const u = response.usage || {};
       spend.in += u.input_tokens || 0;
       spend.cached += u.input_tokens_details?.cached_tokens || 0;

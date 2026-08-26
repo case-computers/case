@@ -73,7 +73,7 @@ const __occluded=el=>{
   if(!hit)return false;
   return hit!==el&&!el.contains(hit)&&!hit.contains(el);
 };
-const __contained=r=>__boxes.some(b=>r.left>=b.left&&r.right<=b.right&&r.top>=b.top&&r.bottom<=b.bottom);
+const __contained=r=>__boxes.some(b=>r.x>=b.x&&r.x+r.w<=b.x+b.w&&r.y>=b.y&&r.y+r.h<=b.y+b.h);
 const __topRect=el=>{
   let r=el.getBoundingClientRect(),x=r.left,y=r.top;
   let w=el.ownerDocument&&el.ownerDocument.defaultView;
@@ -87,14 +87,14 @@ const __topRect=el=>{
 const __push=(el,where)=>{
   if(__seen.has(el)||!__clickable(el)||!__vis(el)||__occluded(el))return;
   const r=el.getBoundingClientRect();
-  if(__contained(r))return;
+  const tr=__topRect(el);
+  if(__contained(tr))return;
   __seen.add(el);
-  __boxes.push({left:r.left,right:r.right,top:r.top,bottom:r.bottom});
+  __boxes.push(tr);
   const tag=el.tagName.toLowerCase();
   const name=(el.getAttribute('aria-label')||el.placeholder||
     ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
     el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
-  const tr=__topRect(el);
   const bx=(window.outerWidth-window.innerWidth)/2;
   __els.push({el,tag,type:(el.type||el.getAttribute('role')||''),name,
     value:('value'in el&&!__secretish(el)&&tag!=='button')?String(el.value).slice(0,40):'',
@@ -309,10 +309,11 @@ def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_aft
             res["switched_tab"] = switched
     if isinstance(out, dict) and out.get("screenshot_png_b64"):
         res["screenshot_png_b64"] = out["screenshot_png_b64"]
+    res = _attach_snapshot(row, res, snapshot_after, stamped)
     t = page_text(row, eval_js)
     if t:
         res["text"] = t
-    return _attach_snapshot(row, res, snapshot_after, stamped)
+    return res
 
 
 def _page_ids(row):
