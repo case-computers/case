@@ -9,6 +9,10 @@ Case holds logins. These are promises, with code you can read.
 - **Login only fires** when the page host matches the credential's `domains`.
 - **MCP has no credential-write tool.** Secrets enter via the Drive UI, `/fill`,
   or `bin/case cred add`.
+- **`computer_upload` only assigns files already on the computer.** The path
+  must be under `/home/agent/`, at most 5MB, and the snapshot ref must be
+  `input[type=file]`. Password/OTP-like inputs are refused. Bytes travel
+  through deskd `GET /file`, never command stdout.
 - **cased binds loopback by default.** Compose publishes `127.0.0.1:8787` and
   `127.0.0.1:4174`. Set `CASE_TOKEN` before exposing those ports.
 - **Audit log** (`~/.case/audit/<date>.jsonl`): one line per API call; request

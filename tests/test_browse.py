@@ -4,6 +4,7 @@ desk_json are faked, no Docker, no deskd.
 Run: .venv/bin/python tests/test_browse.py"""
 import os
 import sys
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
 os.environ.setdefault("CASE_HOME", "/tmp/case-browse-test")
@@ -56,19 +57,6 @@ def test_snapshot_formats_numbered_lines():
     assert "=" in out["elements"][2], out["elements"]   # input value shown
 
 
-def test_snapshot_numbers_lines_by_document_index_not_list_position():
-    """The shown list is the on-screen elements first, so on a big page it is a subset
-    with gaps. The number on the line is the ref click_element re-derives — take it
-    from the element, never from where it landed in the list."""
-    els = [dict(ELS[0], i=0), dict(ELS[1], i=97), dict(ELS[2], i=412)]
-    browse.eval_js = fake_eval({"ok": True, "value": {
-        "url": "u", "title": "t", "count": 3752, "els": els}})
-    out = browse.snapshot(ROW)
-    assert out["truncated"] is True and out["count"] == 3752, out
-    assert out["elements"][1].startswith("[97] "), out["elements"]
-    assert out["elements"][2].startswith("[412] "), out["elements"]
-
-
 def test_snapshot_truncation_flagged():
     browse.eval_js = fake_eval({"ok": True, "value": {
         "url": "u", "title": "t", "count": 400, "els": ELS}})
@@ -86,7 +74,35 @@ def test_snapshot_walk_never_reads_password_values():
     browse.eval_js = fake_eval({"ok": True, "value": {"url": "u", "title": "t",
                                                       "count": 0, "els": []}})
     browse.snapshot(ROW)
-    assert "el.type!=='password'" in browse.eval_js.calls[0]
+    src = browse.eval_js.calls[0]
+    assert "__secretish" in src
+    assert "one-time-code" in src
+    assert "current-password" in src
+    assert "!__secretish(el)" in src
+
+
+def test_walk_v2_pierces_shadow_iframe_and_filters():
+    browse.eval_js = fake_eval({"ok": True, "value": {"url": "u", "title": "t",
+                                                      "count": 0, "els": []}})
+    browse.snapshot(ROW)
+    src = browse.eval_js.calls[0]
+    assert "el.shadowRoot" in src
+    assert "contentDocument" in src
+    assert "elementFromPoint" in src
+    assert "cursor==='pointer'" in src
+    assert "__contained" in src
+
+
+def test_snapshot_formats_shadow_and_iframe_markers():
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "url": "u", "title": "t", "count": 2, "els": [
+            {"tag": "button", "type": "button", "name": "In shadow", "value": "",
+             "href": "", "where": "shadow"},
+            {"tag": "a", "type": "", "name": "In frame", "value": "",
+             "href": "/x", "where": "iframe"}]}})
+    out = browse.snapshot(ROW)
+    assert out["elements"][0] == '[0] |shadow| button "In shadow"', out["elements"]
+    assert out["elements"][1] == '[1] |iframe| a "In frame" -> /x', out["elements"]
 
 
 # ---------- click_element ----------
@@ -95,10 +111,10 @@ def test_click_fires_os_click_at_located_coords():
     browse.eval_js = fake_eval({"ok": True, "value": {
         "ok": True, "name": "Save changes", "tag": "button", "x": 640, "y": 402}})
     browse.desk_json = fake_desk({"ok": True})
-    out = browse.click_element(ROW, 1, name="Save changes")
+    out = browse.click_element(ROW, 1, name="Save changes", snapshot_after=False)
     assert out["ok"] and out["clicked"] == "Save changes", out
-    m, p, j = browse.desk_json.calls[0]
-    assert p == "/action" and j["type"] == "click" and (j["x"], j["y"]) == (640, 402), j
+    clicks = [j for _, p, j in browse.desk_json.calls if p == "/action"]
+    assert clicks and clicks[0]["type"] == "click" and (clicks[0]["x"], clicks[0]["y"]) == (640, 402), clicks
 
 
 def test_stale_ref_refuses_and_returns_fresh_snapshot():
@@ -124,7 +140,7 @@ def test_click_with_text_types_after_click():
     browse.eval_js = fake_eval({"ok": True, "value": {
         "ok": True, "name": "Work email", "tag": "input", "x": 100, "y": 100}})
     browse.desk_json = fake_desk({"ok": True}, {"ok": True})
-    browse.click_element(ROW, 2, text="jane@x.com")
+    browse.click_element(ROW, 2, text="jane@x.com", snapshot_after=False)
     kinds = [j["type"] for _, _, j in browse.desk_json.calls]
     assert kinds == ["click", "type"], kinds
     assert browse.desk_json.calls[1][2]["text"] == "jane@x.com"
@@ -134,7 +150,7 @@ def test_name_is_json_quoted_into_the_expression():
     browse.eval_js = fake_eval({"ok": True, "value": {"ok": True, "name": "x",
                                                       "tag": "a", "x": 1, "y": 1}})
     browse.desk_json = fake_desk({"ok": True})
-    browse.click_element(ROW, 0, name='a"b\'c')
+    browse.click_element(ROW, 0, name='a"b\'c', snapshot_after=False)
     assert '"a\\"b\'c"' in browse.eval_js.calls[0]
 
 
@@ -157,8 +173,19 @@ def test_fill_passes_fields_and_returns_page_result():
     assert out["ok"] is True, out
     expr = browse.eval_js.calls[0]
     assert '"jane@x.com"' in expr and "__submit=true" in expr
-    assert "out.every(o=>o.ok)" in expr and "out.some" not in expr
-    assert "vault-only" in expr   # the password refusal ships inside the page script
+    assert "__secretish" in expr and "one-time-code" in expr
+    assert "vault-only" in expr   # the secret-field refusal ships inside the page script
+    assert "page reformatted value" in expr
+    assert "actual" in expr
+
+
+def test_fill_mismatch_is_returned_to_the_caller():
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": False, "fields": [{"ref": 2, "ok": False, "actual": "JANE",
+                                 "error": "page reformatted value"}]}})
+    out = browse.fill(ROW, [{"ref": 2, "value": "jane"}], snapshot_after=False)
+    assert out["ok"] is False, out
+    assert out["fields"][0]["actual"] == "JANE"
 
 
 # ---------- wait_for ----------
@@ -302,6 +329,8 @@ def fake_eval_map(rules):
                 if isinstance(r, Exception):
                     raise r
                 return r if isinstance(r, dict) else {"ok": True, "value": r}
+        if "innerText.slice" in expression:
+            return {"ok": True, "value": ""}
         raise AssertionError(f"unexpected eval: {expression[:90]}")
     _eval.calls = calls
     return _eval
@@ -376,7 +405,8 @@ def test_click_snapshot_can_be_turned_off():
     browse.desk_json = fake_desk({"ok": True})
     out = browse.click_element(ROW, 0, snapshot_after=False)
     assert out["ok"] and "snapshot" not in out, out
-    assert len(browse.eval_js.calls) == 1, browse.eval_js.calls   # the locate walk, nothing more
+    # locate + optional page-text eval; no settle stamp
+    assert all("__case_act=1" not in c for c in browse.eval_js.calls), browse.eval_js.calls
 
 
 def test_fill_snapshots_only_when_it_submitted():
@@ -412,6 +442,180 @@ def test_click_unstamped_does_not_treat_missing_marker_as_navigation():
     out = browse.click_element(ROW, 0, name="Tab")
     assert out["snapshot"]["url"] == "https://same.test", out
     assert not any(POLL in c for c in browse.eval_js.calls), browse.eval_js.calls
+
+
+def test_snapshot_stars_only_new_keys_after_a_prior_snapshot():
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "url": "u", "title": "t", "count": 2,
+        "els": [
+            {"tag": "input", "type": "text", "name": "Search", "value": "", "href": ""},
+            {"tag": "option", "type": "", "name": "Alice", "value": "", "href": ""}],
+        "keys": ["input\0Search\0", "option\0Alice\0"],
+        "prev": ["input\0Search\0"]}})
+    out = browse.snapshot(ROW)
+    assert out["elements"][0].startswith("[0]"), out["elements"]
+    assert out["elements"][1].startswith("*[1]"), out["elements"]
+
+
+def test_heal_clicks_when_exactly_one_name_matches():
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": True, "name": "Save changes", "tag": "button", "x": 10, "y": 10,
+        "healed": True, "old_ref": 1, "new_ref": 4}})
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 1, name="Save changes", snapshot_after=False)
+    assert out["ok"] and out["healed"] is True, out
+    assert (out["old_ref"], out["new_ref"]) == (1, 4)
+
+
+def test_locate_script_prefers_stored_handle_then_heal():
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": True, "name": "x", "tag": "a", "x": 1, "y": 1}})
+    browse.desk_json = fake_desk({"ok": True})
+    browse.click_element(ROW, 0, name="x", snapshot_after=False)
+    src = browse.eval_js.calls[0]
+    assert "window.__caseEls" in src
+    assert "isConnected" in src
+    assert "healed" in src
+
+
+def test_click_activates_a_new_tab():
+    listing0 = '[{"type":"page","id":"AA11","title":"One","url":"https://a"}]'
+    listing1 = ('[{"type":"page","id":"BB22","title":"Two","url":"https://b"},'
+                '{"type":"page","id":"AA11","title":"One","url":"https://a"}]')
+    listing2 = listing1
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": True, "name": "Docs", "tag": "a", "x": 10, "y": 10}})
+    browse.desk_json = fake_desk(
+        {"stdout": listing0},
+        {"ok": True},
+        {"stdout": listing1},
+        {"stdout": ""},
+        {"stdout": listing2},
+    )
+    out = browse.click_element(ROW, 0, name="Docs", snapshot_after=False)
+    assert out["ok"] and out.get("switched_tab", {}).get("id") == "BB22", out
+    cmds = [c[2].get("command", "") for c in browse.desk_json.calls if c[1] == "/exec"]
+    assert any("/json/activate/BB22" in x for x in cmds), cmds
+
+
+def test_click_returns_page_text():
+    browse.eval_js = fake_eval(
+        {"ok": True, "value": {"ok": True, "name": "Save changes", "tag": "button", "x": 10, "y": 10}},
+        {"ok": True, "value": "after click"},
+    )
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 1, name="Save changes", snapshot_after=False)
+    assert out["ok"] and out["text"] == "after click", out
+
+
+def test_click_omits_text_when_eval_fails():
+    browse.eval_js = fake_eval(
+        {"ok": True, "value": {"ok": True, "name": "Go", "tag": "a", "x": 10, "y": 10}},
+        ApiError(502, "eval_error", "gone"),
+    )
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Go", snapshot_after=False)
+    assert out["ok"] and "text" not in out, out
+
+
+def test_hover_moves_without_click():
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": True, "name": "Menu", "tag": "div", "x": 40, "y": 50}})
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.hover(ROW, 3, name="Menu")
+    assert out["ok"] and out["hovered"] == "Menu", out
+    assert browse.desk_json.calls[0][2]["type"] == "move"
+    assert browse.desk_json.calls[0][2]["x"] == 40
+    assert all(j.get("type") != "click" for _, p, j in browse.desk_json.calls if p == "/action")
+
+
+def test_upload_refuses_path_outside_home_agent():
+    try:
+        browse.upload(ROW, 0, "/etc/passwd")
+    except ApiError as e:
+        assert e.status == 400
+        return
+    assert False
+
+
+def test_upload_refuses_oversize():
+    browse.desk_json = fake_desk({"exit_code": 0, "stdout": str(browse.UPLOAD_MAX + 1)})
+    try:
+        browse.upload(ROW, 0, "/home/agent/big.bin")
+    except ApiError as e:
+        assert e.status == 400 and "larger" in e.message
+        return
+    assert False
+
+
+def test_upload_refuses_non_file_input():
+    browse.desk_json = fake_desk({"exit_code": 0, "stdout": "12"})
+    browse.eval_js = fake_eval(
+        {"ok": True, "value": {"ok": True, "name": "Go", "tag": "button",
+                               "type": "submit", "x": 1, "y": 1, "new_ref": 1}})
+    out = browse.upload(ROW, 1, "/home/agent/a.pdf")
+    assert out["ok"] is False and "file" in out["error"], out
+
+
+def test_upload_reads_via_file_get_not_exec_stdout():
+    browse.desk_json = fake_desk({"exit_code": 0, "stdout": "4"})
+    browse.desk_bytes = lambda *a, **k: b"ABCD"
+    browse.eval_js = fake_eval(
+        {"ok": True, "value": {"ok": True, "name": "Attach", "tag": "input",
+                               "type": "file", "x": 1, "y": 1, "new_ref": 7}},
+        {"ok": True, "value": None},
+        {"ok": True, "value": None},
+        {"ok": True, "value": {"ok": True, "name": "a.txt", "bytes": 4}})
+    out = browse.upload(ROW, 0, "/home/agent/a.txt")
+    assert out["ok"] is True and out["bytes"] == 4, out
+    assert any("const __i=7" in e for e in browse.eval_js.calls)
+    assert any("window.__caseUp+=" in e for e in browse.eval_js.calls)
+    assert any("DataTransfer" in e for e in browse.eval_js.calls)
+    assert not any("base64" in (c[2] or {}).get("command", "")
+                   for c in browse.desk_json.calls if c[1] == "/exec")
+
+
+def test_upload_rejects_size_mismatch_from_file_get():
+    browse.desk_json = fake_desk({"exit_code": 0, "stdout": "4"})
+    browse.desk_bytes = lambda *a, **k: b"AB"
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": True, "name": "Attach", "tag": "input", "type": "file",
+        "x": 1, "y": 1, "new_ref": 0}})
+    out = browse.upload(ROW, 0, "/home/agent/a.txt")
+    assert out["ok"] is False and "size changed" in out["error"], out
+
+
+def test_tabs_new_encodes_query_in_cdp_path():
+    listing = '[{"type":"page","id":"T1","title":"x","url":"https://x.com/search?q=1"}]'
+    browse.desk_json = fake_desk(
+        {"stdout": '{"id":"T1","type":"page"}'},
+        {"stdout": listing},
+    )
+    url = "https://x.com/search?q=1&src=y"
+    out = browse.tabs(ROW, action="new", url=url)
+    assert out["ok"], out
+    cmd = browse.desk_json.calls[0][2]["command"]
+    assert "/json/new?" in cmd
+    assert "q=1&src=y" not in cmd
+    assert quote(url, safe="") in cmd
+
+
+def test_overlay_marks_draws_index_on_png():
+    from PIL import Image
+    from io import BytesIO
+    im = Image.new("RGB", (200, 80), (255, 255, 255))
+    buf = BytesIO()
+    im.save(buf, format="PNG")
+    out = browse.overlay_marks(buf.getvalue(), [
+        {"sx": 10, "sy": 10, "vw": 40, "vh": 20},
+        {"sx": 80, "sy": 30, "vw": 30, "vh": 15}])
+    marked = Image.open(BytesIO(out))
+    assert marked.size == (200, 80)
+    assert marked.getpixel((10, 10)) != (255, 255, 255)
+
+
+def test_overlay_marks_falls_back_on_bad_png():
+    assert browse.overlay_marks(b"not-a-png", [{"sx": 1, "sy": 1, "vw": 2, "vh": 2}]) == b"not-a-png"
 
 
 def test_teach_tick_504_still_raises():

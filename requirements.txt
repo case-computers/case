@@ -5,3 +5,4 @@ docker==7.1.0
 cryptography==49.0.0
 requests==2.34.2
 mcp==1.28.1
+Pillow==12.2.0

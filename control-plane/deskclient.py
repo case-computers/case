@@ -71,6 +71,65 @@ def eval_value(row, expression, timeout_s=15, default=None):
 # *existing* container (lifecycle.do_wake), so a new deskd route would reach only
 # computers created after an image rebuild. This reaches every computer that
 # exists today, on a cased restart.
+_PAGE_TEXT = "document.body?document.body.innerText.slice(0,2000):''"
+
+
+def page_text(row, _eval=None):
+    """Best-effort first 2000 chars of the page. None on any failure so a
+    navigation or click that already happened still returns what it did.
+    `_eval` is the eval_js to use — browse patches its own copy."""
+    fn = _eval or eval_js
+    try:
+        r = fn(row, _PAGE_TEXT, 3)
+        t = r.get("value") if r.get("ok") else None
+        return t if isinstance(t, str) and t else None
+    except ApiError:
+        return None
+
+
+def _with_text(row, arrived):
+    t = page_text(row)
+    if t:
+        arrived["text"] = t
+    return arrived
+
+
+_HYDRATE_N = ("document.readyState==='complete'"
+              "?document.querySelectorAll('a,button,input,select,textarea').length:0")
+
+
+def _hydrate(row, arrived, deadline):
+    """SPA: readyState can complete before React mounts any controls."""
+    time.sleep(min(2.0, max(0.0, deadline - time.time())))
+    try:
+        r = eval_js(row, _HYDRATE_N, 3)
+        n = r.get("value") if r.get("ok") else 0
+        if n:
+            return _with_text(row, arrived)
+    except ApiError as e:
+        if e.status != 502:
+            raise
+    if time.time() >= deadline:
+        return _with_text(row, arrived)
+    try:
+        eval_js(row, "location.reload()", 10)
+    except ApiError as e:
+        if e.status != 502:
+            raise
+        return _with_text(row, arrived)
+    while time.time() < deadline:
+        time.sleep(0.4)
+        try:
+            r = eval_js(row, _HYDRATE_N, 3)
+        except ApiError as e:
+            if e.status != 502:
+                raise
+            continue
+        if r.get("ok") and r.get("value"):
+            return _with_text(row, arrived)
+    return _with_text(row, arrived)
+
+
 def navigate(row, url, timeout_s=30):
     """Load `url` in the browser tab and block until the new document is ready.
 
@@ -91,7 +150,8 @@ def navigate(row, url, timeout_s=30):
     """
     deadline = time.time() + timeout_s
     poll = ("window.__case_nav===undefined&&document.readyState==='complete'"
-            "?[location.href,document.title]:null")
+            "?[location.href,document.title,"
+            "document.querySelectorAll('a,button,input,select,textarea').length]:null")
     while True:
         try:
             r = eval_js(row, f"window.__case_nav=1;location.assign({json.dumps(url)})", 10)
@@ -113,8 +173,11 @@ def navigate(row, url, timeout_s=30):
                 raise          # asleep / injecting / wedged, not something to wait out
             continue           # context torn down mid-navigation: that IS progress
         v = r.get("value")
-        if isinstance(v, list):   # a >64KB result comes back as a truncated *string*
-            return {"ok": True, "url": v[0], "title": v[1]}
+        if isinstance(v, list) and len(v) >= 2:   # a >64KB result is a truncated *string*
+            arrived = {"ok": True, "url": v[0], "title": v[1]}
+            if len(v) > 2 and v[2] == 0:
+                return _hydrate(row, arrived, deadline)
+            return _with_text(row, arrived)
     try:   # don't leave a uniquely-named global on a live page for site JS to find
         eval_js(row, "delete window.__case_nav", 3)
     except ApiError:

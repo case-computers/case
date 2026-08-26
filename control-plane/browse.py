@@ -11,8 +11,6 @@ Five capabilities:
   click_element   re-derive the same numbered list, verify the ref still matches,
                   scroll it into view, then fire a real OS-level click through
                   /action at the computed screen coordinates (isTrusted stays true)
-                  — and return the settled page with it, so the caller never has to
-                  spend a second LLM turn asking what the click did
   fill            batch-fill a form via native value setters + input/change events
                   (React-safe); refuses password fields — vault login owns those
   wait_for        server-side 0.4s poll for selector/text/network-idle, so agents
@@ -24,50 +22,98 @@ Determinism contract: snapshot and click_element run the SAME walk, and the walk
 emits elements in document order, so a ref from the last snapshot re-derives to
 the same element unless the page itself changed — in which case click_element
 refuses and returns a fresh snapshot instead of clicking the wrong thing.
-
-A ref is that document-order index, which is why snapshot can show any subset it
-likes without breaking anything. It shows the on-screen ones first: a big page has
-thousands of interactive elements and the cap has to fall somewhere, and falling on
-"whoever appears first in the HTML" spends it on chrome the reader scrolled past.
-Measured on a scrolled Wikipedia article: a third of what was on screen missed the
-cut. The shown numbers therefore skip.
 """
 import json
 import re
 import shlex
 import time
+from urllib.parse import quote
 
 from config import DESK_W as SCREEN_W, DESK_H as SCREEN_H
 from errors import ApiError
-from deskclient import desk_json, eval_js
+import base64
+
+from deskclient import desk_bytes, desk_json, eval_js, page_text
 
 MAX_ELS = 150
 
-# The shared walk. Defines __els = [{el, tag, type, name, value, href, on}] in
-# document order, visible interactive elements only (`on` = 0 when the element is in
-# the viewport right now). Password values never read.
+# The shared walk. Defines __els = [{el, tag, type, name, value, href, where, …}]
+# in document order. Pierces open shadow roots and same-origin iframes; includes
+# cursor:pointer / onclick widgets; drops occluded nodes and children whose bbox
+# sits inside an already-emitted hit target. Password/OTP values are never read.
 _WALK = """
+const __secretish=el=>el.type==='password'
+  ||['one-time-code','current-password','new-password'].includes((el.getAttribute&&el.getAttribute('autocomplete'))||'');
 const __sel='a[href],button,input,select,textarea,summary,label,'+
  '[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],'+
  '[role="radio"],[role="combobox"],[role="option"],[role="switch"],[role="searchbox"],'+
  '[role="textbox"],[onclick],[tabindex],[contenteditable="true"]';
-const __seen=new Set(),__els=[];
-for(const el of document.querySelectorAll(__sel)){
-  if(__seen.has(el))continue;__seen.add(el);
-  if(el.closest('[aria-hidden="true"]'))continue;
-  if(el.disabled)continue;
+const __seen=new Set(),__els=[],__boxes=[];
+const __clickable=el=>{
+  try{if(el.matches&&el.matches(__sel))return true;}catch(e){}
+  if(el.onclick)return true;
+  try{if(getComputedStyle(el).cursor==='pointer')return true;}catch(e){}
+  return false;
+};
+const __vis=el=>{
+  if(el.disabled)return false;
+  try{if(el.closest&&el.closest('[aria-hidden="true"]'))return false;}catch(e){}
   const r=el.getBoundingClientRect();
-  if(r.width<2||r.height<2)continue;
-  if(typeof el.checkVisibility==='function'&&!el.checkVisibility())continue;
+  if(r.width<2||r.height<2)return false;
+  if(typeof el.checkVisibility==='function'&&!el.checkVisibility())return false;
+  return true;
+};
+const __occluded=el=>{
+  const r=el.getBoundingClientRect();
+  const x=r.left+r.width/2,y=r.top+r.height/2;
+  const root=el.getRootNode();
+  let hit=null;
+  try{hit=root.elementFromPoint?root.elementFromPoint(x,y):document.elementFromPoint(x,y);}catch(e){return false;}
+  if(!hit)return false;
+  return hit!==el&&!el.contains(hit)&&!hit.contains(el);
+};
+const __contained=r=>__boxes.some(b=>r.left>=b.left&&r.right<=b.right&&r.top>=b.top&&r.bottom<=b.bottom);
+const __topRect=el=>{
+  let r=el.getBoundingClientRect(),x=r.left,y=r.top;
+  let w=el.ownerDocument&&el.ownerDocument.defaultView;
+  while(w&&w.frameElement){
+    const fr=w.frameElement.getBoundingClientRect();
+    x+=fr.left;y+=fr.top;
+    w=w.frameElement.ownerDocument&&w.frameElement.ownerDocument.defaultView;
+  }
+  return {x,y,w:r.width,h:r.height};
+};
+const __push=(el,where)=>{
+  if(__seen.has(el)||!__clickable(el)||!__vis(el)||__occluded(el))return;
+  const r=el.getBoundingClientRect();
+  if(__contained(r))return;
+  __seen.add(el);
+  __boxes.push({left:r.left,right:r.right,top:r.top,bottom:r.bottom});
   const tag=el.tagName.toLowerCase();
   const name=(el.getAttribute('aria-label')||el.placeholder||
     ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
     el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
+  const tr=__topRect(el);
+  const bx=(window.outerWidth-window.innerWidth)/2;
   __els.push({el,tag,type:(el.type||el.getAttribute('role')||''),name,
-    value:('value'in el&&el.type!=='password'&&tag!=='button')?String(el.value).slice(0,40):'',
+    value:('value'in el&&!__secretish(el)&&tag!=='button')?String(el.value).slice(0,40):'',
     href:tag==='a'?String(el.getAttribute('href')||'').slice(0,120):'',
-    on:(r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth)?0:1});
-}
+    where:where||'',vx:tr.x,vy:tr.y,vw:tr.w,vh:tr.h,
+    sx:Math.round(window.screenX+bx+tr.x),
+    sy:Math.round(window.screenY+(window.outerHeight-window.innerHeight)-bx+tr.y)});
+};
+const __walk=(root,where)=>{
+  let nodes=[];
+  try{nodes=root.querySelectorAll('*');}catch(e){return;}
+  for(const el of nodes){
+    __push(el,where);
+    if(el.shadowRoot)__walk(el.shadowRoot,'shadow');
+    if((el.tagName||'')==='IFRAME'){
+      try{if(el.contentDocument)__walk(el.contentDocument,'iframe');}catch(e){}
+    }
+  }
+};
+__walk(document,'');
 """
 
 
@@ -75,10 +121,12 @@ def _iife(body):
     return "(()=>{" + _WALK + body + "})()"
 
 
-def _fmt(i, e):
+def _fmt(i, e, star=False):
     """One element, one compact line: [12] button 'Save changes'."""
     t = e["tag"] + ("(" + e["type"] + ")" if e["type"] and e["type"] != e["tag"] else "")
-    line = f'[{i}] {t} "{e["name"]}"'
+    mark = f"|{e['where']}| " if e.get("where") else ""
+    pref = "*" if star else ""
+    line = f'{pref}[{i}] {mark}{t} "{e["name"]}"'
     if e.get("value"):
         line += f' ={e["value"]!r}'
     if e.get("href"):
@@ -87,15 +135,14 @@ def _fmt(i, e):
 
 
 def snapshot(row, timeout_s=15):
-    """The active tab's interactive elements as numbered lines, everything on screen
-    first. Refs are indices into the whole walk, so the shown list can skip numbers."""
-    body = ("""
-const __by=__els.map((e,i)=>i);
-__by.sort((a,b)=>__els[a].on-__els[b].on||a-b);   // on screen first, document order within
-const __pick=__by.slice(0,%d).sort((a,b)=>a-b);   // then hand them back in reading order
+    """Numbered visible interactive elements of the active tab, document order."""
+    body = """
+const keys=__els.map(e=>e.tag+'\\0'+e.name+'\\0'+(e.href||''));
+const prev=(window.__caseEls&&window.__caseEls.keys)||[];
+window.__caseEls={els:__els.map(e=>e.el),keys:keys};
 return {url:location.href,title:document.title,count:__els.length,
-  els:__pick.map(i=>{const{el,on,...r}=__els[i];return{i,...r};})};
-""" % MAX_ELS)
+  els:__els.slice(0,%d).map(({el,...r})=>r),keys:keys.slice(0,%d),prev:prev.slice(0,%d)};
+""" % (MAX_ELS, MAX_ELS, MAX_ELS)
     r = eval_js(row, _iife(body), timeout_s)
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "snapshot failed"}
@@ -103,26 +150,49 @@ return {url:location.href,title:document.title,count:__els.length,
     if not isinstance(v, dict):   # >64KB truncates to a string; should not happen at 150 els
         return {"ok": False, "error": "snapshot too large — page has an extreme DOM"}
     els = v.get("els") or []
+    keys = v.get("keys") or []
+    prev = set(v.get("prev") or [])
+    starred = bool(prev)
     return {"ok": True, "url": v.get("url"), "title": v.get("title"),
             "count": v.get("count", len(els)),
             "truncated": (v.get("count", 0) > MAX_ELS),
-            "elements": [_fmt(e.get("i", i), e) for i, e in enumerate(els)]}
+            "elements": [_fmt(i, e, star=starred and i < len(keys) and keys[i] not in prev)
+                         for i, e in enumerate(els)]}
 
 
 def _locate(row, ref, name, timeout_s=15):
     """Re-derive the walk, verify ref+name, scroll into view, return screen coords."""
     checks = f"const __i={int(ref)};const __n={json.dumps(name) if name else 'null'};"
     body = checks + """
-if(__i<0||__i>=__els.length)return {ok:false,stale:true,count:__els.length};
-const e=__els[__i];
-if(__n!==null&&e.name!==__n&&!e.name.includes(__n))
-  return {ok:false,stale:true,found:e.name,count:__els.length};
-e.el.scrollIntoView({block:'center',inline:'center'});
-const r=e.el.getBoundingClientRect();
-const bx=(window.outerWidth-window.innerWidth)/2;
-return {ok:true,name:e.name,tag:e.tag,
-  x:Math.round(window.screenX+bx+r.left+r.width/2),
-  y:Math.round(window.screenY+(window.outerHeight-window.innerHeight)-bx+r.top+r.height/2)};
+const __nameOk=(nm)=>__n===null||nm===__n||(nm&&nm.includes(__n));
+const __coords=(el,nm,tag,healed,oldI,newI)=>{
+  el.scrollIntoView({block:'center',inline:'center'});
+  const tr=__topRect(el);
+  const bx=(window.outerWidth-window.innerWidth)/2;
+  return {ok:true,name:nm,tag:tag,type:(el.type||''),healed:!!healed,old_ref:oldI,new_ref:newI,
+    x:Math.round(window.screenX+bx+tr.x+tr.w/2),
+    y:Math.round(window.screenY+(window.outerHeight-window.innerHeight)-bx+tr.y+tr.h/2)};
+};
+const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
+if(stored&&stored.isConnected){
+  const tag=stored.tagName.toLowerCase();
+  const nm=(stored.getAttribute('aria-label')||stored.placeholder||stored.innerText||'').trim().replace(/\\s+/g,' ').slice(0,80);
+  if(__nameOk(nm))return __coords(stored,nm,tag,false,__i,__i);
+}
+if(__i>=0&&__i<__els.length){
+  const e=__els[__i];
+  if(__nameOk(e.name))return __coords(e.el,e.name,e.tag,false,__i,__i);
+  if(__n!==null){
+    const hits=__els.map((x,i)=>({x,i})).filter(h=>h.x.name===__n||h.x.name.includes(__n));
+    if(hits.length===1)return __coords(hits[0].x.el,hits[0].x.name,hits[0].x.tag,true,__i,hits[0].i);
+    return {ok:false,stale:true,found:e.name,count:__els.length};
+  }
+}
+if(__n!==null){
+  const hits=__els.map((x,i)=>({x,i})).filter(h=>h.x.name===__n||h.x.name.includes(__n));
+  if(hits.length===1)return __coords(hits[0].x.el,hits[0].x.name,hits[0].x.tag,true,__i,hits[0].i);
+}
+return {ok:false,stale:true,count:__els.length};
 """
     r = eval_js(row, _iife(body), timeout_s)
     if not r.get("ok"):
@@ -130,11 +200,9 @@ return {ok:true,name:e.name,tag:e.tag,
     return r.get("value") if isinstance(r.get("value"), dict) else {"ok": False, "error": "bad locate result"}
 
 
-# Same sentinel trick deskclient.navigate uses, and for the same reason: a click that
-# navigates leaves the OLD document reporting readyState 'complete' for a beat, so
-# polling readyState alone snapshots the page the agent just left. Stamping the
-# document before the action turns that race into a check — a document without the
-# stamp is, by construction, the one the action produced.
+# Same sentinel as deskclient.navigate: a click that navigates leaves the old
+# document reporting readyState complete for a beat. Stamp first so a document
+# without the stamp is the one the action produced.
 _STAMP = "window.__case_act"
 
 
@@ -146,20 +214,7 @@ def _stamp(row):
 
 
 def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
-    """The page as it stands once the action stops moving it.
-
-    Two endings, and they need telling apart. If the stamp is gone the action
-    navigated: wait for the new document to finish and snapshot that. If the stamp is
-    still there after `settle_s`, nothing navigated and this page IS the answer — a
-    grace that long because a JS-driven navigation does not commit instantly. A 502
-    means the context was torn down mid-navigation, which is progress, so poll through.
-
-    If the stamp never landed, `__case_act===undefined` is the starting document,
-    not proof of navigation. Wait out the grace and snapshot whatever is complete.
-
-    This costs ~2 extra eval round trips at ~11ms each. The computer_snapshot call it
-    saves the agent is a whole model turn. Cheap side of a very lopsided trade.
-    """
+    """The page as it stands once the action stops moving it."""
     if not stamped:
         time.sleep(settle_s)
         deadline = time.time() + budget_s
@@ -186,7 +241,7 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
         except ApiError as e:
             if e.status != 502:
                 return None
-            continue           # context gone: the navigation we are waiting for
+            continue
         v = r.get("value")
         if not isinstance(v, list):
             break
@@ -195,14 +250,13 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
             return snapshot(row)
         if not navigated and time.time() >= grace:
             fresh = snapshot(row)
-            # don't leave a uniquely-named global on a live page for site JS to find
             try:
                 eval_js(row, f"delete {_STAMP}", 3)
             except ApiError:
                 pass
             return fresh
     try:
-        return snapshot(row)   # never settled; a partial list still beats a blind turn
+        return snapshot(row)
     except ApiError:
         return None
 
@@ -232,6 +286,7 @@ def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_aft
     x, y = loc["x"], loc["y"]
     if not (0 <= x < SCREEN_W and 0 <= y < SCREEN_H):
         return {"ok": False, "error": f"element resolves off-screen ({x},{y})"}
+    before = _page_ids(row) if loc.get("tag") in ("a", "button") and text is None else []
     stamped = snapshot_after and _stamp(row)
     out = desk_json(row, "POST", "/action",
                     json={"type": "click", "x": x, "y": y,
@@ -243,15 +298,150 @@ def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_aft
                               "screenshot": bool(screenshot)},
                         timeout=30)
     res = {"ok": True, "clicked": loc.get("name"), "tag": loc.get("tag"), "x": x, "y": y}
+    if loc.get("healed"):
+        res["healed"] = True
+        res["old_ref"] = loc.get("old_ref")
+        res["new_ref"] = loc.get("new_ref")
+    if before:
+        switched = _activate_new_tab(row, before)
+        if switched:
+            res["switched_tab"] = switched
     if isinstance(out, dict) and out.get("screenshot_png_b64"):
         res["screenshot_png_b64"] = out["screenshot_png_b64"]
+    t = page_text(row, eval_js)
+    if t:
+        res["text"] = t
     return _attach_snapshot(row, res, snapshot_after, stamped)
+
+
+def _page_ids(row):
+    try:
+        return [t["id"] for t in tabs(row).get("tabs") or [] if t.get("id")]
+    except Exception:
+        return []
+
+
+def _activate_new_tab(row, before):
+    try:
+        after = tabs(row).get("tabs") or []
+    except Exception:
+        return None
+    known = set(before)
+    fresh = [t for t in after if t.get("id") and t["id"] not in known]
+    if len(fresh) != 1:
+        return None
+    t = fresh[0]
+    try:
+        tabs(row, action="activate", target_id=t["id"])
+    except Exception:
+        return None
+    return {"id": t["id"], "url": t.get("url"), "title": t.get("title")}
+
+
+def overlay_marks(png, rects):
+    """Draw numbered boxes on a desktop PNG. Never injects into the live DOM.
+    Returns the original bytes if Pillow cannot read the image."""
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        im = Image.open(BytesIO(png)).convert("RGB")
+        dr = ImageDraw.Draw(im)
+        for i, e in enumerate(rects or []):
+            x, y, w, h = e.get("sx"), e.get("sy"), e.get("vw"), e.get("vh")
+            if None in (x, y, w, h):
+                continue
+            x, y, w, h = int(x), int(y), int(w), int(h)
+            dr.rectangle([x, y, x + w, y + h], outline=(220, 40, 40), width=2)
+            dr.text((x + 2, max(0, y - 12)), str(i), fill=(220, 40, 40))
+        buf = BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return png
+
+
+def element_rects(row, timeout_s=15):
+    body = ("return __els.slice(0,%d).map((e,i)=>({i:i,sx:e.sx,sy:e.sy,vw:e.vw,vh:e.vh}));"
+            % MAX_ELS)
+    r = eval_js(row, _iife(body), timeout_s)
+    if not r.get("ok") or not isinstance(r.get("value"), list):
+        return []
+    return r["value"]
+
+
+def hover(row, ref, name=None):
+    """Move the OS pointer over [ref] without clicking."""
+    loc = _locate(row, ref, name)
+    if not loc.get("ok"):
+        if loc.get("stale"):
+            return {"ok": False, "stale": True, "error": "element list changed",
+                    "snapshot": snapshot(row)}
+        return loc
+    x, y = loc["x"], loc["y"]
+    if not (0 <= x < SCREEN_W and 0 <= y < SCREEN_H):
+        return {"ok": False, "error": f"element resolves off-screen ({x},{y})"}
+    desk_json(row, "POST", "/action", json={"type": "move", "x": x, "y": y}, timeout=30)
+    return {"ok": True, "hovered": loc.get("name"), "tag": loc.get("tag"), "x": x, "y": y}
+
+
+UPLOAD_MAX = 5 * 1024 * 1024
+_UPLOAD_CHUNK = 6000
+
+
+def upload(row, ref, path, name=None):
+    """Assign a file already on the computer to input[type=file] [ref]."""
+    p = str(path or "")
+    if not p.startswith("/home/agent/") or "\n" in p or ".." in p:
+        raise ApiError(400, "bad_request", "path must be under /home/agent/")
+    st = desk_json(row, "POST", "/exec",
+                   json={"command": f"test -f {shlex.quote(p)} && wc -c < {shlex.quote(p)}",
+                         "timeout_s": 10}, timeout=20)
+    raw = (st.get("stdout") or "").strip().split()[0] if st.get("exit_code") == 0 else ""
+    try:
+        size = int(raw)
+    except ValueError:
+        raise ApiError(400, "bad_request", "file not found on the computer")
+    if size > UPLOAD_MAX:
+        raise ApiError(400, "bad_request", f"file larger than {UPLOAD_MAX} bytes")
+    loc = _locate(row, ref, name)
+    if not loc.get("ok"):
+        if loc.get("stale"):
+            return {"ok": False, "stale": True, "error": "element list changed",
+                    "snapshot": snapshot(row)}
+        return loc
+    use_ref = int(loc["new_ref"]) if loc.get("new_ref") is not None else int(ref)
+    if loc.get("type") != "file":
+        return {"ok": False, "error": "ref is not input[type=file] — snapshot again"}
+    fname = p.rsplit("/", 1)[-1]
+    raw = desk_bytes(row, "GET", "/file", params={"path": p}, timeout=120)
+    if len(raw) != size:
+        return {"ok": False, "error": "file size changed during read"}
+    data = base64.b64encode(raw).decode("ascii")
+    eval_js(row, "window.__caseUp=''", 5)
+    for i in range(0, len(data), _UPLOAD_CHUNK):
+        eval_js(row, "window.__caseUp+=%s" % json.dumps(data[i:i + _UPLOAD_CHUNK]), 10)
+    done = eval_js(row, _iife(f"""
+const __i={use_ref};
+const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
+const e=(__els[__i])||(stored?{{el:stored,type:stored.type}}:null);
+if(!e||e.type!=='file')return {{ok:false,error:'not a file input'}};
+const raw=atob(window.__caseUp||'');delete window.__caseUp;
+if(raw.length!=={int(size)})return {{ok:false,error:'decoded length mismatch'}};
+const u=new Uint8Array(raw.length);
+for(let i=0;i<raw.length;i++)u[i]=raw.charCodeAt(i);
+const f=new File([u],{json.dumps(fname)});
+const dt=new DataTransfer();dt.items.add(f);e.el.files=dt.files;
+e.el.dispatchEvent(new Event('change',{{bubbles:true}}));
+return {{ok:true,name:{json.dumps(fname)},bytes:raw.length}};
+"""), 15)
+    val = done.get("value") if done.get("ok") else None
+    return val if isinstance(val, dict) else {"ok": False, "error": "upload eval failed"}
 
 
 def fill(row, fields, submit=False, timeout_s=20, snapshot_after=True):
     """Batch form fill. fields=[{ref, value}]. Native setters + input/change events
-    so React/Vue see the change. Password inputs are refused inside the page —
-    vaulted computer_login owns credentials, always."""
+    so React/Vue see the change. Password and OTP inputs are refused inside the
+    page — vaulted computer_login owns credentials, always."""
     clean = []
     for f in fields or []:
         if not isinstance(f, dict) or "ref" not in f or "value" not in f:
@@ -265,7 +455,7 @@ for(const f of __fields){
   const e=__els[f.ref];
   if(!e){out.push({ref:f.ref,ok:false,error:'no such ref — re-snapshot'});continue;}
   const el=e.el;
-  if(el.type==='password'){out.push({ref:f.ref,ok:false,error:'password fields are vault-only (computer_login)'});continue;}
+  if(__secretish(el)){out.push({ref:f.ref,ok:false,error:'secret fields are vault-only (computer_login)'});continue;}
   try{
     if(el.type==='checkbox'||el.type==='radio'){
       el.checked=(f.value===true||f.value==='true'||f.value===1||f.value==='1');
@@ -283,10 +473,19 @@ for(const f of __fields){
     }
     el.dispatchEvent(new Event('input',{bubbles:true}));
     el.dispatchEvent(new Event('change',{bubbles:true}));
-    out.push({ref:f.ref,ok:true,name:e.name});
+    let actual='';
+    if(el.type==='checkbox'||el.type==='radio')actual=el.checked;
+    else if(el.isContentEditable)actual=el.textContent;
+    else actual=el.value;
+    const want=f.value;
+    const match=(el.type==='checkbox'||el.type==='radio')
+      ?(actual===true||actual==='true')=== (want===true||want==='true'||want===1||want==='1')
+      :String(actual)===String(want);
+    if(!match){out.push({ref:f.ref,ok:false,name:e.name,actual:actual,error:'page reformatted value'});continue;}
+    out.push({ref:f.ref,ok:true,name:e.name,actual:actual});
   }catch(err){out.push({ref:f.ref,ok:false,error:String(err).slice(0,80)});}
 }
-if(__submit&&out.length&&out.every(o=>o.ok)){
+if(__submit&&out.some(o=>o.ok)){
   const first=__els[__fields[0].ref];
   const form=first&&first.el.form;
   if(form){form.requestSubmit?form.requestSubmit():form.submit();}
@@ -294,8 +493,6 @@ if(__submit&&out.length&&out.every(o=>o.ok)){
 }
 return {ok:out.every(o=>o.ok),fields:out};
 """
-    # Only the submit moves the page out from under the caller; after a plain fill the
-    # refs they already hold are still good, so don't spend the settle on one.
     want = bool(snapshot_after and submit)
     stamped = want and _stamp(row)
     r = eval_js(row, _iife(body), timeout_s)
@@ -421,7 +618,7 @@ def tabs(row, action="list", target_id=None, url=None):
     if action == "new":
         if not url or not re.match(r"^https?://", str(url)):
             raise ApiError(400, "bad_request", "need an http(s) url")
-        raw = _cdp_curl(row, "/json/new?" + url, method="PUT")
+        raw = _cdp_curl(row, "/json/new?" + quote(str(url), safe=""), method="PUT")
         made = None
         try:
             made = json.loads(raw)
