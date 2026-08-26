@@ -300,6 +300,7 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
 // STOP keeps the turn — rewind only on provider errors, not disconnect.
 {
   const serveSrc = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  const caseToolsSrc = fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8');
   const chatFn = serveSrc.slice(serveSrc.indexOf('async function chat('), serveSrc.indexOf('// ---------- noVNC'));
   assert.match(chatFn, /if \(stopped\(\) \|\| res\.destroyed\) return/);
   const outOfSteps = [...chatFn.matchAll(/if \(!finished(?: && !stopped\(\))?\)/g)];
@@ -307,7 +308,7 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.ok(outOfSteps.every((m) => m[0].includes('!stopped()')), 'STOP is not out-of-rounds');
   assert.ok(!/turnStart/.test(chatFn), 'no turn rollback on provider error');
   assert.match(chatFn, /histCloseOpenCalls\(hist\.items\)/);
-  assert.match(chatFn, /withRateRetry\(round, emit\)/);
+  assert.match(chatFn, /withRateRetry\(round, emit, 5, gone\.signal\)/);
   assert.match(chatFn, /res\.on\('close', \(\) => \{ clientGone\(\); gone\.abort\(\); \}\)/);
   assert.match(chatFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);
   assert.ok(!/responses\.create\(params\)/.test(chatFn), 'every round is abortable');
@@ -320,8 +321,10 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(chatFn, /prompt_cache_key: thread\.id/);
   assert.match(serveSrc, /CASE_TURN_TOKENS/);
   assert.match(chatFn, /tokenBudget: TURN_TOKEN_BUDGET/);
-  assert.match(fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8'),
-    /tokenBudget/);
+  assert.match(chatFn, /signal: gone\.signal/);
+  assert.match(caseToolsSrc, /tokenBudget/);
+  assert.match(caseToolsSrc, /stream\.abort\(\)/, 'Anthropic stream is canceled on disconnect');
+  assert.match(caseToolsSrc, /withRateRetry\(\(\) => round\(params\), emit, 5, signal\)/);
   assert.match(chatFn, /if \(!stopped\(\)\) emit\(\{ type: 'error'/);
   assert.match(html, /\/api\/chat\/steer/);
   assert.match(html, /steerPrompt/);
@@ -393,6 +396,23 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   }, () => {}, 5);
   assert.equal(out, 'ok');
   assert.equal(n, 3);
+}
+
+{
+  const ctl = new AbortController();
+  let n = 0;
+  const started = Date.now();
+  await assert.rejects(
+    withRateRetry(async () => {
+      n += 1;
+      const err = new Error('rate limited');
+      err.status = 429;
+      throw err;
+    }, () => ctl.abort(), 5, ctl.signal),
+    (err) => err?.name === 'AbortError',
+  );
+  assert.equal(n, 1, 'disconnect stops retries before another provider request');
+  assert.ok(Date.now() - started < 500, 'disconnect interrupts the backoff sleep');
 }
 
 {
