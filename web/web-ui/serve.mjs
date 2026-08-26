@@ -20,7 +20,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop } from './case-tools.mjs';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry } from './case-tools.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -42,6 +42,7 @@ export function isLocalMode(env = process.env, host = CASE.hostname) {
   return host === '127.0.0.1' || host === 'localhost' || host === 'cased';
 }
 const LOCAL = isLocalMode();
+const HOME = process.env.CASE_HOME || path.join(process.env.HOME || '/tmp', '.case');
 
 export function liveCid(pathname) {
   const m = String(pathname || '').match(/^\/live\/(c_[A-Za-z0-9]+)(?=\/|$)/);
@@ -532,7 +533,10 @@ function actFor(name, args, id) {
   return caseToolPlan(name, args || {}, id).act || name;
 }
 
-const ROUNDS = 24;
+const ROUNDS = 200;
+// ROUNDS bounds steps, not spend: history is re-sent every round, so cost is quadratic
+// in rounds. This bounds the money — cumulative input tokens for one turn.
+const TURN_TOKEN_BUDGET = Number(process.env.CASE_TURN_TOKENS || 2_000_000);
 // Threads: the sidebar's unit of navigation, each with its own conversation memory.
 // The Responses API runs stateless here (store:false), so the item list IS the
 // memory. agent stays '' until the run first needs hands (a tool call executes) —
@@ -542,11 +546,32 @@ const THREADS_FILE = process.env.CASE_THREADS || path.join(DIR, 'threads.json');
 const THREADS = new Map();
 try {
   for (const t of JSON.parse(fs.readFileSync(THREADS_FILE, 'utf8'))) {
-    t.items = histCloseOpenCalls(t.items);
+    t.items = histCloseOpenCalls(migrateShots(t.items));
     THREADS.set(t.id, t);
   }
 } catch { /* fresh */ }
 const CHAT_BUSY = new Set();
+const STEER = new Map(); // thread id -> user texts typed while the turn runs
+function takeSteers(tid) {
+  const q = STEER.get(tid) || [];
+  if (q.length) STEER.delete(tid);
+  return q;
+}
+function pushSteerItems(items, texts) {
+  for (const n of texts) {
+    items.push({ role: 'user', content: [{ type: 'input_text', text: n }] });
+  }
+}
+function appendSteerToAnthropic(messages, text) {
+  const last = messages[messages.length - 1];
+  if (last?.role === 'user') {
+    if (typeof last.content === 'string') last.content = last.content + '\n\n' + text;
+    else if (Array.isArray(last.content)) last.content.push({ type: 'text', text });
+    else messages.push({ role: 'user', content: text });
+  } else {
+    messages.push({ role: 'user', content: text });
+  }
+}
 let saveTimer = null;
 function saveThreads() {
   clearTimeout(saveTimer);
@@ -576,6 +601,7 @@ const threadSummary = (t) => ({ id: t.id, title: t.title, agent: t.agent, update
 export function threadTurns(items) {
   const turns = [];
   for (const it of items || []) {
+    if (it.shot) continue; // screenshot attachments are model-only
     if (it.role === 'user') {
       if (Array.isArray(it.content)) {
         const text = it.content.map((c) => (typeof c === 'string' ? c : c.text || c.input_text || '')).filter(Boolean).join('\n');
@@ -625,9 +651,102 @@ export function histCloseOpenCalls(items, { keepReasoning = false } = {}) {
   }
   return out;
 }
-function clip(v, n = 8000) {
+export function shotsDir(home = HOME) {
+  return path.join(home, 'drive', 'shots');
+}
+
+/** Persist a screenshot to disk and return a tiny history item. The model still
+ *  sees the image: hydrateShots re-reads the file when building the request. */
+export function stashShot(b64, dir = shotsDir()) {
+  const h = crypto.createHash('sha1').update(String(b64 || '')).digest('hex');
+  const file = path.join(dir, h + '.png');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
+  try {
+    if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(String(b64 || ''), 'base64'));
+  } catch { /* best-effort; hydrateShots falls back to a text note */ }
+  return { role: 'user', shot: file, content: [{ type: 'input_text', text: '[screenshot]' }] };
+}
+
+export function hydrateShots(items, dir = shotsDir()) {
+  const root = path.resolve(dir) + path.sep;
+  return (items || []).map((it) => {
+    if (!it?.shot) return it;
+    const abs = path.resolve(it.shot);
+    if (!abs.startsWith(root) || path.extname(abs) !== '.png') {
+      return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
+    }
+    try {
+      const buf = fs.readFileSync(abs);
+      return {
+        role: 'user',
+        content: [{
+          type: 'input_image', detail: 'high',
+          image_url: 'data:image/png;base64,' + buf.toString('base64'),
+        }],
+      };
+    } catch {
+      return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
+    }
+  });
+}
+
+export function migrateShots(items, dir = shotsDir()) {
+  let changed = false;
+  const next = (items || []).map((it) => {
+    if (it?.shot) return it;
+    if (!(it?.role === 'user' && Array.isArray(it.content))) return it;
+    const img = it.content.find((c) => c?.type === 'input_image' && typeof c.image_url === 'string');
+    if (!img) return it;
+    const m = /^data:image\/png;base64,(.+)$/.exec(img.image_url);
+    if (!m) return it;
+    changed = true;
+    return stashShot(m[1], dir);
+  });
+  return changed ? next : items;
+}
+
+export function clip(v, n = 8000) {
   const s = typeof v === 'string' ? v : JSON.stringify(v);
-  return s.length > n ? s.slice(0, n) + '…' : s;
+  if (s.length <= n) return s;
+  // Head+tail, not a tail-drop: a 150-element snapshot overruns n, and a blind cut
+  // throws away the very fields that say so (count, truncated) along with the
+  // closing brace, so the model gets mid-JSON garbage with no signal it was cut.
+  const half = Math.floor((n - 40) / 2);
+  return `${s.slice(0, half)}\n…${s.length - 2 * half} chars elided…\n${s.slice(-half)}`;
+}
+
+/** A re-snapshot after a click that changed nothing repeats the whole element list.
+ *  Only the item being appended is replaced — never an earlier one, which would
+ *  invalidate the cached prefix for the rest of the turn. */
+export function snapshotElide(name, rest, snaps) {
+  if (name !== 'computer_snapshot' || !rest.ok) return rest;
+  const els = rest.result?.elements;
+  if (!Array.isArray(els)) return rest;
+  const h = crypto.createHash('sha1').update(els.join('\n')).digest('hex');
+  if (snaps.last === h) {
+    return { ok: true, act: rest.act, result: { unchanged: true, url: rest.result?.url,
+      note: 'same elements as the previous snapshot — refs from it are still valid' } };
+  }
+  snaps.last = h;
+  return rest;
+}
+/** Message typed while a turn runs. Queued here and appended to the running
+ *  turn's history at the next round boundary — appending a user item lands
+ *  after the cached prefix, so steering costs nothing in cache. */
+async function steer(req, res) {
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return send(res, 400, 'bad json'); }
+  const tid = String(body.thread_id || '');
+  const text = String(body.input || '').slice(0, 32000).trim();
+  if (!text) return send(res, 400, 'empty input');
+  if (!CHAT_BUSY.has(tid)) return json(res, 409, { error: 'no turn running — send as a normal message' });
+  const q = STEER.get(tid) || [];
+  q.push(text);
+  STEER.set(tid, q);
+  return json(res, 200, { queued: true });
 }
 async function chat(req, res) {
   const buf = await readBody(req, res);
@@ -656,16 +775,23 @@ async function chat(req, res) {
     'content-type': 'application/x-ndjson; charset=utf-8',
     'cache-control': 'no-store', 'x-accel-buffering': 'no',
   });
-  const emit = (obj) => res.write(JSON.stringify(obj) + '\n');
   // STOP in the UI aborts the fetch; stop looping then, but keep the turn's
   // history — tools already ran, and replaying them on "continue" double-acts.
   const stopped = () => res.destroyed;
+  const emit = (obj) => {
+    if (stopped() || res.destroyed) return;
+    try { res.write(JSON.stringify(obj) + '\n'); } catch { /* client gone */ }
+  };
   // A long-poll tool (auth wait can block 4+ min) would hold CHAT_BUSY long after
   // the client is gone. Race each tool against disconnect; once gone, later tools
   // never start. The synthetic output keeps every function_call answered.
   let clientGone;
   const goneP = new Promise((r) => { clientGone = r; });
-  res.on('close', () => clientGone());
+  // Tools are raced against disconnect, but a model round is not — and its HTTP
+  // request has to be torn down explicitly or the SDK keeps draining the stream
+  // into a dead socket, holding CHAT_BUSY (and billing) long after STOP.
+  const gone = new AbortController();
+  res.on('close', () => { clientGone(); gone.abort(); });
   const toolOrStop = (start, act) => stopped()
     ? Promise.resolve({ ok: false, error: 'stopped by user', act })
     : Promise.race([start(), goneP.then(() => ({ ok: false, error: 'stopped by user', act }))]);
@@ -685,11 +811,13 @@ async function chat(req, res) {
   };
   const dev = { role: 'developer', content: `You operate Case computer ${id}${cname ? ` (named "${cname}" — that's you when the user addresses it)` : ''} via tools. Loop: computer_navigate, then computer_click_element/computer_fill by ref. computer_hover for menus that only open on hover. computer_upload for input[type=file] (file already under /home/agent — write it first). If the snapshot has *[n] lines, those just appeared (autocomplete) — click one, do not press Enter. navigate, click and fill(submit) each RETURN the page's numbered elements and the first 2000 chars of page text, so read the result you already have — call computer_snapshot only for a first look or when something you did not do changed the page. Refs stay valid until the page changes. computer_wait_for instead of polling. Screenshots only for canvas/layout; marks=true draws numbered snapshot boxes on the PNG. Coordinates are the display size (1280x800 by default). Login walls: computer_login(credential=<vault name>, url=current page) — never ask the user for a password or type into password fields. Vault names on this computer: ${vault}. On handoff_pending, immediately auth_attempt_wait. You get ${ROUNDS} tool steps per turn; the conversation continues across turns, so if you run out say exactly where you stopped. Short final answer.` };
   const hist = thread;
-  const turnStart = hist.items.length;
+  // A steer accepted in the turn's last round missed every drain; deliver it
+  // ahead of the new prompt so nothing the user typed is lost.
+  pushSteerItems(hist.items, takeSteers(thread.id));
   hist.items.push({ role: 'user', content: inputText });
   try {
     if (auth.provider === 'anthropic') {
-      const messages = histToAnthropicMessages(hist.items);
+      const messages = histToAnthropicMessages(hydrateShots(hist.items), { media: true });
       const { text: out, finished } = await anthropicToolLoop({
         key: auth.key,
         model,
@@ -700,6 +828,14 @@ async function chat(req, res) {
         emit,
         rounds: ROUNDS,
         stopped,
+        beforeRound: (msgs) => {
+          const nudges = takeSteers(thread.id);
+          for (const n of nudges) {
+            pushSteerItems(hist.items, [n]);
+            appendSteerToAnthropic(msgs, n);
+            emit({ type: 'steer', text: n });
+          }
+        },
         actFor: (name, args) => actFor(name, args || {}, id),
         runTool: async (name, args, call) => {
           claim();
@@ -719,7 +855,7 @@ async function chat(req, res) {
         },
       });
       let text = out;
-      if (!finished) {
+      if (!finished && !stopped()) {
         text = (text ? text + '\n\n' : '')
           + `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`;
         emit({ type: 'text', text });
@@ -736,17 +872,33 @@ async function chat(req, res) {
     }
     const client = new OpenAI({ apiKey: auth.key });
     let text = '';
+    const spend = { in: 0, cached: 0, out: 0 };
     let summary = 'detailed';
     const round = async () => {
+      // The SDK leaves its abort listener on the signal after the round ends; over a
+      // 200-round turn that is 200 dead listeners on one signal. A per-round
+      // controller, linked for exactly the lifetime of the round, keeps it at one.
+      const rc = new AbortController();
+      const relay = () => rc.abort();
+      gone.signal.addEventListener('abort', relay, { once: true });
+      if (gone.signal.aborted) rc.abort();
+      try {
       const params = {
-        model, input: [dev, ...hist.items], tools: ALL_TOOLS,
+        model, input: [dev, ...hydrateShots(hist.items)], tools: ALL_TOOLS,
         reasoning: { effort, summary }, stream: true, store: false,
+        // The loop is append-only: every round re-sends [dev, ...items], which is
+        // exactly the shape the prefix cache wants. A stable key is required for
+        // reliable matching; cached input bills at 0.1x.
+        prompt_cache_key: thread.id,
       };
       let stream;
-      try { stream = await client.responses.create(params); }
+      try { stream = await client.responses.create(params, { signal: rc.signal }); }
       catch (err) {
-        if (summary !== 'auto') { summary = 'auto'; stream = await client.responses.create({ ...params, reasoning: { effort, summary } }); }
-        else throw err;
+        // Only the summary-unsupported fallback retries; an abort must not.
+        if (summary !== 'auto' && !gone.signal.aborted) {
+          summary = 'auto';
+          stream = await client.responses.create({ ...params, reasoning: { effort, summary } }, { signal: rc.signal });
+        } else throw err;
       }
       let response = null;
       let thinkDelta = false;
@@ -784,18 +936,41 @@ async function chat(req, res) {
         emit({ type: 'tool', id: cId, call_id: call.call_id || cId, name: call.name, act: actFor(call.name, args, id), args });
       }
       return { response, traces, textDelta };
+      } finally {
+        gone.signal.removeEventListener('abort', relay);
+      }
     };
     let finished = false;
-    for (let i = 0; i < ROUNDS && !finished && !stopped(); i++) {
-      const { response, traces, textDelta } = await round();
+    const shots = new Set();      // screenshot hashes already in this turn's history
+    const snaps = { last: '' };   // hash of the most recent snapshot's element list
+    const overBudget = () => spend.in > TURN_TOKEN_BUDGET;
+    let i = 0;
+    for (; i < ROUNDS && !finished && !stopped() && !overBudget(); i++) {
+      const nudges = takeSteers(thread.id);
+      if (nudges.length) {
+        for (const n of nudges) {
+          pushSteerItems(hist.items, [n]);
+          emit({ type: 'steer', text: n });
+        }
+      }
+      const { response, traces, textDelta } = await withRateRetry(round, emit);
+      const u = response.usage || {};
+      spend.in += u.input_tokens || 0;
+      spend.cached += u.input_tokens_details?.cached_tokens || 0;
+      spend.out += u.output_tokens || 0;
       text = (response.output_text || traces.texts.join('\n') || '').trim();
       if (!traces.calls.length) {
         finished = true;
+        // The answering round must land in history too, or the reply exists
+        // only in the stream: reloads show bare prompts and the model never
+        // sees what it already said.
+        hist.items.push(...response.output);
         if (text && !textDelta) emit({ type: 'text', text });
         break;
       }
       hist.items.push(...response.output);
       claim();   // first tool call = the run needs hands: the task finds its agent
+      const images = [];
       for (const call of traces.calls) {
         let args = {};
         try { args = JSON.parse(call.arguments || '{}'); } catch { args = {}; }
@@ -807,15 +982,30 @@ async function chat(req, res) {
           () => (eplan ? runExtra(eplan) : runCaseTool(call.name, args, id)), act);
         const { image_b64, ...rest } = result;
         emit({ type: 'tool_result', id: call.id, call_id: callId, act: rest.act || act, ok: !!rest.ok, name: call.name, args_used: call.name === 'computer_exec' ? String(args.command || '').slice(0, 200) : undefined, detail: clip(rest.error || rest.result || rest, 400) });
-        hist.items.push({ type: 'function_call_output', call_id: callId, output: clip(rest) });
+        hist.items.push({ type: 'function_call_output', call_id: callId, output: clip(snapshotElide(call.name, rest, snaps)) });
+        if (image_b64) images.push(image_b64);
       }
       hist.items = histCloseOpenCalls(hist.items, { keepReasoning: true });
+      for (const b64 of images) {
+        // A click that changed nothing yields a byte-identical png. Re-sending it buys
+        // no information and then rides along in every later round of the turn.
+        const h = crypto.createHash('sha1').update(b64).digest('hex');
+        if (shots.has(h)) {
+          hist.items.push({ role: 'user', content: [{ type: 'input_text',
+            text: 'screenshot identical to an earlier one this turn — the screen has not changed' }] });
+          continue;
+        }
+        shots.add(h);
+        hist.items.push(stashShot(b64));
+      }
     }
-    if (!finished) {
-      // Out of steps mid-task. Say so — silence here reads as "it just stopped" —
-      // and the carried history makes "continue" actually resume.
+    if (!finished && !stopped()) {
+      // Out of steps or out of budget mid-task. Say so — silence here reads as
+      // "it just stopped" — and the carried history makes "continue" actually resume.
       text = (text ? text + '\n\n' : '')
-        + `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`;
+        + (overBudget()
+          ? `**Out of budget.** Stopped after ${spend.in.toLocaleString('en-US')} input tokens with the task unfinished. Say **continue** and I pick up from here.`
+          : `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`);
       emit({ type: 'text', text });
     }
     // Reasoning items are only valid inside the turn that produced them; carrying
@@ -826,16 +1016,26 @@ async function chat(req, res) {
     saveThreads();
     emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
   } catch (err) {
-    // Drop the whole turn: a half-written turn can leave a function_call with no
-    // output, which 400s every later request.
-    hist.items.length = turnStart;
+    // Keep the turn even on provider errors: tools already ran, that work is
+    // real. histCloseOpenCalls synthesizes outputs for any dangling
+    // function_call so later requests don't 400. (Rate limits are retried
+    // inside the round; landing here means retries ran dry or a real fault.)
     hist.items = histCloseOpenCalls(hist.items);
+    histTrim(hist);
     thread.updated = Date.now();
     saveThreads();
-    emit({ type: 'error', error: err?.message || 'openai error' });
+    if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
   }
   res.end();
   } finally {
+    // Last-round steers missed every drain. Land them in history before the
+    // inbox is forgotten so a reload or restart still has what the user typed.
+    const leftover = takeSteers(thread.id);
+    if (leftover.length) {
+      pushSteerItems(thread.items, leftover);
+      thread.updated = Date.now();
+      saveThreads();
+    }
     CHAT_BUSY.delete(thread.id);
   }
 }
@@ -878,10 +1078,12 @@ function vncWs(req, socket, head) {
   if (head?.length) up.write(head);
 }
 
+// Only the two pages are servable. Everything else in this directory —
+// server source, thread history — is not a web asset; the request falls
+// through to 404 rather than trusting a proxy to filter paths.
+const PAGE_FILES = { '/': '/index.html', '/index.html': '/index.html', '/deploy': '/deploy.html', '/deploy/': '/deploy.html', '/deploy.html': '/deploy.html' };
 export function pageFile(p) {
-  if (p === '/' || p === '/index.html') return '/index.html';
-  if (p === '/deploy' || p === '/deploy/') return '/deploy.html';
-  return p;
+  return PAGE_FILES[p] || '';
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -924,6 +1126,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/threads') return threadsRoute(req, res, url);
     if (req.method === 'GET' && p === '/api/file') return fsFile(res, url);
     if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
+    if (req.method === 'POST' && p === '/api/chat/steer') return steer(req, res);
     if (req.method === 'POST' && p === '/api/teach-tick') {
       const id = await cid();
       if (!id) return json(res, 409, { error: 'no computer' });

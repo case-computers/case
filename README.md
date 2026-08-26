@@ -96,6 +96,10 @@ bin/case up
 CASE_LOCAL=1 CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
 ```
 
+Drive stores thread screenshots under `~/.case/drive/shots` (Compose: the
+`ui-data` volume via `CASE_HOME=/data`). `CASE_TURN_TOKENS` (default 2M) caps
+one turn's cumulative input tokens. Mid-turn messages go to `/api/chat/steer`.
+
 ### More knobs
 
 Phone notifications for 2FA/approvals (ntfy), CAPTCHA auto-solve, scheduled

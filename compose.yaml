@@ -107,6 +107,7 @@ services:
       CASE_BIND: "0.0.0.0"
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_THREADS: /data/threads.json
+      CASE_HOME: /data
       CASE_LOCAL: "1"
       PORT: "4174"
     volumes:
