@@ -24,6 +24,7 @@ the same element unless the page itself changed — in which case click_element
 refuses and returns a fresh snapshot instead of clicking the wrong thing.
 """
 import json
+import posixpath
 import re
 import shlex
 import time
@@ -391,7 +392,10 @@ _UPLOAD_CHUNK = 6000
 def upload(row, ref, path, name=None):
     """Assign a file already on the computer to input[type=file] [ref]."""
     p = str(path or "")
-    if not p.startswith("/home/agent/") or "\n" in p or ".." in p:
+    if "\n" in p or not p.startswith("/home/agent/") or any(part == ".." for part in p.split("/")):
+        raise ApiError(400, "bad_request", "path must be under /home/agent/")
+    p = posixpath.normpath(p)
+    if not p.startswith("/home/agent/"):
         raise ApiError(400, "bad_request", "path must be under /home/agent/")
     st = desk_json(row, "POST", "/exec",
                    json={"command": f"test -f {shlex.quote(p)} && wc -c < {shlex.quote(p)}",
@@ -485,7 +489,7 @@ for(const f of __fields){
     out.push({ref:f.ref,ok:true,name:e.name,actual:actual});
   }catch(err){out.push({ref:f.ref,ok:false,error:String(err).slice(0,80)});}
 }
-if(__submit&&out.some(o=>o.ok)){
+if(__submit&&out.length&&out.every(o=>o.ok)){
   const first=__els[__fields[0].ref];
   const form=first&&first.el.form;
   if(form){form.requestSubmit?form.requestSubmit():form.submit();}

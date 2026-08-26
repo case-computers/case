@@ -818,7 +818,7 @@ async function chat(req, res) {
   try {
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hist.items), { media: true });
-      const { text: out, finished } = await anthropicToolLoop({
+      const { text: out, finished, spend, overBudget } = await anthropicToolLoop({
         key: auth.key,
         model,
         effort,
@@ -827,6 +827,7 @@ async function chat(req, res) {
         tools: ALL_TOOLS,
         emit,
         rounds: ROUNDS,
+        tokenBudget: TURN_TOKEN_BUDGET,
         stopped,
         beforeRound: (msgs) => {
           const nudges = takeSteers(thread.id);
@@ -857,7 +858,9 @@ async function chat(req, res) {
       let text = out;
       if (!finished && !stopped()) {
         text = (text ? text + '\n\n' : '')
-          + `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`;
+          + (overBudget
+            ? `**Out of budget.** Stopped after ${spend.in.toLocaleString('en-US')} input tokens with the task unfinished. Say **continue** and I pick up from here.`
+            : `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`);
         emit({ type: 'text', text });
       } else if (text) {
         hist.items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
