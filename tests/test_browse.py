@@ -91,6 +91,9 @@ def test_walk_v2_pierces_shadow_iframe_and_filters():
     assert "elementFromPoint" in src
     assert "cursor==='pointer'" in src
     assert "__contained" in src
+    assert "__contained(tr)" in src
+    assert "__boxes.push(tr)" in src
+    assert "__contained(r)" not in src
 
 
 def test_snapshot_formats_shadow_and_iframe_markers():
@@ -363,6 +366,23 @@ def test_click_returns_the_page_it_navigated_to():
     assert out["ok"], out
     assert out["snapshot"]["url"] == "https://next.test", out
     assert out["snapshot"]["elements"][0] == '[0] a "Home" -> /', out
+
+
+def test_click_reads_text_after_the_destination_settles():
+    browse.eval_js = fake_eval_map({
+        LOCATE: [{"ok": True, "value": {"ok": True, "name": "Go", "tag": "a", "x": 1, "y": 2}}],
+        STAMP: [{"ok": True, "value": 1}],
+        POLL: [{"ok": True, "value": [True, "complete"]}],
+        SNAP: [_snap_value("https://next.test", ELS[:1])],
+        "innerText.slice": [{"ok": True, "value": "destination copy"}],
+    })
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Go")
+    assert out["snapshot"]["url"] == "https://next.test", out
+    assert out["text"] == "destination copy", out
+    snap_i = next(i for i, expr in enumerate(browse.eval_js.calls) if SNAP in expr)
+    text_i = next(i for i, expr in enumerate(browse.eval_js.calls) if "innerText.slice" in expr)
+    assert snap_i < text_i, browse.eval_js.calls
 
 
 def test_click_snapshot_never_hands_back_the_page_it_left():
