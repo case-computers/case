@@ -173,6 +173,8 @@ def test_fill_passes_fields_and_returns_page_result():
     assert out["ok"] is True, out
     expr = browse.eval_js.calls[0]
     assert '"jane@x.com"' in expr and "__submit=true" in expr
+    assert "out.every(o=>o.ok)" in expr
+    assert "out.some(o=>o.ok)" not in expr
     assert "__secretish" in expr and "one-time-code" in expr
     assert "vault-only" in expr   # the secret-field refusal ships inside the page script
     assert "page reformatted value" in expr
@@ -534,6 +536,26 @@ def test_upload_refuses_path_outside_home_agent():
         browse.upload(ROW, 0, "/etc/passwd")
     except ApiError as e:
         assert e.status == 400
+        return
+    assert False
+
+
+def test_upload_refuses_parent_segment():
+    try:
+        browse.upload(ROW, 0, "/home/agent/foo/../etc/passwd")
+    except ApiError as e:
+        assert e.status == 400
+        return
+    assert False
+
+
+def test_upload_allows_dotdot_in_filename():
+    browse.desk_json = fake_desk({"exit_code": 1, "stdout": ""})
+    try:
+        browse.upload(ROW, 0, "/home/agent/report..final.pdf")
+    except ApiError as e:
+        assert e.status == 400
+        assert "file not found" in e.message
         return
     assert False
 
