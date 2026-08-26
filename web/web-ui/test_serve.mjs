@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, hydrateAttaches, attachKind, ATTACH_MAX } from './serve.mjs';
+import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
@@ -341,6 +341,7 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8'),
     /cache_control: \{ type: 'ephemeral' \}/, 'Anthropic path requests prompt cache');
   assert.match(chatFn, /hydrateShots\(hydrateAttaches\(hist\.items\)\)/);
+  assert.match(chatFn, /attachment not found/, 'a missing file is an error, not a silent drop');
   assert.ok(!/truncation:\s*['"]auto['"]/.test(chatFn), 'no truncation:auto');
   assert.ok(!/compactHistory|SUMMARIZE_PROMPT|CASE_COMPACT_AT/.test(serveSrc), 'no compaction');
 }
@@ -408,6 +409,15 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.ok(fs.existsSync(img.path));
   assert.ok(JSON.stringify(img).length < 400, 'the record is a pointer');
   const notes = stashAttach(Buffer.from('hello notes', 'utf8'), 'notes.md', 'text/plain', dir);
+  const dotted = stashAttach(Buffer.from('final report', 'utf8'), 'report..final.md', 'text/plain', dir);
+  assert.ok(dotted.name.includes('..'), 'dots in the name survive');
+  assert.ok(resolveAttach(dotted.id, dir), 'an id with .. in the filename still resolves');
+  assert.equal(resolveAttach('../etc/passwd', dir), null);
+  assert.equal(resolveAttach('..', dir), null);
+  const blocker = path.join(os.tmpdir(), 'case-inbox-not-a-dir');
+  fs.writeFileSync(blocker, 'x');
+  assert.throws(() => stashAttach(Buffer.from('hi'), 'notes.md', 'text/plain', blocker), /could not store/);
+  fs.rmSync(blocker);
   const hyd = hydrateAttaches([
     { role: 'user', content: 'see these', attaches: [
       { path: img.path, name: img.name, mime: img.mime },

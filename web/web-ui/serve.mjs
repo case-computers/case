@@ -736,14 +736,26 @@ export function stashAttach(buf, name, mime, dir = inboxDir()) {
   const id = h + '-' + base;
   const file = path.join(dir, id);
   try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
-  try { if (!fs.existsSync(file)) fs.writeFileSync(file, buf); } catch { /* hydrate falls back */ }
+  try {
+    if (!fs.existsSync(file)) fs.writeFileSync(file, buf);
+  } catch {
+    const err = new Error('could not store file');
+    err.status = 500;
+    throw err;
+  }
+  if (!fs.existsSync(file)) {
+    const err = new Error('could not store file');
+    err.status = 500;
+    throw err;
+  }
   const stored = (mimeFor(base).split(';')[0] || mime || '').trim();
   return { id, name: base, mime: stored, path: file };
 }
 
 export function resolveAttach(id, dir = inboxDir()) {
-  const base = path.basename(String(id || ''));
-  if (!base || base !== String(id || '') || base.includes('..')) return null;
+  const raw = String(id || '');
+  const base = path.basename(raw);
+  if (!base || base !== raw || base === '.' || base === '..') return null;
   const root = path.resolve(dir) + path.sep;
   const abs = path.resolve(dir, base);
   if (!abs.startsWith(root) || !fs.existsSync(abs)) return null;
@@ -882,7 +894,8 @@ async function chat(req, res) {
   const attaches = [];
   for (const ref of fileIds) {
     const rec = resolveAttach(typeof ref === 'string' ? ref : ref?.id);
-    if (rec) attaches.push({ path: rec.path, name: rec.name, mime: rec.mime });
+    if (!rec) return send(res, 400, 'attachment not found');
+    attaches.push({ path: rec.path, name: rec.name, mime: rec.mime });
   }
   if (!inputText && !attaches.length) return send(res, 400, 'empty input');
   const picked = String(body.computer_id || '');
