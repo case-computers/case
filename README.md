@@ -96,9 +96,13 @@ bin/case up
 CASE_LOCAL=1 CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
 ```
 
-Drive stores thread screenshots under `~/.case/drive/shots` (Compose: the
-`ui-data` volume via `CASE_HOME=/data`). `CASE_TURN_TOKENS` (default 2M) caps
-one turn's cumulative input tokens. Mid-turn messages go to `/api/chat/steer`.
+Drive stores thread screenshots under `~/.case/drive/shots` and chat
+attachments under `~/.case/drive/inbox` (Compose: the `ui-data` volume via
+`CASE_HOME=/data`). Those files persist after a thread is deleted — remove
+the directory or volume if you need them gone. `CASE_TURN_TOKENS` (default 2M)
+caps one turn's cumulative input tokens. Mid-turn messages go to
+`/api/chat/steer`. Attach files from the plus menu; they stay on the Drive
+host and are never copied onto the computer.
 
 ### More knobs
 

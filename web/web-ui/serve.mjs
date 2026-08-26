@@ -603,13 +603,16 @@ export function threadTurns(items) {
   for (const it of items || []) {
     if (it.shot) continue; // screenshot attachments are model-only
     if (it.role === 'user') {
+      const names = (it.attaches || []).map((a) => a.name).filter(Boolean);
+      let text = '';
       if (Array.isArray(it.content)) {
-        const text = it.content.map((c) => (typeof c === 'string' ? c : c.text || c.input_text || '')).filter(Boolean).join('\n');
-        if (!text) continue; // screenshot attachments are model-only
-        turns.push({ who: 'you', text });
-      } else {
-        turns.push({ who: 'you', text: String(it.content) });
+        text = it.content.map((c) => (typeof c === 'string' ? c : c.text || c.input_text || '')).filter(Boolean).join('\n');
+      } else if (it.content != null) {
+        text = String(it.content);
       }
+      const shown = [text, ...names].filter(Boolean).join('\n');
+      if (!shown) continue; // screenshot attachments are model-only
+      turns.push({ who: 'you', text: shown });
     }
     else if (it.type === 'function_call') turns.push({ who: 'tool', name: it.name, args: String(it.arguments || '').slice(0, 400) });
     else if (it.type === 'message' && it.role === 'assistant') turns.push({ who: 'agent', text: (it.content || []).map((c) => c.text || '').join('') });
@@ -690,6 +693,122 @@ export function hydrateShots(items, dir = shotsDir()) {
   });
 }
 
+export const ATTACH_MAX = 5 * 1024 * 1024;
+export const ATTACH_MAX_N = 4;
+
+export function inboxDir(home = HOME) {
+  return path.join(home, 'drive', 'inbox');
+}
+
+export function attachKind(mime, name = '') {
+  const m = String(mime || mimeFor(name) || '').split(';')[0].trim().toLowerCase();
+  if (m === 'image/png' || m === 'image/jpeg' || m === 'image/gif' || m === 'image/webp') return 'image';
+  if (m === 'application/pdf') return 'pdf';
+  if (m.startsWith('text/') || m === 'application/json' || m === 'application/javascript'
+    || m === 'text/javascript' || m === 'application/xml') return 'text';
+  return '';
+}
+
+export function safeAttachName(name) {
+  const base = path.basename(String(name || 'file')).replace(/[^\w.\-]+/g, '_').slice(0, 80);
+  return base || 'file';
+}
+
+export function stashAttach(buf, name, mime, dir = inboxDir()) {
+  const kind = attachKind(mime, name);
+  if (!kind) {
+    const err = new Error('file type not allowed');
+    err.status = 400;
+    throw err;
+  }
+  if (!buf || !buf.length) {
+    const err = new Error('empty file');
+    err.status = 400;
+    throw err;
+  }
+  if (buf.length > ATTACH_MAX) {
+    const err = new Error('file too large');
+    err.status = 413;
+    throw err;
+  }
+  const base = safeAttachName(name);
+  const h = crypto.createHash('sha1').update(buf).digest('hex');
+  const id = h + '-' + base;
+  const file = path.join(dir, id);
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
+  try { if (!fs.existsSync(file)) fs.writeFileSync(file, buf); } catch { /* hydrate falls back */ }
+  const stored = (mimeFor(base).split(';')[0] || mime || '').trim();
+  return { id, name: base, mime: stored, path: file };
+}
+
+export function resolveAttach(id, dir = inboxDir()) {
+  const base = path.basename(String(id || ''));
+  if (!base || base !== String(id || '') || base.includes('..')) return null;
+  const root = path.resolve(dir) + path.sep;
+  const abs = path.resolve(dir, base);
+  if (!abs.startsWith(root) || !fs.existsSync(abs)) return null;
+  const name = base.replace(/^[0-9a-f]{40}-/, '') || base;
+  return { id: base, path: abs, name, mime: mimeFor(name).split(';')[0] };
+}
+
+function hydrateOneAttach(a, dir) {
+  const name = a?.name || 'file';
+  const note = { type: 'input_text', text: '[' + name + ']' };
+  const abs = path.resolve(String(a?.path || ''));
+  const root = path.resolve(dir) + path.sep;
+  if (!abs.startsWith(root) || !fs.existsSync(abs)) return [note];
+  const mime = String(a.mime || mimeFor(name)).split(';')[0].trim();
+  const kind = attachKind(mime, name);
+  try {
+    const buf = fs.readFileSync(abs);
+    if (kind === 'image') {
+      return [{
+        type: 'input_image', detail: 'high',
+        image_url: 'data:' + mime + ';base64,' + buf.toString('base64'),
+      }];
+    }
+    if (kind === 'pdf') {
+      return [{
+        type: 'input_file',
+        filename: name,
+        file_data: 'data:application/pdf;base64,' + buf.toString('base64'),
+      }];
+    }
+    if (kind === 'text') {
+      return [{ type: 'input_text', text: name + '\n' + clip(buf.toString('utf8'), 32000) }];
+    }
+  } catch { /* note */ }
+  return [note];
+}
+
+export function hydrateAttaches(items, dir = inboxDir()) {
+  return (items || []).map((it) => {
+    if (!it?.attaches?.length) return it;
+    const parts = [];
+    if (typeof it.content === 'string' && it.content) {
+      parts.push({ type: 'input_text', text: it.content });
+    } else if (Array.isArray(it.content)) {
+      for (const c of it.content) parts.push(c);
+    }
+    for (const a of it.attaches) parts.push(...hydrateOneAttach(a, dir));
+    return { role: 'user', content: parts };
+  });
+}
+
+async function attach(req, res) {
+  const name = safeAttachName(req.headers['x-filename']);
+  const mime = mimeFor(name);
+  if (!attachKind(mime, name)) return json(res, 400, { error: 'file type not allowed' });
+  const buf = await readBody(req, res, ATTACH_MAX);
+  if (!buf) return;
+  try {
+    const rec = stashAttach(buf, name, mime);
+    return json(res, 200, { id: rec.id, name: rec.name, mime: rec.mime });
+  } catch (err) {
+    return json(res, err.status || 400, { error: err.message || 'attach failed' });
+  }
+}
+
 export function migrateShots(items, dir = shotsDir()) {
   let changed = false;
   const next = (items || []).map((it) => {
@@ -759,9 +878,15 @@ async function chat(req, res) {
   const model = resolveChatModel(body.model, auth.provider);
   const effort = ['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : 'medium';
   const inputText = String(body.input || '').slice(0, 32000);
-  if (!inputText) return send(res, 400, 'empty input');
+  const fileIds = Array.isArray(body.files) ? body.files.slice(0, ATTACH_MAX_N) : [];
+  const attaches = [];
+  for (const ref of fileIds) {
+    const rec = resolveAttach(typeof ref === 'string' ? ref : ref?.id);
+    if (rec) attaches.push({ path: rec.path, name: rec.name, mime: rec.mime });
+  }
+  if (!inputText && !attaches.length) return send(res, 400, 'empty input');
   const picked = String(body.computer_id || '');
-  const thread = THREADS.get(String(body.thread_id || '')) || newThread(inputText, picked);
+  const thread = THREADS.get(String(body.thread_id || '')) || newThread(inputText || attaches[0].name, picked);
   if (CHAT_BUSY.has(thread.id)) return json(res, 409, { error: 'this thread is still running a turn' });
   CHAT_BUSY.add(thread.id);
   try {
@@ -814,10 +939,12 @@ async function chat(req, res) {
   // A steer accepted in the turn's last round missed every drain; deliver it
   // ahead of the new prompt so nothing the user typed is lost.
   pushSteerItems(hist.items, takeSteers(thread.id));
-  hist.items.push({ role: 'user', content: inputText });
+  const userItem = { role: 'user', content: inputText };
+  if (attaches.length) userItem.attaches = attaches;
+  hist.items.push(userItem);
   try {
     if (auth.provider === 'anthropic') {
-      const messages = histToAnthropicMessages(hydrateShots(hist.items), { media: true });
+      const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
       const { text: out, finished } = await anthropicToolLoop({
         key: auth.key,
         model,
@@ -884,7 +1011,7 @@ async function chat(req, res) {
       if (gone.signal.aborted) rc.abort();
       try {
       const params = {
-        model, input: [dev, ...hydrateShots(hist.items)], tools: ALL_TOOLS,
+        model, input: [dev, ...hydrateShots(hydrateAttaches(hist.items))], tools: ALL_TOOLS,
         reasoning: { effort, summary }, stream: true, store: false,
         // The loop is append-only: every round re-sends [dev, ...items], which is
         // exactly the shape the prefix cache wants. A stable key is required for
@@ -1014,7 +1141,12 @@ async function chat(req, res) {
     histTrim(hist);
     thread.updated = Date.now();
     saveThreads();
-    emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
+    const eff = Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
+    console.log(`drive turn ${thread.id}: in=${spend.in} cached=${spend.cached}`
+      + ` (${spend.in ? Math.round((100 * spend.cached) / spend.in) : 0}%)`
+      + ` eff=${eff} out=${spend.out} rounds=${i}`);
+    spend.eff = eff;
+    emit({ type: 'done', text, computer_id: id, thread_id: thread.id, spend, rounds: i });
   } catch (err) {
     // Keep the turn even on provider errors: tools already ran, that work is
     // real. histCloseOpenCalls synthesizes outputs for any dangling
@@ -1127,6 +1259,7 @@ export const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/file') return fsFile(res, url);
     if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
     if (req.method === 'POST' && p === '/api/chat/steer') return steer(req, res);
+    if (req.method === 'POST' && p === '/api/attach') return attach(req, res);
     if (req.method === 'POST' && p === '/api/teach-tick') {
       const id = await cid();
       if (!id) return json(res, 409, { error: 'no computer' });

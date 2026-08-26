@@ -300,8 +300,8 @@ body.teaching .deskwrap::before{
 }
 .ask textarea::placeholder{color:var(--faint)}
 /* narrow panel: squeeze the textarea, never the SEND button */
-.qline{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
-.qline[hidden]{display:none}
+.qline,.aline{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.qline[hidden],.aline[hidden]{display:none}
 .qchip{display:inline-flex;align-items:center;gap:6px;max-width:100%;
   font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--faint);
   border:1px dashed var(--ink);padding:4px 6px 4px 8px}
@@ -546,9 +546,13 @@ body.acting .deskwrap::before{
               <div class="cfg-pop" id="cfgPop" hidden></div>
             </div>
             <div class="qline" id="qline" hidden></div>
+            <div class="aline" id="aline" hidden></div>
+            <input type="file" id="attachPick" hidden multiple
+              accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv,.json,.html,.htm,.js,.mjs,.css,.py,.sh,.yml,.yaml,.toml,.log,.xml,.pdf">
             <div class="ask">
               <button type="button" class="plus" id="plusBtn" aria-haspopup="menu" aria-expanded="false" aria-label="More actions">+</button>
               <div class="plus-pop" id="plusPop" hidden>
+                <button type="button" id="attachStart">Attach files<small>FROM THIS COMPUTER · MODEL READS THEM</small></button>
                 <button type="button" id="teachStart">Teach a task<small>DEMONSTRATE IN THE BROWSER · SAVED AS A SKILL</small></button>
               </div>
               <textarea id="q" rows="1" placeholder="tell the computer what to do" aria-label="Message"></textarea>
@@ -1217,27 +1221,53 @@ $('stopBtn').addEventListener('click',()=>{if(chatCtl)chatCtl.abort();});
    this a second submit 409s server-side and its cleanup hides the STOP button
    for the turn still running. */
 const promptQ=[];
+const asPrompt=p=>typeof p==='string'?{text:p,files:[]}:{text:p&&p.text||'',files:p&&p.files||[]};
 const paintQ=()=>{
   const ql=$('qline');
   ql.hidden=!promptQ.length;
   ql.innerHTML='';
   promptQ.forEach((p,i)=>{
+    const item=asPrompt(p);
     const chip=document.createElement('span');
     chip.className='qchip';
     chip.innerHTML='<span class="qtxt"></span><button type="button" class="qx" aria-label="Remove queued prompt">×</button>';
-    chip.querySelector('.qtxt').textContent=p;
+    chip.querySelector('.qtxt').textContent=item.text||((item.files[0]&&item.files[0].name)||'queued');
     chip.querySelector('.qx').addEventListener('click',()=>{promptQ.splice(i,1);paintQ();});
     ql.appendChild(chip);
   });
 };
+const pending=[];
+const ATTACH_EXTS='png,jpg,jpeg,gif,webp,txt,md,csv,json,html,htm,js,mjs,css,py,sh,yml,yaml,toml,log,xml,pdf'.split(',');
+const paintAline=()=>{
+  const al=$('aline');
+  al.hidden=!pending.length;
+  al.innerHTML='';
+  pending.forEach((f,i)=>{
+    const chip=document.createElement('span');
+    chip.className='qchip';
+    chip.innerHTML='<span class="qtxt"></span><button type="button" class="qx" aria-label="Remove attachment">×</button>';
+    chip.querySelector('.qtxt').textContent=f.name;
+    chip.querySelector('.qx').addEventListener('click',()=>{pending.splice(i,1);paintAline();});
+    al.appendChild(chip);
+  });
+};
+const youLine=(t,files)=>{
+  const names=(files||[]).map(f=>f.name||f).filter(Boolean);
+  return [t,...names].filter(Boolean).join('\n');
+};
 $('go').addEventListener('submit',e=>{
   e.preventDefault();
   const t=q.value.trim();
-  if(!t)return;
+  const files=pending.slice();
+  if(!t&&!files.length)return;
   if(!currentKey()){openKey();return;}
   q.value='';q.style.height='auto';
-  if(chatCtl){steerPrompt(t);return;}
-  sendPrompt(t);
+  pending.length=0;paintAline();
+  if(chatCtl){
+    if(files.length){promptQ.push({text:t,files});paintQ();return;}
+    steerPrompt(t);return;
+  }
+  sendPrompt(t,files);
 });
 /* Mid-turn message: try to inject into the running turn; fall back to the
    local queue if the turn just ended (409) or the server is unreachable. */
@@ -1255,13 +1285,16 @@ async function steerPrompt(t){
     stick(true);
   }catch{promptQ.push(t);paintQ();}
 }
-async function sendPrompt(t){
+async function sendPrompt(t,files){
+  if(t&&typeof t==='object'&&!Array.isArray(t)){files=t.files||[];t=t.text||'';}
+  files=files||[];
   const es=$('emptyState');if(es)es.remove();
   /* the task exists the moment you hit enter, born on the computer you are sat at */
   if(!activeTid){
     const agentId=comp&&comp.id||'';
     activeTid='__pending';
-    threads.unshift({id:'__pending',title:t.replace(/\s+/g,' ').slice(0,72),agent:agentId,updated:Date.now(),pending:true});
+    const title=(t||((files[0]&&files[0].name)||'file')).replace(/\s+/g,' ').slice(0,72);
+    threads.unshift({id:'__pending',title,agent:agentId,updated:Date.now(),pending:true});
     paint();
     const born=$('navlist').querySelector('.thread[data-t="__pending"]');
     if(born)born.classList.add('born');
@@ -1273,7 +1306,7 @@ async function sendPrompt(t){
   const art=document.createElement('article');
   art.className='turn you';
   art.innerHTML='<div class="k">YOU</div><p></p>';
-  art.querySelector('p').textContent=t;
+  art.querySelector('p').textContent=youLine(t,files);
   inner.appendChild(art);
   const reply=document.createElement('article');
   reply.className='turn';
@@ -1317,6 +1350,17 @@ async function sendPrompt(t){
   chatCtl=new AbortController();
   $('stopBtn').hidden=false;
   try{
+    const uploaded=[];
+    for(const f of files){
+      const ar=await fetch('/api/attach',{
+        method:'POST',signal:chatCtl.signal,
+        headers:{'x-filename':f.name,'content-type':f.type||'application/octet-stream'},
+        body:f
+      });
+      const aj=await ar.json().catch(()=>({}));
+      if(!ar.ok||!aj.id)throw new Error(aj.error||('attach failed: '+f.name));
+      uploaded.push({id:aj.id,name:aj.name||f.name});
+    }
     const r=await fetch('/api/chat',{
       method:'POST',
       signal:chatCtl.signal,
@@ -1324,7 +1368,7 @@ async function sendPrompt(t){
         'content-type':'application/json',
         ...(provider==='anthropic'?{'x-anthropic-key':anthropicKey}:{'x-openai-key':openaiKey})
       },
-      body:JSON.stringify({model,effort,input:t,computer_id:comp&&comp.id||'',thread_id:activeTid==='__pending'?'':activeTid})
+      body:JSON.stringify({model,effort,input:t,computer_id:comp&&comp.id||'',thread_id:activeTid==='__pending'?'':activeTid,files:uploaded})
     });
     const ctype=r.headers.get('content-type')||'';
     if(!ctype.includes('ndjson')){
@@ -1404,6 +1448,23 @@ $('plusBtn').addEventListener('click',e=>{
 });
 document.addEventListener('click',e=>{
   if(!e.target.closest('.ask')){$('plusPop').hidden=true;$('plusBtn').setAttribute('aria-expanded','false');}
+});
+$('attachStart').addEventListener('click',()=>{
+  $('plusPop').hidden=true;
+  $('plusBtn').setAttribute('aria-expanded','false');
+  $('attachPick').click();
+});
+$('attachPick').addEventListener('change',()=>{
+  const pick=$('attachPick');
+  for(const f of pick.files||[]){
+    if(pending.length>=4)break;
+    const ext=(f.name.split('.').pop()||'').toLowerCase();
+    if(!ATTACH_EXTS.includes(ext)){q.placeholder=f.name+' is not an allowed type';setTimeout(()=>paint([comp].filter(Boolean)),2500);continue;}
+    if(f.size>5*1024*1024){q.placeholder=f.name+' is over 5 MB';setTimeout(()=>paint([comp].filter(Boolean)),2500);continue;}
+    pending.push(f);
+  }
+  pick.value='';
+  paintAline();
 });
 $('teachStart').addEventListener('click',()=>{
   $('plusPop').hidden=true;

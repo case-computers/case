@@ -285,6 +285,11 @@ function openaiPartToAnthropic(c) {
     if (!m) return null;
     return { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } };
   }
+  if (c?.type === 'input_file') {
+    const m = /^data:application\/pdf;base64,(.+)$/i.exec(c.file_data || '');
+    if (!m) return c.filename ? { type: 'text', text: '[' + c.filename + ']' } : null;
+    return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: m[1] } };
+  }
   return null;
 }
 
@@ -397,6 +402,7 @@ export async function anthropicToolLoop({
     tools: antTools,
     thinking: anthropicThinkingFor(messages),
     output_config: { effort: antEffort },
+    cache_control: { type: 'ephemeral' },
   };
   let text = '';
   let finished = false;

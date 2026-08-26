@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots } from './serve.mjs';
+import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, hydrateAttaches, attachKind, ATTACH_MAX } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
@@ -18,6 +18,8 @@ const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.u
 assert.match(html, /x-anthropic-key/);
 assert.match(html, /ANTHROPIC KEY/);
 assert.match(html, /claude-sonnet-4-6/);
+assert.match(html, /id="attachStart"/);
+assert.match(html, /id="attachPick"/);
 
 // threadTurns: reopening a thread shows text + tool calls; outputs and reasoning stay server-side
 const view = threadTurns([
@@ -30,6 +32,12 @@ const view = threadTurns([
 assert.deepEqual(view.map((t) => t.who), ['you', 'tool', 'agent']);
 assert.equal(view[1].name, 'computer_snapshot');
 assert.ok(!JSON.stringify(view).includes('SECRET'));   // outputs never reach the reopen view
+assert.deepEqual(threadTurns([{ role: 'user', shot: '/tmp/x.png', content: [{ type: 'input_text', text: '[screenshot]' }] }]), [],
+  'screenshots stay model-only on reopen');
+assert.deepEqual(threadTurns([{ role: 'user', content: 'look', attaches: [{ name: 'invoice.pdf' }] }]),
+  [{ who: 'you', text: 'look\ninvoice.pdf' }]);
+assert.deepEqual(threadTurns([{ role: 'user', content: '', attaches: [{ name: 'notes.md' }] }]),
+  [{ who: 'you', text: 'notes.md' }]);
 
 // normHost: bare lowercase host or nothing — creds domains must never carry paths/creds
 assert.equal(normHost('https://Mail.Google.com/mail/u/0'), 'mail.google.com');
@@ -322,6 +330,11 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(chatFn, /if \(!stopped\(\)\) emit\(\{ type: 'error'/);
   assert.match(html, /\/api\/chat\/steer/);
   assert.match(html, /steerPrompt/);
+  assert.match(chatFn, /eff=\$\{eff\}/, 'turn log reports billed tokens, not nominal');
+  assert.match(serveSrc, /p === '\/api\/attach'/, 'user files land on disk, not in the chat body');
+  assert.match(fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8'),
+    /cache_control: \{ type: 'ephemeral' \}/, 'Anthropic path requests prompt cache');
+  assert.match(chatFn, /hydrateShots\(hydrateAttaches\(hist\.items\)\)/);
   assert.ok(!/truncation:\s*['"]auto['"]/.test(chatFn), 'no truncation:auto');
   assert.ok(!/compactHistory|SUMMARIZE_PROMPT|CASE_COMPACT_AT/.test(serveSrc), 'no compaction');
 }
@@ -374,6 +387,51 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.ok(moved[0].shot);
   assert.notEqual(moved, legacy);
   assert.equal(migrateShots(moved, dir), moved, 'already migrated — no second write');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'case-inbox-'));
+  const pngB64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const png = Buffer.from(pngB64, 'base64');
+  assert.equal(attachKind('image/png'), 'image');
+  assert.equal(attachKind('application/octet-stream', 'x.exe'), '');
+  assert.throws(() => stashAttach(Buffer.from('MZ'), 'bad.exe', 'application/octet-stream', dir), /not allowed/);
+  assert.throws(() => stashAttach(Buffer.alloc(ATTACH_MAX + 1), 'big.txt', 'text/plain', dir), /too large/);
+  const img = stashAttach(png, 'dot.png', 'image/png', dir);
+  assert.ok(fs.existsSync(img.path));
+  assert.ok(JSON.stringify(img).length < 400, 'the record is a pointer');
+  const notes = stashAttach(Buffer.from('hello notes', 'utf8'), 'notes.md', 'text/plain', dir);
+  const hyd = hydrateAttaches([
+    { role: 'user', content: 'see these', attaches: [
+      { path: img.path, name: img.name, mime: img.mime },
+      { path: notes.path, name: notes.name, mime: notes.mime },
+    ] },
+  ], dir);
+  assert.equal(hyd[0].content[0].type, 'input_text');
+  assert.equal(hyd[0].content[0].text, 'see these');
+  assert.equal(hyd[0].content[1].type, 'input_image');
+  assert.ok(hyd[0].content[1].image_url.startsWith('data:image/png;base64,'));
+  assert.equal(hyd[0].content[2].type, 'input_text');
+  assert.match(hyd[0].content[2].text, /notes\.md/);
+  assert.match(hyd[0].content[2].text, /hello notes/);
+  const missing = hydrateAttaches([{
+    role: 'user', content: '',
+    attaches: [{ path: path.join(dir, 'nope.md'), name: 'gone.md', mime: 'text/plain' }],
+  }], dir);
+  assert.equal(missing[0].content[0].text, '[gone.md]');
+  const outside = hydrateAttaches([{
+    role: 'user', content: '',
+    attaches: [{ path: '/etc/passwd', name: 'passwd', mime: 'text/plain' }],
+  }], dir);
+  assert.equal(outside[0].content[0].text, '[passwd]', 'paths outside the inbox are refused');
+  const msgs = histToAnthropicMessages(hyd, { media: true });
+  assert.equal(msgs[0].role, 'user');
+  assert.ok(Array.isArray(msgs[0].content));
+  assert.equal(msgs[0].content.find((p) => p.type === 'image').source.media_type, 'image/png');
+  const silent = histToAnthropicMessages(hyd);
+  assert.equal(typeof silent[0].content, 'string');
+  assert.ok(!JSON.stringify(silent).includes('image'));
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
