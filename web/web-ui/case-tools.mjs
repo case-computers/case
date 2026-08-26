@@ -56,7 +56,7 @@ export function caseToolPlan(name, args, cid) {
     // kill this shell before the exit line is echoed, and `{ cmd\n; }` is a syntax error.
     const command = `( ${a.command}\n) > ${log} 2>&1; __rc=$?; echo "exit=$__rc";`
       + ` wc -l < ${log} | tr -d ' ' | sed 's/^/lines=/'; head -c 1500 ${log};`
-      + ` find /tmp -name 'case-out-*.log' -mmin +120 -delete 2>/dev/null`;
+      + ` find /tmp -name 'case-out-*.log' -mmin +120 -delete 2>/dev/null || true`;
     return { method: 'POST', path: `/computers/${id}/exec?wake=true`, json: { command, timeout_s: t }, timeoutMs: (t + 30) * 1000, act: 'exec', logPath: log };
   }
   return { error: `unknown tool ${name}` };
@@ -389,7 +389,7 @@ export async function withRateRetry(fn, emit, tries = 5) {
 
 export async function anthropicToolLoop({
   key, model, effort, system, messages, tools, emit, rounds, runTool, actFor, stopped,
-  beforeRound,
+  beforeRound, tokenBudget,
 }) {
   const client = new Anthropic({ apiKey: key });
   const antTools = openaiToolsToAnthropic(tools);
@@ -406,6 +406,8 @@ export async function anthropicToolLoop({
   };
   let text = '';
   let finished = false;
+  const spend = { in: 0, cached: 0, out: 0 };
+  const overBudget = () => Number(tokenBudget) > 0 && spend.in > tokenBudget;
   const round = async (p) => {
     const ctx = newAnthropicStreamCtx();
     let thinkDelta = false;
@@ -427,7 +429,7 @@ export async function anthropicToolLoop({
     }
     return { message, traces, textDelta };
   };
-  for (let i = 0; i < rounds && !finished; i++) {
+  for (let i = 0; i < rounds && !finished && !overBudget(); i++) {
     if (stopped?.()) break;
     beforeRound?.(messages);
     let result;
@@ -440,6 +442,11 @@ export async function anthropicToolLoop({
       result = await withRateRetry(() => round(rest), emit);
     }
     const { message, traces, textDelta } = result;
+    const u = message.usage || {};
+    spend.in += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0)
+      + (u.cache_creation_input_tokens || 0);
+    spend.cached += u.cache_read_input_tokens || 0;
+    spend.out += u.output_tokens || 0;
     text = traces.texts.join('\n').trim();
     if (!traces.calls.length) {
       finished = true;
@@ -470,5 +477,5 @@ export async function anthropicToolLoop({
     }
     messages.push({ role: 'user', content: results });
   }
-  return { text, finished };
+  return { text, finished, spend, overBudget: overBudget() };
 }

@@ -327,6 +327,9 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(serveSrc, /pushSteerItems\(thread\.items, leftover\)/, 'last-round steers persist with the turn');
   assert.match(chatFn, /prompt_cache_key: thread\.id/);
   assert.match(serveSrc, /CASE_TURN_TOKENS/);
+  assert.match(chatFn, /tokenBudget: TURN_TOKEN_BUDGET/);
+  assert.match(fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8'),
+    /tokenBudget/);
   assert.match(chatFn, /if \(!stopped\(\)\) emit\(\{ type: 'error'/);
   assert.match(html, /\/api\/chat\/steer/);
   assert.match(html, /steerPrompt/);
