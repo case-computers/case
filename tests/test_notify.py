@@ -52,6 +52,52 @@ def test_ntfy_notify_posts_to_the_topic():
         assert done.wait(2), "ntfy thread did not run"
     assert posted["url"] == "https://ntfy.sh/topic-x"
     assert "h_1" in posted["headers"].get("X-Tags", "")
+    assert "case-outbound" in posted["headers"].get("X-Tags", "")
+
+
+def test_ntfy_notify_sends_bearer_token():
+    os.environ["CASE_NTFY_TOKEN"] = "secret-tok"
+    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None, "http://127.0.0.1:8787/v1")
+    done = threading.Event()
+    posted = {}
+
+    def fake_post(url, **kw):
+        posted["headers"] = kw.get("headers")
+        done.set()
+        return mock.Mock(status_code=200)
+
+    try:
+        with mock.patch.object(notify.requests, "post", side_effect=fake_post):
+            ntfy.notify({"id": "h_1", "kind": "question", "prompt": "hi",
+                         "screenshot": None}, "box")
+            assert done.wait(2), "ntfy thread did not run"
+        assert posted["headers"]["Authorization"] == "Bearer secret-tok"
+        assert "case-outbound" in posted["headers"]["X-Tags"]
+    finally:
+        os.environ.pop("CASE_NTFY_TOKEN", None)
+
+
+def test_same_topic_does_not_start_answer_listen():
+    ntfy = notify.Ntfy("https://ntfy.sh", "same", "same", "http://127.0.0.1:8787/v1")
+    with mock.patch.object(notify.threading, "Thread") as th:
+        ntfy.listen(lambda *a: None)
+    th.assert_not_called()
+
+
+def test_push_marks_outbound():
+    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None, "http://127.0.0.1:8787/v1")
+    done = threading.Event()
+    posted = {}
+
+    def fake_post(url, **kw):
+        posted["headers"] = kw.get("headers")
+        done.set()
+        return mock.Mock(status_code=200)
+
+    with mock.patch.object(notify.requests, "post", side_effect=fake_post):
+        ntfy.push("run finished ok")
+        assert done.wait(2), "ntfy thread did not run"
+    assert posted["headers"].get("X-Tags") == "case-outbound"
 
 
 def test_create_handoff_mints_assist_and_passes_url_to_notifier():

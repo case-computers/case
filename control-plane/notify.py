@@ -19,6 +19,23 @@ import requests
 from config import API_BASE
 
 log = logging.getLogger("cased.notify")
+OUTBOUND_TAG = "case-outbound"
+
+
+def _ntfy_token():
+    return (os.environ.get("CASE_NTFY_TOKEN") or "").strip()
+
+
+def _auth_headers():
+    token = _ntfy_token()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _tags(ev):
+    raw = ev.get("tags") or []
+    if isinstance(raw, str):
+        return [x.strip() for x in raw.split(",") if x.strip()]
+    return [str(x) for x in raw]
 
 
 class Ntfy:
@@ -29,6 +46,11 @@ class Ntfy:
         self.api_base = api_base
         if not topic:
             log.warning("CASE_NTFY_TOPIC unset — handoff notifications disabled")
+        if topic and answer_topic and topic == answer_topic:
+            log.warning("CASE_NTFY_ANSWER_TOPIC equals CASE_NTFY_TOPIC — answer listen disabled")
+
+    def _same_topic(self):
+        return bool(self.topic and self.answer_topic and self.topic == self.answer_topic)
 
     def notify(self, handoff, computer_name):
         if not self.topic:
@@ -38,9 +60,13 @@ class Ntfy:
     def _send(self, h, computer_name):
         try:
             ascii_ = lambda s: (s or "").encode("ascii", "replace").decode()
+            tags = [OUTBOUND_TAG]
+            if h.get("id"):
+                tags.append(h["id"])
             headers = {
+                **_auth_headers(),
                 "X-Title": ascii_(f"[Case] {h['kind']} — {computer_name}"),
-                "X-Tags": h["id"],
+                "X-Tags": ",".join(tags),
                 "X-Message": ascii_(h["prompt"])[:800],
             }
             if h["kind"] == "approval":
@@ -64,21 +90,24 @@ class Ntfy:
             try:
                 requests.post(f"{self.url}/{self.topic}",
                               data=(text or "").encode("ascii", "replace")[:1000],
-                              headers={"X-Title": "Case run"}, timeout=15)
+                              headers={**_auth_headers(), "X-Title": "Case run",
+                                       "X-Tags": OUTBOUND_TAG}, timeout=15)
             except Exception as e:
                 log.warning("ntfy push failed: %s", e)
         threading.Thread(target=_p, daemon=True).start()
 
     def listen(self, on_answer):
         """Subscribe to the answer topic (SSE); messages are '{handoff_id} {value}' or a bare value."""
-        if not self.answer_topic:
+        if not self.answer_topic or self._same_topic():
             return
         threading.Thread(target=self._listen, args=(on_answer,), daemon=True).start()
 
     def _listen(self, on_answer):
+        headers = _auth_headers()
         while True:
             try:
-                r = requests.get(f"{self.url}/{self.answer_topic}/sse", stream=True, timeout=(10, None))
+                r = requests.get(f"{self.url}/{self.answer_topic}/sse", stream=True,
+                                 headers=headers, timeout=(10, None))
                 for line in r.iter_lines():
                     if not line or not line.startswith(b"data: "):
                         continue
@@ -86,7 +115,7 @@ class Ntfy:
                         ev = json.loads(line[6:])
                     except ValueError:
                         continue
-                    if ev.get("event") != "message":
+                    if ev.get("event") != "message" or OUTBOUND_TAG in _tags(ev):
                         continue
                     msg = (ev.get("message") or "").strip()
                     m = re.match(r"^(h_\w+)\s+(.+)$", msg, re.S)
