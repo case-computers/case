@@ -109,6 +109,63 @@ host and are never copied onto the computer.
 Phone notifications for 2FA/approvals (ntfy), CAPTCHA auto-solve, scheduled
 runs: all optional, all documented in [.env.example](.env.example).
 
+### Phone chat (optional)
+
+Drive can take tasks from your phone through [ntfy](https://ntfy.sh). Off by
+default. Nothing gets exposed: Drive dials out to the ntfy server and posts
+replies back. Phone messages run through the same brain and `threads.json` as
+the laptop UI, in a thread named `Phone`.
+
+ntfy is a pub-sub service. The public server has no accounts: a topic is just
+a name, and anyone who knows the name can post and read. The topic name is
+your only credential, so mint a long random one and treat it like a password:
+
+```bash
+openssl rand -hex 32
+```
+
+1. Install the ntfy app (Play Store / App Store) and subscribe to that topic.
+   Self-hosting ntfy instead? Point the app and `CASE_NTFY_URL` at your
+   server; `CASE_NTFY_TOKEN` carries the bearer token if your server uses
+   ntfy access control.
+2. Configure the box (`.env`) and restart the UI container:
+
+```
+CASE_NTFY_CHAT=1
+CASE_NTFY_URL=https://ntfy.sh          # or your ntfy server
+CASE_NTFY_TOPIC=<the value from openssl>
+CASE_NTFY_TOKEN=                        # self-hosted ntfy auth only
+CASE_DRIVE_PROVIDER=openai              # or anthropic
+CASE_DRIVE_API_KEY=
+```
+
+```bash
+docker compose up -d ui
+```
+
+3. Send a message.
+   - Android: the ntfy app has a message bar at the bottom of the topic view
+     (Settings > Show message bar if it's hidden).
+   - iOS: the app only receives. Make a Shortcut: Ask for Input, then Get
+     Contents of URL with method POST, the input as the request body, and
+     `https://ntfy.sh/<topic>` as the URL. Add it to the home screen or run
+     it with Siri.
+   - Any machine: `curl -d "check my mail" ntfy.sh/<topic>`. Useful to test
+     the bridge before involving the phone.
+
+Drive posts `Working`, then the final text or the error, back to the same
+topic. Its own posts are tagged so it never reads them back as instructions.
+
+A pending handoff (2FA code, approval) consumes the next phone message. With
+several open, prefix the answer with the handoff id: `h_ab12 483920`.
+`approve`, `deny`, `done`, or a bare code with nothing waiting gets back
+"Nothing waiting." Text sent while a Phone turn is running steers that turn;
+otherwise it starts a task on the box's first computer.
+
+This is a live channel, not a queue. If Drive was down when you sent
+something, send it again. The API key sits in the box env for this feature;
+the laptop Drive page still uses the key you paste in the page.
+
 ### Token hardening (optional)
 
 Copy `.env.example` to `.env`, generate a token, and set `CASE_TOKEN` before
@@ -130,8 +187,8 @@ docker compose down
 ### Separate database warning
 
 `bin/case up` runs the control plane on the host with its database in `~/.case`.
-Compose uses a Docker volume instead. Same engine, same desktops, different
-bookkeeping: computers you create one way are not listed by the other, and both
+Compose uses a Docker volume instead. Same engine, same desktops, two separate
+databases: computers you create one way are not listed by the other, and both
 want port 8787, so run one at a time.
 
 ### RAM budget

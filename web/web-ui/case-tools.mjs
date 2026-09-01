@@ -193,6 +193,13 @@ export function chatAuth(headers = {}) {
   return { provider: '', key: '' };
 }
 
+export function envDriveAuth(env = process.env) {
+  const key = String(env.CASE_DRIVE_API_KEY || '').trim();
+  const provider = String(env.CASE_DRIVE_PROVIDER || '').trim().toLowerCase();
+  if (!key || (provider !== 'openai' && provider !== 'anthropic')) return { provider: '', key: '' };
+  return { provider, key };
+}
+
 export function resolveChatModel(requested, provider) {
   if (provider === 'anthropic') return ANTHROPIC_MODELS[requested] || 'claude-sonnet-4-6';
   return MODELS[requested] || 'gpt-5.6-terra';

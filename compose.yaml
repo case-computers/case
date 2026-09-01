@@ -50,6 +50,7 @@ services:
       CASE_NTFY_URL: ${CASE_NTFY_URL:-https://ntfy.sh}
       CASE_NTFY_TOPIC: ${CASE_NTFY_TOPIC:-}
       CASE_NTFY_ANSWER_TOPIC: ${CASE_NTFY_ANSWER_TOPIC:-}
+      CASE_NTFY_TOKEN: ${CASE_NTFY_TOKEN:-}
       CASE_PUBLIC_HOST: ${CASE_PUBLIC_HOST:-}
       # Optional CAPTCHA auto-solve (see .env.example)
       CASE_DBC_AUTHTOKEN: ${CASE_DBC_AUTHTOKEN:-}
@@ -110,6 +111,13 @@ services:
       CASE_HOME: /data
       CASE_LOCAL: "1"
       PORT: "4174"
+      CASE_NTFY_URL: ${CASE_NTFY_URL:-https://ntfy.sh}
+      CASE_NTFY_TOPIC: ${CASE_NTFY_TOPIC:-}
+      CASE_NTFY_TOKEN: ${CASE_NTFY_TOKEN:-}
+      CASE_NTFY_CHAT: ${CASE_NTFY_CHAT:-}
+      CASE_DRIVE_PROVIDER: ${CASE_DRIVE_PROVIDER:-}
+      CASE_DRIVE_API_KEY: ${CASE_DRIVE_API_KEY:-}
+      CASE_DRIVE_MODEL: ${CASE_DRIVE_MODEL:-}
     volumes:
       - ui-data:/data
     ports:

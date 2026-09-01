@@ -57,7 +57,7 @@ license picker does not split by directory. The table above is authoritative.
 
 ## Trademark
 
-**Case** and the Case logo are trademarks of Daemon Labs. Neither the AGPL nor
+**Case** and the Case logo are trademarks of Case. Neither the AGPL nor
 the MIT license grants any right to use them, and this file grants none either.
 
 You may state accurately that your software is built on, derived from, or

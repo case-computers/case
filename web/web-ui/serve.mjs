@@ -20,7 +20,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry } from './case-tools.mjs';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry } from './case-tools.mjs';
+import * as ntfy from './ntfy.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -879,57 +880,34 @@ async function steer(req, res) {
   STEER.set(tid, q);
   return json(res, 200, { queued: true });
 }
-async function chat(req, res) {
-  const buf = await readBody(req, res);
-  if (!buf) return;
-  let body;
-  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
-  catch { return send(res, 400, 'bad json'); }
-  const auth = chatAuth(req.headers);
-  if (!auth.key) return send(res, 401, 'missing key');
-  const model = resolveChatModel(body.model, auth.provider);
-  const effort = ['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : 'medium';
-  const inputText = String(body.input || '').slice(0, 32000);
-  const fileIds = Array.isArray(body.files) ? body.files.slice(0, ATTACH_MAX_N) : [];
-  const attaches = [];
-  for (const ref of fileIds) {
-    const rec = resolveAttach(typeof ref === 'string' ? ref : ref?.id);
-    if (!rec) return send(res, 400, 'attachment not found');
-    attaches.push({ path: rec.path, name: rec.name, mime: rec.mime });
-  }
-  if (!inputText && !attaches.length) return send(res, 400, 'empty input');
-  const picked = String(body.computer_id || '');
-  const thread = THREADS.get(String(body.thread_id || '')) || newThread(inputText || attaches[0].name, picked);
-  if (CHAT_BUSY.has(thread.id)) return json(res, 409, { error: 'this thread is still running a turn' });
-  CHAT_BUSY.add(thread.id);
-  try {
+export function phoneThread() {
+  let t = THREADS.get(ntfy.PHONE_THREAD_ID);
+  if (t) return t;
+  t = {
+    id: ntfy.PHONE_THREAD_ID, title: 'Phone', agent: '', items: [],
+    created: Date.now(), updated: Date.now(),
+  };
+  THREADS.set(t.id, t);
+  saveThreads();
+  return t;
+}
+
+export async function runTurn({
+  thread, inputText, attaches = [], auth, computerId = '',
+  model, effort = 'medium', emit, stopped = () => false, signal, disconnect,
+}) {
   thread.items = histCloseOpenCalls(thread.items);
   // Route, don't gate: the thread's own agent wins, then the client's pick, then
   // the box's computer. Assignment is only *claimed* when a tool actually runs.
-  let id = thread.agent || String(body.computer_id || '');
+  let id = thread.agent || computerId;
   if (!id) { try { id = await cid(); } catch { /* fall through */ } }
-  if (!id) { return json(res, 502, { error: 'no computer — create one first' }); }
-  res.writeHead(200, {
-    'content-type': 'application/x-ndjson; charset=utf-8',
-    'cache-control': 'no-store', 'x-accel-buffering': 'no',
-  });
-  // STOP in the UI aborts the fetch; stop looping then, but keep the turn's
-  // history — tools already ran, and replaying them on "continue" double-acts.
-  const stopped = () => res.destroyed;
-  const emit = (obj) => {
-    if (stopped() || res.destroyed) return;
-    try { res.write(JSON.stringify(obj) + '\n'); } catch { /* client gone */ }
-  };
-  // A long-poll tool (auth wait can block 4+ min) would hold CHAT_BUSY long after
-  // the client is gone. Race each tool against disconnect; once gone, later tools
-  // never start. The synthetic output keeps every function_call answered.
-  let clientGone;
-  const goneP = new Promise((r) => { clientGone = r; });
-  // Tools are raced against disconnect, but a model round is not — and its HTTP
-  // request has to be torn down explicitly or the SDK keeps draining the stream
-  // into a dead socket, holding CHAT_BUSY (and billing) long after STOP.
-  const gone = new AbortController();
-  res.on('close', () => { clientGone(); gone.abort(); });
+  if (!id) {
+    const err = new Error('no computer — create one first');
+    err.status = 502;
+    throw err;
+  }
+  const goneP = disconnect || new Promise(() => {});
+  const gone = signal ? { signal } : new AbortController();
   const toolOrStop = (start, act) => stopped()
     ? Promise.resolve({ ok: false, error: 'stopped by user', act })
     : Promise.race([start(), goneP.then(() => ({ ok: false, error: 'stopped by user', act }))]);
@@ -1011,8 +989,7 @@ async function chat(req, res) {
       thread.updated = Date.now();
       saveThreads();
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
-      res.end();
-      return;
+      return { text, computerId: id, threadId: thread.id };
     }
     const client = new OpenAI({ apiKey: auth.key });
     let text = '';
@@ -1164,6 +1141,7 @@ async function chat(req, res) {
       + ` eff=${eff} out=${spend.out} rounds=${i}`);
     spend.eff = eff;
     emit({ type: 'done', text, computer_id: id, thread_id: thread.id, spend, rounds: i });
+    return { text, computerId: id, threadId: thread.id };
   } catch (err) {
     // Keep the turn even on provider errors: tools already ran, that work is
     // real. histCloseOpenCalls synthesizes outputs for any dangling
@@ -1174,19 +1152,156 @@ async function chat(req, res) {
     thread.updated = Date.now();
     saveThreads();
     if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
-  }
-  res.end();
+    return { text: '', computerId: id, threadId: thread.id, error: err?.message || 'provider error' };
   } finally {
-    // Last-round steers missed every drain. Land them in history before the
-    // inbox is forgotten so a reload or restart still has what the user typed.
     const leftover = takeSteers(thread.id);
     if (leftover.length) {
       pushSteerItems(thread.items, leftover);
       thread.updated = Date.now();
       saveThreads();
     }
+  }
+}
+
+async function chat(req, res) {
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return send(res, 400, 'bad json'); }
+  const auth = chatAuth(req.headers);
+  if (!auth.key) return send(res, 401, 'missing key');
+  const model = resolveChatModel(body.model, auth.provider);
+  const effort = ['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : 'medium';
+  const inputText = String(body.input || '').slice(0, 32000);
+  const fileIds = Array.isArray(body.files) ? body.files.slice(0, ATTACH_MAX_N) : [];
+  const attaches = [];
+  for (const ref of fileIds) {
+    const rec = resolveAttach(typeof ref === 'string' ? ref : ref?.id);
+    if (!rec) return send(res, 400, 'attachment not found');
+    attaches.push({ path: rec.path, name: rec.name, mime: rec.mime });
+  }
+  if (!inputText && !attaches.length) return send(res, 400, 'empty input');
+  const picked = String(body.computer_id || '');
+  const thread = THREADS.get(String(body.thread_id || '')) || newThread(inputText || attaches[0].name, picked);
+  if (CHAT_BUSY.has(thread.id)) return json(res, 409, { error: 'this thread is still running a turn' });
+  CHAT_BUSY.add(thread.id);
+  const stopped = () => res.destroyed;
+  const emit = (obj) => {
+    if (stopped() || res.destroyed) return;
+    if (!res.headersSent) {
+      res.writeHead(200, {
+        'content-type': 'application/x-ndjson; charset=utf-8',
+        'cache-control': 'no-store', 'x-accel-buffering': 'no',
+      });
+    }
+    try { res.write(JSON.stringify(obj) + '\n'); } catch { /* client gone */ }
+  };
+  let clientGone;
+  const goneP = new Promise((r) => { clientGone = r; });
+  const gone = new AbortController();
+  res.on('close', () => { clientGone(); gone.abort(); });
+  try {
+    await runTurn({
+      thread, inputText, attaches, auth, computerId: picked, model, effort,
+      emit, stopped, signal: gone.signal, disconnect: goneP,
+    });
+  } catch (err) {
+    if (!res.headersSent) return json(res, err.status || 500, { error: err.message || 'internal' });
+    if (!stopped()) emit({ type: 'error', error: err.message || 'internal' });
+  } finally {
+    CHAT_BUSY.delete(thread.id);
+    if (res.headersSent && !res.writableEnded) res.end();
+  }
+}
+
+async function pendingHandoffIds() {
+  const r = await api('GET', '/handoffs?status=pending', { timeoutMs: 8000 });
+  return (r.json?.handoffs || []).map((h) => h.id).filter(Boolean);
+}
+
+async function answerHandoff(hid, value) {
+  return api('POST', `/handoffs/${encodeURIComponent(hid)}/answer`, {
+    json: { value }, timeoutMs: 120000,
+  });
+}
+
+async function onPhoneMessage(cfg, auth, model, text) {
+  const thread = phoneThread();
+  let pending = [];
+  try { pending = await pendingHandoffIds(); }
+  catch (err) { console.warn('phone handoffs:', err.message || err); }
+  const decision = ntfy.routePhone({
+    text, pendingIds: pending, busy: CHAT_BUSY.has(thread.id),
+  });
+  const say = (title, message) => ntfy.publish(cfg, { title, message }).catch((err) => {
+    console.warn('ntfy publish:', err.message || err);
+  });
+  if (decision.type === 'ignore') return;
+  if (decision.type === 'error') return say('[Case] error', decision.error);
+  if (decision.type === 'handoff') {
+    try {
+      const r = await answerHandoff(decision.hid, decision.value);
+      if (r.status >= 400) {
+        return say('[Case] error', r.json?.error?.message || `handoff ${r.status}`);
+      }
+      return say('[Case] answered', `Answered ${decision.hid}`);
+    } catch (err) {
+      return say('[Case] error', err.message || 'handoff failed');
+    }
+  }
+  if (decision.type === 'steer') {
+    const q = STEER.get(thread.id) || [];
+    q.push(decision.text);
+    STEER.set(thread.id, q);
+    return say('[Case] queued', 'Queued on the running turn');
+  }
+  let computerId;
+  try { computerId = await cid(); }
+  catch (err) { return say('[Case] error', err.message || 'cased unreachable'); }
+  if (!computerId) return say('[Case] error', 'no computer — create one first');
+  if (CHAT_BUSY.has(thread.id)) return say('[Case] error', 'this thread is still running a turn');
+  CHAT_BUSY.add(thread.id);
+  await say('[Case] working', 'Working');
+  let finalText = '';
+  let errText = '';
+  const emit = (obj) => {
+    if (obj?.type === 'done') finalText = obj.text || finalText;
+    if (obj?.type === 'text' && obj.text) finalText = obj.text;
+    if (obj?.type === 'error') errText = obj.error || 'provider error';
+  };
+  try {
+    const result = await runTurn({
+      thread, inputText: decision.text, attaches: [], auth, computerId,
+      model, effort: 'medium', emit, stopped: () => false,
+    });
+    if (result?.error) errText = result.error;
+    if (result?.text) finalText = result.text;
+  } catch (err) {
+    errText = err.message || 'turn failed';
+  } finally {
     CHAT_BUSY.delete(thread.id);
   }
+  if (errText) return say('[Case] error', errText);
+  return say('[Case] done', finalText || 'done');
+}
+
+export function startPhoneNtfy(env = process.env) {
+  const cfg = ntfy.ntfyConfig(env);
+  if (!cfg.chat) return false;
+  if (!cfg.topic) {
+    console.warn('CASE_NTFY_CHAT=1 but CASE_NTFY_TOPIC unset');
+    return false;
+  }
+  const auth = envDriveAuth(env);
+  if (!auth.key) {
+    console.warn('CASE_NTFY_CHAT=1 but CASE_DRIVE_API_KEY unset');
+    return false;
+  }
+  const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
+  ntfy.listen(cfg, (text) => onPhoneMessage(cfg, auth, model, text));
+  console.log(`drive ntfy chat on ${cfg.url}`);
+  return true;
 }
 
 // ---------- noVNC proxy (compose network or host-mapped vnc_port) ----------
@@ -1307,5 +1422,6 @@ if (isMain) {
   server.on('clientError', (_e, s) => { try { s.destroy(); } catch { /* gone */ } });
   server.listen(PORT, BIND, () => {
     process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port}${LOCAL ? ', local' : ''})\n`);
+    startPhoneNtfy();
   });
 }
