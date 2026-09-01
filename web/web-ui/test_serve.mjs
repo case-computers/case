@@ -346,6 +346,8 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(chatFn, /attachment not found/, 'a missing file is an error, not a silent drop');
   assert.ok(!/truncation:\s*['"]auto['"]/.test(loopFn), 'no truncation:auto');
   assert.ok(!/compactHistory|SUMMARIZE_PROMPT|CASE_COMPACT_AT/.test(serveSrc), 'no compaction');
+  assert.match(serveSrc, /try \{ computerId = await cid\(\); \}/);
+  assert.ok(!/drive ntfy chat on \$\{cfg\.url\}\/\$\{cfg\.topic\}/.test(serveSrc));
 }
 
 {

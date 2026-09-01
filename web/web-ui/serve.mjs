@@ -1256,7 +1256,9 @@ async function onPhoneMessage(cfg, auth, model, text) {
     STEER.set(thread.id, q);
     return say('[Case] queued', 'Queued on the running turn');
   }
-  const computerId = await cid();
+  let computerId;
+  try { computerId = await cid(); }
+  catch (err) { return say('[Case] error', err.message || 'cased unreachable'); }
   if (!computerId) return say('[Case] error', 'no computer — create one first');
   if (CHAT_BUSY.has(thread.id)) return say('[Case] error', 'this thread is still running a turn');
   CHAT_BUSY.add(thread.id);
@@ -1298,7 +1300,7 @@ export function startPhoneNtfy(env = process.env) {
   }
   const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
   ntfy.listen(cfg, (text) => onPhoneMessage(cfg, auth, model, text));
-  console.log(`drive ntfy chat on ${cfg.url}/${cfg.topic}`);
+  console.log(`drive ntfy chat on ${cfg.url}`);
   return true;
 }
 
