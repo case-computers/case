@@ -23,6 +23,7 @@ import OpenAI from 'openai';
 import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
+import * as telegram from './telegram.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -1321,6 +1322,130 @@ export function startPhoneNtfy(env = process.env) {
   return true;
 }
 
+// ---------- phone: Telegram ----------
+/** cased /v1/events framing: "event: <type>\ndata: <json>\n\n"; comments are
+ *  heartbeats. Returns parsed blocks plus the unterminated tail. */
+export function sseEvents(chunk, carry = '') {
+  const blocks = (carry + chunk).split('\n\n');
+  const rest = blocks.pop() ?? '';
+  const events = [];
+  for (const b of blocks) {
+    const event = /^event: (.+)$/m.exec(b)?.[1];
+    const data = /^data: (.+)$/m.exec(b)?.[1];
+    if (!event || !data) continue;
+    try { events.push({ event, data: JSON.parse(data) }); } catch { /* malformed */ }
+  }
+  return { events, rest };
+}
+
+/** Follow cased's event stream and call onHandoff for each new handoff.
+ *  Reconnects forever; cased restarts must not silence the phone. */
+function watchHandoffs(onHandoff) {
+  const connect = () => {
+    const rq = http.get({
+      hostname: CASE.hostname, port: CASE.port, path: '/v1/events',
+      headers: { accept: 'text/event-stream', ...(TOKEN ? { authorization: 'Bearer ' + TOKEN } : {}) },
+    }, (rs) => {
+      let carry = '';
+      rs.setEncoding('utf8');
+      rs.on('data', (chunk) => {
+        const parsed = sseEvents(chunk, carry);
+        carry = parsed.rest;
+        for (const { event, data } of parsed.events) {
+          if (event === 'handoff_created') onHandoff(data);
+        }
+      });
+      rs.on('end', () => setTimeout(connect, 5000));
+      rs.on('error', () => setTimeout(connect, 5000));
+    });
+    rq.on('error', () => setTimeout(connect, 5000));
+  };
+  connect();
+}
+
+// Force-reply prompt message id → handoff id, so a reply names its handoff.
+const CODE_PROMPTS = new Map();
+
+async function pushHandoff(cfg, h) {
+  const m = telegram.handoffMessage(h);
+  try {
+    const sent = await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, ...m });
+    if (m.reply_markup.force_reply) CODE_PROMPTS.set(Number(sent.message_id), h.id);
+  } catch (err) {
+    console.warn('telegram handoff:', err.message || err);
+  }
+}
+
+/** Reply function for phoneAct: "working" shows the typing indicator until
+ *  the next reply; everything else is text, split at Telegram's limit. */
+function telegramSay(cfg) {
+  let typing = null;
+  const action = () => telegram.tgApi(cfg.token, 'sendChatAction', { chat_id: cfg.chatId, action: 'typing' })
+    .catch(() => { /* cosmetic */ });
+  return async (kind, text) => {
+    clearInterval(typing);
+    typing = null;
+    if (kind === 'working') {
+      action();
+      typing = setInterval(action, 4500);
+      return;
+    }
+    for (const part of telegram.chunk(kind === 'error' ? `Error: ${text}` : text)) {
+      await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, text: part })
+        .catch((err) => console.warn('telegram send:', err.message || err));
+    }
+  };
+}
+
+async function onTelegramUpdate(cfg, auth, model, update) {
+  const parsed = telegram.parseUpdate(update);
+  if (!parsed) return;
+  const { chatId, msg } = parsed;
+  if (chatId !== cfg.chatId) {
+    if (msg.kind === 'text' && msg.text === '/start') {
+      await telegram.tgApi(cfg.token, 'sendMessage', {
+        chat_id: chatId,
+        text: `This chat's id is ${chatId}. Put CASE_TELEGRAM_CHAT_ID=${chatId} in .env and restart the ui container.`,
+      });
+    }
+    return;
+  }
+  if (msg.kind === 'callback') {
+    await telegram.tgApi(cfg.token, 'answerCallbackQuery', { callback_query_id: msg.callbackId })
+      .catch(() => { /* spinner only */ });
+  }
+  const { pendingIds, busy } = await phoneContext();
+  const decision = telegram.routeTelegram({ msg, codePrompts: CODE_PROMPTS, pendingIds, busy });
+  const say = telegramSay(cfg);
+  if (decision.type === 'start') return say('done', 'Paired. Send a task, or answer a prompt here.');
+  if (decision.type === 'stale') {
+    return say('error', `skipped a message sent ${Math.round(decision.age / 60)} min ago while Drive was down:\n${decision.text.slice(0, 300)}\nSend it again if you still want it.`);
+  }
+  if (decision.type === 'handoff') {
+    for (const [mid, hid] of CODE_PROMPTS) if (hid === decision.hid) CODE_PROMPTS.delete(mid);
+  }
+  return phoneAct(decision, { auth, model, say });
+}
+
+export function startPhoneTelegram(env = process.env) {
+  const cfg = telegram.telegramConfig(env);
+  if (!cfg.token) return false;
+  const auth = envDriveAuth(env);
+  if (!auth.key) {
+    console.warn('CASE_TELEGRAM_TOKEN set but CASE_DRIVE_API_KEY unset');
+    return false;
+  }
+  const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
+  // A webhook left on the bot makes getUpdates 409 forever; clearing it is idempotent.
+  telegram.tgApi(cfg.token, 'deleteWebhook', {}).catch(() => { /* poll reports 409 if this failed */ })
+    .then(() => telegram.poll(cfg, (u) => onTelegramUpdate(cfg, auth, model, u)));
+  if (cfg.chatId) watchHandoffs((h) => pushHandoff(cfg, h));
+  console.log(cfg.chatId
+    ? 'drive telegram chat on'
+    : 'drive telegram: send /start to the bot, then set CASE_TELEGRAM_CHAT_ID');
+  return true;
+}
+
 // ---------- noVNC proxy (compose network or host-mapped vnc_port) ----------
 function vncUpstream(req) {
   if (livePathHasDotDot(req.url)) return null;
@@ -1440,5 +1565,6 @@ if (isMain) {
   server.listen(PORT, BIND, () => {
     process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port}${LOCAL ? ', local' : ''})\n`);
     startPhoneNtfy();
+    startPhoneTelegram();
   });
 }

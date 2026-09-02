@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   MAX_TEXT, STALE_S, chunk, handoffMessage, parseUpdate, poll, routeTelegram, telegramConfig, tgApi,
 } from './telegram.mjs';
+import { startPhoneTelegram } from './serve.mjs';
 
 assert.deepEqual(telegramConfig({}), { token: '', chatId: 0 });
 assert.deepEqual(telegramConfig({ CASE_TELEGRAM_TOKEN: ' tok ', CASE_TELEGRAM_CHAT_ID: '42' }),
@@ -127,5 +128,8 @@ assert.deepEqual(chunk('x', 1), ['x']);
     { fetchImpl, signal: ac.signal, sleep: async () => {} });
   assert.deepEqual(got, [1, 2]);
 }
+
+assert.equal(startPhoneTelegram({}), false);
+assert.equal(startPhoneTelegram({ CASE_TELEGRAM_TOKEN: 'tok' }), false);
 
 console.log('ok test_telegram.mjs');

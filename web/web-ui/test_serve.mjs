@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX } from './serve.mjs';
+import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
@@ -505,6 +505,20 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(fs.readFileSync(c.log, 'utf8'), /\n100000\n$/, 'the file has the rest');
   assert.match(run('cd /usr && pwd').out, /\/usr/, 'the command still runs in one shell');
   for (const { log } of [a, b, c]) fs.rmSync(log, { force: true });
+}
+
+{
+  const { events, rest } = sseEvents(
+    ': connected\n\n'
+    + 'event: handoff_created\ndata: {"id":"h_1","kind":"approval"}\n\n'
+    + ': hb\n\n'
+    + 'event: credential_added\ndata: {"name":"x"}\n\nevent: handoff_cre',
+  );
+  assert.deepEqual(events, [
+    { event: 'handoff_created', data: { id: 'h_1', kind: 'approval' } },
+    { event: 'credential_added', data: { name: 'x' } },
+  ]);
+  assert.equal(rest, 'event: handoff_cre');
 }
 
 console.log('web-ui serve: all checks pass');
