@@ -1227,43 +1227,46 @@ async function answerHandoff(hid, value) {
   });
 }
 
-async function onPhoneMessage(cfg, auth, model, text) {
+const ANSWERED = { approve: 'Approved.', deny: 'Denied.' };
+
+async function phoneContext() {
   const thread = phoneThread();
-  let pending = [];
-  try { pending = await pendingHandoffIds(); }
+  let pendingIds = [];
+  try { pendingIds = await pendingHandoffIds(); }
   catch (err) { console.warn('phone handoffs:', err.message || err); }
-  const decision = routePhone({
-    text, pendingIds: pending, busy: CHAT_BUSY.has(thread.id),
-  });
-  const say = (title, message) => ntfy.publish(cfg, { title, message }).catch((err) => {
-    console.warn('ntfy publish:', err.message || err);
-  });
+  return { thread, pendingIds, busy: CHAT_BUSY.has(thread.id) };
+}
+
+/** Carry out a routed phone decision. say(kind, text) is the transport's
+ *  reply; kind ∈ error | answered | queued | working | done. */
+async function phoneAct(decision, { auth, model, say }) {
+  const thread = phoneThread();
   if (decision.type === 'ignore') return;
-  if (decision.type === 'error') return say('[Case] error', decision.error);
+  if (decision.type === 'error') return say('error', decision.error);
   if (decision.type === 'handoff') {
     try {
       const r = await answerHandoff(decision.hid, decision.value);
       if (r.status >= 400) {
-        return say('[Case] error', r.json?.error?.message || `handoff ${r.status}`);
+        return say('error', r.json?.error?.message || `handoff ${r.status}`);
       }
-      return say('[Case] answered', `Answered ${decision.hid}`);
+      return say('answered', ANSWERED[decision.value] || 'Submitted.');
     } catch (err) {
-      return say('[Case] error', err.message || 'handoff failed');
+      return say('error', err.message || 'handoff failed');
     }
   }
   if (decision.type === 'steer') {
     const q = STEER.get(thread.id) || [];
     q.push(decision.text);
     STEER.set(thread.id, q);
-    return say('[Case] queued', 'Queued on the running turn');
+    return say('queued', 'Queued on the running turn');
   }
   let computerId;
   try { computerId = await cid(); }
-  catch (err) { return say('[Case] error', err.message || 'cased unreachable'); }
-  if (!computerId) return say('[Case] error', 'no computer — create one first');
-  if (CHAT_BUSY.has(thread.id)) return say('[Case] error', 'this thread is still running a turn');
+  catch (err) { return say('error', err.message || 'cased unreachable'); }
+  if (!computerId) return say('error', 'no computer — create one first');
+  if (CHAT_BUSY.has(thread.id)) return say('error', 'this thread is still running a turn');
   CHAT_BUSY.add(thread.id);
-  await say('[Case] working', 'Working');
+  await say('working', 'Working');
   let finalText = '';
   let errText = '';
   const emit = (obj) => {
@@ -1283,8 +1286,21 @@ async function onPhoneMessage(cfg, auth, model, text) {
   } finally {
     CHAT_BUSY.delete(thread.id);
   }
-  if (errText) return say('[Case] error', errText);
-  return say('[Case] done', finalText || 'done');
+  if (errText) return say('error', errText);
+  return say('done', finalText || 'done');
+}
+
+const NTFY_TITLES = {
+  error: '[Case] error', answered: '[Case] answered', queued: '[Case] queued',
+  working: '[Case] working', done: '[Case] done',
+};
+
+async function onPhoneMessage(cfg, auth, model, text) {
+  const { pendingIds, busy } = await phoneContext();
+  const say = (kind, message) => ntfy.publish(cfg, { title: NTFY_TITLES[kind], message }).catch((err) => {
+    console.warn('ntfy publish:', err.message || err);
+  });
+  return phoneAct(routePhone({ text, pendingIds, busy }), { auth, model, say });
 }
 
 export function startPhoneNtfy(env = process.env) {
