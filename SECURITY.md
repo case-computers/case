@@ -45,9 +45,12 @@ sandbox; `no-new-privileges` is deliberately not set because passwordless sudo
 requires setuid. Do not run untrusted code inside a desktop you also use for
 personal browsing.
 
-(d) **ntfy topics are bearer secrets.** Anyone who knows a topic name can post or
-subscribe. Treat topic names like passwords; use random names and rotate if leaked.
+(d) **ntfy topics and Telegram bot tokens are bearer secrets.** Anyone who knows
+a topic name can post or subscribe; anyone who holds the bot token can read and
+send as the bot. Treat both like passwords; use random topic names, and revoke
+the token in @BotFather if it leaks.
 
 Report vulnerabilities privately via GitHub Security Advisories:
 https://github.com/case-computers/case/security/advisories/new
-Do not file public issues that include tokens, ntfy topics, or vault contents.
+Do not file public issues that include tokens, ntfy topics, bot tokens, or vault
+contents.

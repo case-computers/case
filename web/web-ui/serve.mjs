@@ -22,6 +22,8 @@ import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
 import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
+import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
+import * as telegram from './telegram.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -881,10 +883,10 @@ async function steer(req, res) {
   return json(res, 200, { queued: true });
 }
 export function phoneThread() {
-  let t = THREADS.get(ntfy.PHONE_THREAD_ID);
+  let t = THREADS.get(PHONE_THREAD_ID);
   if (t) return t;
   t = {
-    id: ntfy.PHONE_THREAD_ID, title: 'Phone', agent: '', items: [],
+    id: PHONE_THREAD_ID, title: 'Phone', agent: '', items: [],
     created: Date.now(), updated: Date.now(),
   };
   THREADS.set(t.id, t);
@@ -1215,9 +1217,13 @@ async function chat(req, res) {
   }
 }
 
-async function pendingHandoffIds() {
+async function pendingHandoffs() {
   const r = await api('GET', '/handoffs?status=pending', { timeoutMs: 8000 });
-  return (r.json?.handoffs || []).map((h) => h.id).filter(Boolean);
+  return r.json?.handoffs || [];
+}
+
+async function pendingHandoffIds() {
+  return (await pendingHandoffs()).map((r) => r.id).filter(Boolean);
 }
 
 async function answerHandoff(hid, value) {
@@ -1226,43 +1232,46 @@ async function answerHandoff(hid, value) {
   });
 }
 
-async function onPhoneMessage(cfg, auth, model, text) {
+const ANSWERED = { approve: 'Approved.', deny: 'Denied.' };
+
+async function phoneContext() {
   const thread = phoneThread();
-  let pending = [];
-  try { pending = await pendingHandoffIds(); }
+  let pendingIds = [];
+  try { pendingIds = await pendingHandoffIds(); }
   catch (err) { console.warn('phone handoffs:', err.message || err); }
-  const decision = ntfy.routePhone({
-    text, pendingIds: pending, busy: CHAT_BUSY.has(thread.id),
-  });
-  const say = (title, message) => ntfy.publish(cfg, { title, message }).catch((err) => {
-    console.warn('ntfy publish:', err.message || err);
-  });
+  return { thread, pendingIds, busy: CHAT_BUSY.has(thread.id) };
+}
+
+/** Carry out a routed phone decision. say(kind, text) is the transport's
+ *  reply; kind ∈ error | answered | queued | working | done. */
+async function phoneAct(decision, { auth, model, say }) {
+  const thread = phoneThread();
   if (decision.type === 'ignore') return;
-  if (decision.type === 'error') return say('[Case] error', decision.error);
+  if (decision.type === 'error') return say('error', decision.error);
   if (decision.type === 'handoff') {
     try {
       const r = await answerHandoff(decision.hid, decision.value);
       if (r.status >= 400) {
-        return say('[Case] error', r.json?.error?.message || `handoff ${r.status}`);
+        return say('error', r.json?.error?.message || `handoff ${r.status}`);
       }
-      return say('[Case] answered', `Answered ${decision.hid}`);
+      return say('answered', ANSWERED[decision.value] || 'Submitted.');
     } catch (err) {
-      return say('[Case] error', err.message || 'handoff failed');
+      return say('error', err.message || 'handoff failed');
     }
   }
   if (decision.type === 'steer') {
     const q = STEER.get(thread.id) || [];
     q.push(decision.text);
     STEER.set(thread.id, q);
-    return say('[Case] queued', 'Queued on the running turn');
+    return say('queued', 'Queued on the running turn');
   }
   let computerId;
   try { computerId = await cid(); }
-  catch (err) { return say('[Case] error', err.message || 'cased unreachable'); }
-  if (!computerId) return say('[Case] error', 'no computer — create one first');
-  if (CHAT_BUSY.has(thread.id)) return say('[Case] error', 'this thread is still running a turn');
+  catch (err) { return say('error', err.message || 'cased unreachable'); }
+  if (!computerId) return say('error', 'no computer — create one first');
+  if (CHAT_BUSY.has(thread.id)) return say('error', 'this thread is still running a turn');
   CHAT_BUSY.add(thread.id);
-  await say('[Case] working', 'Working');
+  await say('working', 'Working');
   let finalText = '';
   let errText = '';
   const emit = (obj) => {
@@ -1282,8 +1291,21 @@ async function onPhoneMessage(cfg, auth, model, text) {
   } finally {
     CHAT_BUSY.delete(thread.id);
   }
-  if (errText) return say('[Case] error', errText);
-  return say('[Case] done', finalText || 'done');
+  if (errText) return say('error', errText);
+  return say('done', finalText || 'done');
+}
+
+const NTFY_TITLES = {
+  error: '[Case] error', answered: '[Case] answered', queued: '[Case] queued',
+  working: '[Case] working', done: '[Case] done',
+};
+
+async function onPhoneMessage(cfg, auth, model, text) {
+  const { pendingIds, busy } = await phoneContext();
+  const say = (kind, message) => ntfy.publish(cfg, { title: NTFY_TITLES[kind], message }).catch((err) => {
+    console.warn('ntfy publish:', err.message || err);
+  });
+  return phoneAct(routePhone({ text, pendingIds, busy }), { auth, model, say });
 }
 
 export function startPhoneNtfy(env = process.env) {
@@ -1301,6 +1323,149 @@ export function startPhoneNtfy(env = process.env) {
   const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
   ntfy.listen(cfg, (text) => onPhoneMessage(cfg, auth, model, text));
   console.log(`drive ntfy chat on ${cfg.url}`);
+  return true;
+}
+
+// ---------- phone: Telegram ----------
+/** cased /v1/events framing: "event: <type>\ndata: <json>\n\n"; comments are
+ *  heartbeats. Returns parsed blocks plus the unterminated tail. */
+export function sseEvents(chunk, carry = '') {
+  const blocks = (carry + chunk).split('\n\n');
+  const rest = blocks.pop() ?? '';
+  const events = [];
+  for (const b of blocks) {
+    const event = /^event: (.+)$/m.exec(b)?.[1];
+    const data = /^data: (.+)$/m.exec(b)?.[1];
+    if (!event || !data) continue;
+    try { events.push({ event, data: JSON.parse(data) }); } catch { /* malformed */ }
+  }
+  return { events, rest };
+}
+
+/** Follow cased's event stream and call onHandoff for each new handoff.
+ *  Reconnects forever; cased restarts must not silence the phone. */
+function watchHandoffs(onHandoff, onConnect) {
+  let timer = null;
+  const retry = () => { clearTimeout(timer); timer = setTimeout(connect, 5000); };
+  const connect = () => {
+    const rq = http.get({
+      hostname: CASE.hostname, port: CASE.port, path: '/v1/events',
+      headers: { accept: 'text/event-stream', ...(TOKEN ? { authorization: 'Bearer ' + TOKEN } : {}) },
+    }, (rs) => {
+      if (rs.statusCode !== 200) console.warn('cased events:', rs.statusCode);
+      else onConnect();
+      let carry = '';
+      rs.setEncoding('utf8');
+      rs.on('data', (chunk) => {
+        const parsed = sseEvents(chunk, carry);
+        carry = parsed.rest;
+        for (const { event, data } of parsed.events) {
+          if (event === 'handoff_created') onHandoff(data);
+        }
+      });
+      rs.on('error', () => { /* close follows */ });
+      rs.on('close', retry);
+    });
+    rq.on('error', retry);
+  };
+  connect();
+}
+
+// Force-reply prompt message id → handoff id, so a reply names its handoff.
+const CODE_PROMPTS = new Map();
+// Handoff ids already sent to the phone, so a reconnect replay does not repeat
+// them. Ids answered from the Drive UI linger; handoffs are rare, it is bytes.
+const PUSHED = new Set();
+
+async function pushHandoff(cfg, h) {
+  if (PUSHED.has(h.id)) return;
+  PUSHED.add(h.id);
+  const m = telegram.handoffMessage(h);
+  try {
+    const sent = await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, ...m });
+    if (m.reply_markup.force_reply) CODE_PROMPTS.set(Number(sent.message_id), h.id);
+  } catch (err) {
+    PUSHED.delete(h.id);
+    console.warn('telegram handoff:', err.message || err);
+  }
+}
+
+/** Reply function for phoneAct: "working" shows the typing indicator until
+ *  the next reply; everything else is text, split at Telegram's limit. */
+function telegramSay(cfg) {
+  let typing = null;
+  const action = () => telegram.tgApi(cfg.token, 'sendChatAction', { chat_id: cfg.chatId, action: 'typing' })
+    .catch(() => { /* cosmetic */ });
+  return async (kind, text) => {
+    clearInterval(typing);
+    typing = null;
+    if (kind === 'working') {
+      action();
+      typing = setInterval(action, 4500);
+      return;
+    }
+    for (const part of telegram.chunk(kind === 'error' ? `Error: ${text}` : text)) {
+      await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, text: part })
+        .catch((err) => console.warn('telegram send:', err.message || err));
+    }
+  };
+}
+
+async function onTelegramUpdate(cfg, auth, model, update) {
+  const parsed = telegram.parseUpdate(update);
+  if (!parsed) return;
+  const { chatId, msg } = parsed;
+  if (chatId !== cfg.chatId) {
+    if (!cfg.chatId && msg.kind === 'text' && msg.text === '/start') {
+      await telegram.tgApi(cfg.token, 'sendMessage', {
+        chat_id: chatId,
+        text: `This chat's id is ${chatId}. Put CASE_TELEGRAM_CHAT_ID=${chatId} in .env and restart the ui container.`,
+      });
+    }
+    return;
+  }
+  if (msg.kind === 'callback') {
+    await telegram.tgApi(cfg.token, 'answerCallbackQuery', { callback_query_id: msg.callbackId })
+      .catch(() => { /* spinner only */ });
+  }
+  const { pendingIds, busy } = await phoneContext();
+  const decision = telegram.routeTelegram({ msg, codePrompts: CODE_PROMPTS, pendingIds, busy });
+  const say = telegramSay(cfg);
+  if (decision.type === 'start') return say('done', 'Paired. Send a task, or answer a prompt here.');
+  if (decision.type === 'stale') {
+    return say('error', `skipped a message sent ${Math.round(decision.age / 60)} min ago while Drive was down:\n${decision.text.slice(0, 300)}\nSend it again if you still want it.`);
+  }
+  if (decision.type === 'handoff') {
+    for (const [mid, hid] of CODE_PROMPTS) if (hid === decision.hid) CODE_PROMPTS.delete(mid);
+    PUSHED.delete(decision.hid);
+  }
+  return phoneAct(decision, { auth, model, say });
+}
+
+export function startPhoneTelegram(env = process.env) {
+  const cfg = telegram.telegramConfig(env);
+  if (!cfg.token) {
+    if (env.CASE_TELEGRAM_TOKEN) console.warn('CASE_TELEGRAM_TOKEN is not a BotFather token');
+    return false;
+  }
+  const auth = envDriveAuth(env);
+  if (!auth.key) {
+    console.warn('CASE_TELEGRAM_TOKEN set but CASE_DRIVE_API_KEY unset');
+    return false;
+  }
+  const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
+  // A webhook left on the bot makes getUpdates 409 forever; clearing it is idempotent.
+  telegram.tgApi(cfg.token, 'deleteWebhook', {}).catch(() => { /* poll reports 409 if this failed */ })
+    .then(() => telegram.poll(cfg, (u) => onTelegramUpdate(cfg, auth, model, u)));
+  if (cfg.chatId) {
+    watchHandoffs((h) => pushHandoff(cfg, h), () => {
+      pendingHandoffs().then((rows) => rows.forEach((h) => pushHandoff(cfg, h)))
+        .catch((err) => console.warn('phone handoffs:', err.message || err));
+    });
+  }
+  console.log(cfg.chatId
+    ? 'drive telegram chat on'
+    : 'drive telegram: send /start to the bot, then set CASE_TELEGRAM_CHAT_ID');
   return true;
 }
 
@@ -1423,5 +1588,6 @@ if (isMain) {
   server.listen(PORT, BIND, () => {
     process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port}${LOCAL ? ', local' : ''})\n`);
     startPhoneNtfy();
+    startPhoneTelegram();
   });
 }

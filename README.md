@@ -16,7 +16,8 @@ What the agent gets, over MCP:
   link); the machine types it into the site's own login page. The agent and the
   API never see the password.
 - **Human handoff**: 2FA codes, captchas and approvals pause the run and reach a
-  human — in Drive, or on their phone via a one-shot Assist link (ntfy).
+  human — in Drive, on their phone over Telegram (Approve / Deny buttons, reply
+  with the code), or via a one-shot Assist link (ntfy).
 - **Skills**: the agent saves a completed task as a SKILL.md on the computer and
   follows it next run. Procedural memory that survives reboots.
 - **Schedules**: recurring headless runs on the computer's own identity.
@@ -106,19 +107,72 @@ host and are never copied onto the computer.
 
 ### More knobs
 
-Phone notifications for 2FA/approvals (ntfy), CAPTCHA auto-solve, scheduled
-runs: all optional, all documented in [.env.example](.env.example).
+Phone chat (Telegram or ntfy), CAPTCHA auto-solve, scheduled runs: all
+optional, all documented in [.env.example](.env.example).
 
 ### Phone chat (optional)
 
-Drive can take tasks from your phone through [ntfy](https://ntfy.sh). Off by
-default. Nothing gets exposed: Drive dials out to the ntfy server and posts
-replies back. Phone messages run through the same brain and `threads.json` as
-the laptop UI, in a thread named `Phone`.
+Drive can take tasks from your phone. Off by default. Nothing gets exposed:
+Drive dials out and posts replies back. Phone messages run through the same
+brain and `threads.json` as the laptop UI, in a thread named `Phone`. Both
+channels need a box-side key, since there is no browser to hold one:
 
-ntfy is a pub-sub service. The public server has no accounts: a topic is just
-a name, and anyone who knows the name can post and read. The topic name is
-your only credential, so mint a long random one and treat it like a password:
+```
+CASE_DRIVE_PROVIDER=openai              # or anthropic
+CASE_DRIVE_API_KEY=
+```
+
+A pending handoff (2FA code, approval) consumes the next phone message. With
+several open, prefix the answer with the handoff id: `h_ab12 483920`.
+`approve`, `deny`, `done`, or a bare code with nothing waiting gets back
+"Nothing waiting." Text sent while a Phone turn is running steers that turn;
+otherwise it starts a task on the box's first computer.
+
+This is a live channel, not a queue. Telegram holds messages for a Drive that
+is down and reports the ones older than ten minutes back as skipped; ntfy
+drops them, so send again.
+
+#### Telegram
+
+1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`,
+   pick any name, and copy the token it gives you. Keep the bot private:
+   `/setjoingroups` → Disable.
+2. Put the token in `.env` and start the UI:
+
+```
+CASE_TELEGRAM_TOKEN=123456:ABC…
+```
+
+```bash
+docker compose up -d ui
+```
+
+3. Send `/start` to your bot. It answers with your chat id and the line to
+   add. Add it to `.env` and restart the UI:
+
+```
+CASE_TELEGRAM_CHAT_ID=123456789
+```
+
+```bash
+docker compose up -d ui
+```
+
+4. Send a task: `what is on the screen?`. The bot shows "typing" while it
+   works and posts the result (or the error), split at Telegram's message
+   limit.
+
+Only your chat can drive the box; every other chat is ignored. Approval
+handoffs arrive with Approve / Deny buttons; code handoffs arrive as a prompt
+you reply to. Restarting the UI never loses a pending handoff: it is sent
+again on reconnect.
+
+#### ntfy
+
+[ntfy](https://ntfy.sh) is a pub-sub service. The public server has no
+accounts: a topic is just a name, and anyone who knows the name can post and
+read. The topic name is your only credential, so mint a long random one and
+treat it like a password:
 
 ```bash
 openssl rand -hex 32
@@ -135,8 +189,6 @@ CASE_NTFY_CHAT=1
 CASE_NTFY_URL=https://ntfy.sh          # or your ntfy server
 CASE_NTFY_TOPIC=<the value from openssl>
 CASE_NTFY_TOKEN=                        # self-hosted ntfy auth only
-CASE_DRIVE_PROVIDER=openai              # or anthropic
-CASE_DRIVE_API_KEY=
 ```
 
 ```bash
@@ -155,16 +207,6 @@ docker compose up -d ui
 
 Drive posts `Working`, then the final text or the error, back to the same
 topic. Its own posts are tagged so it never reads them back as instructions.
-
-A pending handoff (2FA code, approval) consumes the next phone message. With
-several open, prefix the answer with the handoff id: `h_ab12 483920`.
-`approve`, `deny`, `done`, or a bare code with nothing waiting gets back
-"Nothing waiting." Text sent while a Phone turn is running steers that turn;
-otherwise it starts a task on the box's first computer.
-
-This is a live channel, not a queue. If Drive was down when you sent
-something, send it again. The API key sits in the box env for this feature;
-the laptop Drive page still uses the key you paste in the page.
 
 ### Token hardening (optional)
 
@@ -242,7 +284,7 @@ No Docker:
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 for t in tests/test_*.py; do [ "$t" = tests/test_acceptance.py ] || .venv/bin/python "$t"; done
-(cd web && npm ci && node web-ui/test_serve.mjs && node web-ui/test_nav.mjs && node web-ui/test_deploy.mjs)
+(cd web && npm ci && npm test && node web-ui/test_nav.mjs && node web-ui/test_deploy.mjs)
 ```
 
 Acceptance tests need a running stack (`tests/test_acceptance.py`).
