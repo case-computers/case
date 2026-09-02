@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { envDriveAuth } from './case-tools.mjs';
 import {
   OUTBOUND_TAG, authHeaders, clipNtfy, inboundText, isOutbound, listen,
-  ntfyConfig, parseHandoffReply, parseSseData, publish, routePhone, tagsOf,
+  ntfyConfig, parseSseData, publish, tagsOf,
 } from './ntfy.mjs';
 import { startPhoneNtfy } from './serve.mjs';
 
@@ -44,25 +44,6 @@ assert.equal(inboundText({ event: 'message', message: '  hi  ' }), 'hi');
   assert.equal(events[1].event, 'keepalive');
   assert.match(rest, /"id":"b"/);
 }
-
-assert.deepEqual(parseHandoffReply('h_abc 482910'), { hid: 'h_abc', value: '482910' });
-assert.deepEqual(parseHandoffReply('approve'), { hid: null, value: 'approve' });
-
-assert.deepEqual(routePhone({ text: 'h_1 approve', pendingIds: ['h_1'] }),
-  { type: 'handoff', hid: 'h_1', value: 'approve' });
-assert.deepEqual(routePhone({ text: '482910', pendingIds: ['h_9'] }),
-  { type: 'handoff', hid: 'h_9', value: '482910' });
-assert.equal(routePhone({ text: 'ok', pendingIds: ['h_1', 'h_2'] }).type, 'error');
-assert.equal(routePhone({ text: 'h_nope x', pendingIds: ['h_1'] }).type, 'error');
-assert.equal(routePhone({ text: 'approve', pendingIds: [] }).error, 'Nothing waiting.');
-assert.equal(routePhone({ text: 'done', pendingIds: [] }).error, 'Nothing waiting.');
-assert.equal(routePhone({ text: '123456', pendingIds: [] }).error, 'Nothing waiting.');
-assert.deepEqual(routePhone({ text: 'check gmail', pendingIds: [], busy: true }),
-  { type: 'steer', text: 'check gmail' });
-assert.deepEqual(routePhone({ text: 'check gmail', pendingIds: [] }),
-  { type: 'task', text: 'check gmail' });
-assert.equal(routePhone({ text: 'check gmail', pendingIds: ['h_1'] }).type, 'handoff');
-assert.equal(routePhone({ text: '' }).type, 'ignore');
 
 assert.ok(clipNtfy('x'.repeat(4000)).includes('open Drive for the rest'));
 assert.equal(clipNtfy('short'), 'short');

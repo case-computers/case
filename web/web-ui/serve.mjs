@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
 import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
+import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -881,10 +882,10 @@ async function steer(req, res) {
   return json(res, 200, { queued: true });
 }
 export function phoneThread() {
-  let t = THREADS.get(ntfy.PHONE_THREAD_ID);
+  let t = THREADS.get(PHONE_THREAD_ID);
   if (t) return t;
   t = {
-    id: ntfy.PHONE_THREAD_ID, title: 'Phone', agent: '', items: [],
+    id: PHONE_THREAD_ID, title: 'Phone', agent: '', items: [],
     created: Date.now(), updated: Date.now(),
   };
   THREADS.set(t.id, t);
@@ -1231,7 +1232,7 @@ async function onPhoneMessage(cfg, auth, model, text) {
   let pending = [];
   try { pending = await pendingHandoffIds(); }
   catch (err) { console.warn('phone handoffs:', err.message || err); }
-  const decision = ntfy.routePhone({
+  const decision = routePhone({
     text, pendingIds: pending, busy: CHAT_BUSY.has(thread.id),
   });
   const say = (title, message) => ntfy.publish(cfg, { title, message }).catch((err) => {
