@@ -118,6 +118,8 @@ services:
       CASE_DRIVE_PROVIDER: ${CASE_DRIVE_PROVIDER:-}
       CASE_DRIVE_API_KEY: ${CASE_DRIVE_API_KEY:-}
       CASE_DRIVE_MODEL: ${CASE_DRIVE_MODEL:-}
+      CASE_TELEGRAM_TOKEN: ${CASE_TELEGRAM_TOKEN:-}
+      CASE_TELEGRAM_CHAT_ID: ${CASE_TELEGRAM_CHAT_ID:-}
     volumes:
       - ui-data:/data
     ports:

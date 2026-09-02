@@ -32,6 +32,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python tests/test_deskd.py
 .venv/bin/python tests/test_browse.py
 node web/web-ui/test_serve.mjs
+node web/web-ui/test_phone.mjs
+node web/web-ui/test_ntfy.mjs
+node web/web-ui/test_telegram.mjs
 node web/web-ui/test_nav.mjs
 node web/web-ui/test_deploy.mjs
 ```

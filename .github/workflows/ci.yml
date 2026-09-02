@@ -44,6 +44,8 @@ jobs:
           npm --prefix web ci --omit=dev    # serve.mjs imports openai at module load
           node web/web-ui/test_serve.mjs
           node web/web-ui/test_ntfy.mjs
+          node web/web-ui/test_phone.mjs
+          node web/web-ui/test_telegram.mjs
           node web/web-ui/test_nav.mjs
           node web/web-ui/test_deploy.mjs
 
