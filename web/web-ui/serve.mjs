@@ -1217,9 +1217,13 @@ async function chat(req, res) {
   }
 }
 
-async function pendingHandoffIds() {
+async function pendingHandoffs() {
   const r = await api('GET', '/handoffs?status=pending', { timeoutMs: 8000 });
-  return (r.json?.handoffs || []).map((h) => h.id).filter(Boolean);
+  return r.json?.handoffs || [];
+}
+
+async function pendingHandoffIds() {
+  return (await pendingHandoffs()).map((r) => r.id).filter(Boolean);
 }
 
 async function answerHandoff(hid, value) {
@@ -1340,12 +1344,16 @@ export function sseEvents(chunk, carry = '') {
 
 /** Follow cased's event stream and call onHandoff for each new handoff.
  *  Reconnects forever; cased restarts must not silence the phone. */
-function watchHandoffs(onHandoff) {
+function watchHandoffs(onHandoff, onConnect) {
+  let timer = null;
+  const retry = () => { clearTimeout(timer); timer = setTimeout(connect, 5000); };
   const connect = () => {
     const rq = http.get({
       hostname: CASE.hostname, port: CASE.port, path: '/v1/events',
       headers: { accept: 'text/event-stream', ...(TOKEN ? { authorization: 'Bearer ' + TOKEN } : {}) },
     }, (rs) => {
+      if (rs.statusCode !== 200) console.warn('cased events:', rs.statusCode);
+      else onConnect();
       let carry = '';
       rs.setEncoding('utf8');
       rs.on('data', (chunk) => {
@@ -1355,18 +1363,23 @@ function watchHandoffs(onHandoff) {
           if (event === 'handoff_created') onHandoff(data);
         }
       });
-      rs.on('end', () => setTimeout(connect, 5000));
-      rs.on('error', () => setTimeout(connect, 5000));
+      rs.on('error', () => { /* close follows */ });
+      rs.on('close', retry);
     });
-    rq.on('error', () => setTimeout(connect, 5000));
+    rq.on('error', retry);
   };
   connect();
 }
 
 // Force-reply prompt message id → handoff id, so a reply names its handoff.
 const CODE_PROMPTS = new Map();
+// Handoff ids already sent to the phone, so a reconnect replay does not repeat
+// them. Ids answered from the Drive UI linger; handoffs are rare, it is bytes.
+const PUSHED = new Set();
 
 async function pushHandoff(cfg, h) {
+  if (PUSHED.has(h.id)) return;
+  PUSHED.add(h.id);
   const m = telegram.handoffMessage(h);
   try {
     const sent = await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, ...m });
@@ -1402,7 +1415,7 @@ async function onTelegramUpdate(cfg, auth, model, update) {
   if (!parsed) return;
   const { chatId, msg } = parsed;
   if (chatId !== cfg.chatId) {
-    if (msg.kind === 'text' && msg.text === '/start') {
+    if (!cfg.chatId && msg.kind === 'text' && msg.text === '/start') {
       await telegram.tgApi(cfg.token, 'sendMessage', {
         chat_id: chatId,
         text: `This chat's id is ${chatId}. Put CASE_TELEGRAM_CHAT_ID=${chatId} in .env and restart the ui container.`,
@@ -1423,13 +1436,17 @@ async function onTelegramUpdate(cfg, auth, model, update) {
   }
   if (decision.type === 'handoff') {
     for (const [mid, hid] of CODE_PROMPTS) if (hid === decision.hid) CODE_PROMPTS.delete(mid);
+    PUSHED.delete(decision.hid);
   }
   return phoneAct(decision, { auth, model, say });
 }
 
 export function startPhoneTelegram(env = process.env) {
   const cfg = telegram.telegramConfig(env);
-  if (!cfg.token) return false;
+  if (!cfg.token) {
+    if (env.CASE_TELEGRAM_TOKEN) console.warn('CASE_TELEGRAM_TOKEN is not a BotFather token');
+    return false;
+  }
   const auth = envDriveAuth(env);
   if (!auth.key) {
     console.warn('CASE_TELEGRAM_TOKEN set but CASE_DRIVE_API_KEY unset');
@@ -1439,7 +1456,12 @@ export function startPhoneTelegram(env = process.env) {
   // A webhook left on the bot makes getUpdates 409 forever; clearing it is idempotent.
   telegram.tgApi(cfg.token, 'deleteWebhook', {}).catch(() => { /* poll reports 409 if this failed */ })
     .then(() => telegram.poll(cfg, (u) => onTelegramUpdate(cfg, auth, model, u)));
-  if (cfg.chatId) watchHandoffs((h) => pushHandoff(cfg, h));
+  if (cfg.chatId) {
+    watchHandoffs((h) => pushHandoff(cfg, h), () => {
+      pendingHandoffs().then((rows) => rows.forEach((h) => pushHandoff(cfg, h)))
+        .catch((err) => console.warn('phone handoffs:', err.message || err));
+    });
+  }
   console.log(cfg.chatId
     ? 'drive telegram chat on'
     : 'drive telegram: send /start to the bot, then set CASE_TELEGRAM_CHAT_ID');

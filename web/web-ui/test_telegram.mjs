@@ -7,9 +7,10 @@ import {
 import { startPhoneTelegram } from './serve.mjs';
 
 assert.deepEqual(telegramConfig({}), { token: '', chatId: 0 });
-assert.deepEqual(telegramConfig({ CASE_TELEGRAM_TOKEN: ' tok ', CASE_TELEGRAM_CHAT_ID: '42' }),
-  { token: 'tok', chatId: 42 });
+assert.deepEqual(telegramConfig({ CASE_TELEGRAM_TOKEN: ' 1:tok ', CASE_TELEGRAM_CHAT_ID: '42' }),
+  { token: '1:tok', chatId: 42 });
 assert.equal(telegramConfig({ CASE_TELEGRAM_CHAT_ID: 'abc' }).chatId, 0);
+assert.equal(telegramConfig({ CASE_TELEGRAM_TOKEN: '12 34:abc' }).token, '');
 
 {
   const calls = [];
@@ -130,6 +131,6 @@ assert.deepEqual(chunk('x', 1), ['x']);
 }
 
 assert.equal(startPhoneTelegram({}), false);
-assert.equal(startPhoneTelegram({ CASE_TELEGRAM_TOKEN: 'tok' }), false);
+assert.equal(startPhoneTelegram({ CASE_TELEGRAM_TOKEN: '1:tok' }), false);
 
 console.log('ok test_telegram.mjs');

@@ -9,10 +9,12 @@ import { routePhone } from './phone.mjs';
 export const STALE_S = 600;
 export const MAX_TEXT = 4000;
 const CALLBACK_RE = /^h:(h_\w+):(approve|deny)$/;
+const TOKEN_RE = /^\d+:[\w-]+$/;   // BotFather shape; anything else never reaches a URL
 
 export function telegramConfig(env = process.env) {
+  const raw = String(env.CASE_TELEGRAM_TOKEN || '').trim();
   return {
-    token: String(env.CASE_TELEGRAM_TOKEN || '').trim(),
+    token: TOKEN_RE.test(raw) ? raw : '',
     chatId: Number(env.CASE_TELEGRAM_CHAT_ID) || 0,
   };
 }
