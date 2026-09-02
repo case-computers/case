@@ -1385,6 +1385,7 @@ async function pushHandoff(cfg, h) {
     const sent = await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, ...m });
     if (m.reply_markup.force_reply) CODE_PROMPTS.set(Number(sent.message_id), h.id);
   } catch (err) {
+    PUSHED.delete(h.id);
     console.warn('telegram handoff:', err.message || err);
   }
 }
