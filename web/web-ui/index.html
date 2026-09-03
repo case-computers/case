@@ -9,9 +9,6 @@
 <title>Drive · case</title>
 <meta name="robots" content="noindex">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 340 260'%3E%3Cg fill='none' stroke='%230a0a0a' stroke-width='22' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M 140 62 L 140 40 Q 140 30 150 30 L 190 30 Q 200 30 200 40 L 200 62'/%3E%3Crect x='30' y='62' width='280' height='168' rx='24'/%3E%3C/g%3E%3Crect x='150' y='116' width='40' height='60' fill='%232563eb'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{
   --ink:#0a0a0a; --accent:#2563eb; --paper:#ffffff;
@@ -1302,7 +1299,6 @@ async function sendPrompt(t,files){
     const th=threads.find(x=>x.id===activeTid);
     if(th){th.updated=Date.now();th.pending=true;paint();}
   }
-  const was=true;
   const art=document.createElement('article');
   art.className='turn you';
   art.innerHTML='<div class="k">YOU</div><p></p>';
@@ -1314,7 +1310,7 @@ async function sendPrompt(t,files){
     +'<details class="think-block" open><summary>THINKING</summary><pre class="think"></pre></details>'
     +'<div class="tool-block"></div><div class="pmsg"></div>';
   inner.appendChild(reply);
-  stick(was);
+  stick(true);
   const thinkBlock=reply.querySelector('.think-block');
   const thinkEl=reply.querySelector('.think');
   const toolsEl=reply.querySelector('.tool-block');

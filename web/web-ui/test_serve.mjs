@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
+import { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
@@ -83,6 +83,17 @@ assert.equal(mimeFor('/a/b.md'), 'text/plain; charset=utf-8');
 assert.equal(mimeFor('/a/b.PY'.toLowerCase()), 'text/plain; charset=utf-8');
 assert.equal(mimeFor('/a/b'), 'application/octet-stream');
 assert.equal(mimeFor('/a/b.exe'), 'application/octet-stream');
+
+assert.equal(parseErr(Buffer.from('{"error":{"message":"nope"}}'), 'read failed'), 'nope');
+assert.equal(parseErr(Buffer.from('<html>502</html>'), 'read failed'), 'read failed');
+
+// threads.json is replaced, never half-written; a stale one must not vanish silently.
+{
+  const src = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /renameSync\(THREADS_FILE \+ '\.tmp', THREADS_FILE\)/);
+  assert.match(src, /console\.warn\('threads:', err\.message\)/);
+  assert.ok(!/fonts\.(googleapis|gstatic)/.test(html), 'no font CDN on the page');
+}
 
 // histTrim: conversation memory drops WHOLE turns, never splitting a function_call
 // from its output (an orphan of either kind 400s every later request).
@@ -357,7 +368,8 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(outOfSteps.length, 2, 'Anthropic + OpenAI out-of-steps gates');
   assert.ok(outOfSteps.every((m) => m[0].includes('!stopped()')), 'STOP is not out-of-rounds');
   assert.ok(!/turnStart/.test(loopFn), 'no turn rollback on provider error');
-  assert.match(loopFn, /histCloseOpenCalls\(hist\.items\)/);
+  assert.match(loopFn, /finishTurn\(hist, thread\)/);
+  assert.match(serveSrc, /function finishTurn[\s\S]*?histCloseOpenCalls\(hist\.items\)/);
   assert.match(loopFn, /withRateRetry\(round, emit, 5, gone\.signal\)/);
   assert.match(chatFn, /res\.on\('close', \(\) => \{ clientGone\(\); gone\.abort\(\); \}\)/);
   assert.match(loopFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);

@@ -108,6 +108,10 @@ export function shq(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
 }
 
+export function parseErr(buf, fallback) {
+  try { return JSON.parse(buf.toString('utf8'))?.error?.message || fallback; } catch { return fallback; }
+}
+
 export function pathOk(p) {
   const s = String(p || '');
   return s.startsWith('/') && !s.includes('\0') && !/(^|\/)\.\.(\/|$)/.test(s);
@@ -280,8 +284,7 @@ async function fsFile(res, url) {
       `/computers/${encodeURIComponent(id)}/files?path=${encodeURIComponent(p)}&wake=true`,
       { timeoutMs: 60000, raw: true });
     if (r.status >= 400) {
-      let msg = 'read failed';
-      try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+      const msg = parseErr(r.buf, 'read failed');
       return json(res, r.status, { error: msg });
     }
     if (r.buf.length > FILE_CAP) return json(res, 413, { error: 'file over 8MB' });
@@ -491,8 +494,7 @@ async function runExtra(plan) {
       catch { return { ok: false, error: 'bad base64', act: plan.act }; }
       const r = await api(plan.method, plan.rel, { raw: true, rawBody: buf, timeoutMs: 120000 });
       if (r.status >= 400) {
-        let msg = 'write failed';
-        try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+        const msg = parseErr(r.buf, 'write failed');
         return { ok: false, status: r.status, error: msg, act: plan.act };
       }
       let json = null;
@@ -502,8 +504,7 @@ async function runExtra(plan) {
     if (plan.screenshot) {
       const r = await api(plan.method, plan.rel, { raw: true, timeoutMs: 30000 });
       if (r.status >= 400) {
-        let msg = 'screenshot failed';
-        try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+        const msg = parseErr(r.buf, 'screenshot failed');
         return { ok: false, status: r.status, error: msg, act: plan.act };
       }
       return {
@@ -515,8 +516,7 @@ async function runExtra(plan) {
     if (plan.rawFile) {
       const r = await api(plan.method, plan.rel, { raw: true, timeoutMs: 60000 });
       if (r.status >= 400) {
-        let msg = 'read failed';
-        try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+        const msg = parseErr(r.buf, 'read failed');
         return { ok: false, status: r.status, error: msg, act: plan.act };
       }
       const buf = r.buf.slice(0, FILE_TOOL_CAP);
@@ -562,7 +562,9 @@ try {
     t.items = histCloseOpenCalls(migrateShots(t.items));
     THREADS.set(t.id, t);
   }
-} catch { /* fresh */ }
+} catch (err) {
+  if (err.code !== 'ENOENT') console.warn('threads:', err.message);
+}
 const CHAT_BUSY = new Set();
 const STEER = new Map(); // thread id -> user texts typed while the turn runs
 function takeSteers(tid) {
@@ -595,7 +597,10 @@ function saveThreads() {
         .slice(0, THREADS.size - MAX_THREADS);
       for (const t of stale) THREADS.delete(t.id);
     }
-    try { fs.writeFileSync(THREADS_FILE, JSON.stringify([...THREADS.values()])); } catch { /* best-effort */ }
+    try {
+      fs.writeFileSync(THREADS_FILE + '.tmp', JSON.stringify([...THREADS.values()]));
+      fs.renameSync(THREADS_FILE + '.tmp', THREADS_FILE);
+    } catch (err) { console.warn('threads:', err.message); }
   }, 400);
 }
 if (THREADS.size) saveThreads();
@@ -643,13 +648,22 @@ function threadsRoute(req, res, url) {
   if (req.method === 'DELETE') { THREADS.delete(id); saveThreads(); return json(res, 200, { ok: true }); }
   return json(res, 405, { error: 'method' });
 }
+function finishTurn(hist, thread) {
+  hist.items = histCloseOpenCalls(hist.items);
+  histTrim(hist);
+  thread.updated = Date.now();
+  saveThreads();
+}
+
 const HIST_MAX = 240_000;
 export function histTrim(h, max = HIST_MAX) {
   // Turn boundaries are derived, not tracked: the only user-role items are the ones
   // that open a turn, so they survive any filtering of the array.
   let starts = h.items.map((it, i) => (it.role === 'user' ? i : -1)).filter((i) => i >= 0);
-  while (starts.length > 1 && JSON.stringify(h.items).length > max) {
+  let size = JSON.stringify(h.items).length;
+  while (starts.length > 1 && size > max) {
     const cut = starts[1];
+    size -= JSON.stringify(h.items.slice(0, cut)).length;
     h.items.splice(0, cut);
     starts = starts.slice(1).map((i) => i - cut);
   }
@@ -1011,10 +1025,7 @@ export async function runTurn({
       } else if (text) {
         hist.items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
       }
-      hist.items = histCloseOpenCalls(hist.items);
-      histTrim(hist);
-      thread.updated = Date.now();
-      saveThreads();
+      finishTurn(hist, thread);
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
       return { text, computerId: id, threadId: thread.id };
     }
@@ -1147,10 +1158,7 @@ export async function runTurn({
     }
     // Reasoning items are only valid inside the turn that produced them; carrying
     // them forward bloats the payload and some models reject stale ones.
-    hist.items = histCloseOpenCalls(hist.items);
-    histTrim(hist);
-    thread.updated = Date.now();
-    saveThreads();
+    finishTurn(hist, thread);
     const eff = Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
     console.log(`drive turn ${thread.id}: in=${spend.in} cached=${spend.cached}`
       + ` (${spend.in ? Math.round((100 * spend.cached) / spend.in) : 0}%)`
@@ -1163,10 +1171,7 @@ export async function runTurn({
     // real. histCloseOpenCalls synthesizes outputs for any dangling
     // function_call so later requests don't 400. (Rate limits are retried
     // inside the round; landing here means retries ran dry or a real fault.)
-    hist.items = histCloseOpenCalls(hist.items);
-    histTrim(hist);
-    thread.updated = Date.now();
-    saveThreads();
+    finishTurn(hist, thread);
     if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
     return { text: '', computerId: id, threadId: thread.id, error: err?.message || 'provider error' };
   } finally {
@@ -1393,11 +1398,15 @@ const PUSHED = new Set();
 
 async function pushHandoff(cfg, h) {
   if (PUSHED.has(h.id)) return;
+  if (PUSHED.size > 500) { const [old] = PUSHED; PUSHED.delete(old); }
   PUSHED.add(h.id);
   const m = telegram.handoffMessage(h);
   try {
     const sent = await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, ...m });
-    if (m.reply_markup.force_reply) CODE_PROMPTS.set(Number(sent.message_id), h.id);
+    if (m.reply_markup.force_reply) {
+      if (CODE_PROMPTS.size > 500) { const [old] = CODE_PROMPTS.keys(); CODE_PROMPTS.delete(old); }
+      CODE_PROMPTS.set(Number(sent.message_id), h.id);
+    }
   } catch (err) {
     PUSHED.delete(h.id);
     console.warn('telegram handoff:', err.message || err);
