@@ -144,7 +144,7 @@ def test_no_answer_url_means_no_buttons():
 def test_answer_token_ok_only_for_the_matching_signature():
     import handoffs
     from store import store
-    with mock.patch.object(store, "sign", lambda text: "sig:" + text, create=True):
+    with mock.patch.object(store, "sign", lambda text: "sig:" + text):
         assert handoffs.answer_token_ok("h_1", "sig:answer:h_1")
         assert not handoffs.answer_token_ok("h_1", "sig:answer:h_2")
         assert not handoffs.answer_token_ok("h_1", "")

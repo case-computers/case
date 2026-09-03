@@ -11,11 +11,6 @@ os.environ["CASE_HOME"] = "/tmp/case-runs-test"
 import cased  # noqa: E402
 from store import store  # noqa: E402
 
-# WP-B store helpers, mocked until that branch merges: approvals sign their ntfy
-# answer URL, and expire_stale reaps abandoned attempts.
-store.sign = lambda text: "sig-" + text
-store.stale_active_auth_attempts = lambda cutoff: []
-
 
 # ---- runs: the ACTIVITY feed ----
 

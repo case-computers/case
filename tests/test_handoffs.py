@@ -25,11 +25,6 @@ ROW = {"id": "c_1", "name": "ava", "state": "running"}
 # guarantee — stub it so these tests can never publish a real handoff to a real phone.
 handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
 
-# WP-B store helpers, mocked until that branch merges: approvals sign their ntfy
-# answer URL, and expire_stale reaps abandoned attempts.
-store.sign = lambda text: "sig-" + text
-store.stale_active_auth_attempts = lambda cutoff: []
-
 
 def _cleanup(*ids):
     for hid in ids or IDS:
@@ -62,7 +57,7 @@ def test_only_approvals_carry_a_signed_answer_url():
     try:
         _mk(ROW, "approval", "ok?")
         _mk(ROW, "question", "who?")
-        assert seen[0]["answer_url"].endswith(f"/answer/{seen[0]['id']}/sig-answer:{seen[0]['id']}")
+        assert seen[0]["answer_url"].endswith(f"/answer/{seen[0]['id']}/{store.sign('answer:' + seen[0]['id'])}")
         assert seen[1]["answer_url"] == ""
     finally:
         handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
@@ -70,14 +65,13 @@ def test_only_approvals_carry_a_signed_answer_url():
 
 
 def test_expire_stale_fails_abandoned_auth_attempts():
-    # store.stale_active_auth_attempts lands with WP-B; the reaper loop is what's under test.
     import auth_attempts
     _cleanup()
     store.q("DELETE FROM auth_attempts WHERE computer_id='c_stale'")
     try:
         a = auth_attempts.start_attempt("c_stale", "github", "https://example.com/login")
         with mock.patch.object(store, "stale_active_auth_attempts",
-                               return_value=[{"id": a["id"]}], create=True):
+                               return_value=[{"id": a["id"]}]):
             handoffs.expire_stale()
         assert auth_attempts.get_attempt(a["id"])["status"] == "failed"
     finally:

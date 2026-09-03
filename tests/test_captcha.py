@@ -22,9 +22,6 @@ for _k in ("CASE_DBC_USERNAME", "CASE_DBC_PASSWORD", "CASE_DBC_AUTHTOKEN",
 import captcha  # noqa: E402
 from store import store  # noqa: E402
 
-# WP-B store helper, mocked until that branch merges: expire_stale reaps abandoned attempts.
-store.stale_active_auth_attempts = lambda cutoff: []
-
 
 # ---- enabled() ----
 

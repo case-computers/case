@@ -23,11 +23,6 @@ IDS = ("h_otp", "h_cap", "h_dead", "h_exp", "h_otp2", "h_wait", "h_bind_a", "h_b
 ATTEMPTS = ("aa_1", "aa_term", "aa_bind")
 handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
 
-# WP-B store helpers, mocked until that branch merges: approvals sign their ntfy
-# answer URL, and expire_stale reaps abandoned attempts.
-store.sign = lambda text: "sig-" + text
-store.stale_active_auth_attempts = lambda cutoff: []
-
 
 def _cleanup():
     for hid in IDS:
