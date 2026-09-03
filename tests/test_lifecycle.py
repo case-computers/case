@@ -157,6 +157,32 @@ def test_sleep_all_parks_awake_computers_and_survives_a_failure():
         store.delete_computer(stuck)
 
 
+def test_wake_rebuilds_a_container_docker_no_longer_has():
+    # `docker rm` on a sleeping desktop: start_container 404s and the wake has to
+    # recreate around the volume. dockerd.NotFound did not exist, so this path
+    # raised AttributeError instead.
+    from unittest import mock
+    import deskclient
+    import dockerd
+    import lifecycle
+    cid = "c_unittest_wake_gone"
+    store.delete_computer(cid)
+    store.insert_computer(cid, "gone", "img", 1, 512, "vol-g", "tok-g")
+    store.set_state(cid, "asleep")
+    try:
+        with mock.patch.object(dockerd, "start_container", side_effect=dockerd.NotFound("x")), \
+             mock.patch.object(dockerd, "create_container") as create, \
+             mock.patch.object(dockerd, "get_container"), \
+             mock.patch.object(dockerd, "container_ports", return_value=(1, 2)), \
+             mock.patch.object(dockerd, "container_up", return_value=True), \
+             mock.patch.object(deskclient, "wait_desk"):
+            lifecycle.do_wake(cid)
+        create.assert_called_once_with(cid, 1.0, 512, "vol-g", "tok-g")
+        assert store.get_computer(cid)["state"] == "running"
+    finally:
+        store.delete_computer(cid)
+
+
 def test_vault_directory_and_database_are_private():
     # ~/.case holds the Fernet key and every encrypted secret. An install that
     # predates this (or a loose umask) leaves them world-readable.
