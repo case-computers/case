@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node web-ui/serve.mjs",
-    "test": "node web-ui/test_serve.mjs && node web-ui/test_phone.mjs && node web-ui/test_ntfy.mjs && node web-ui/test_telegram.mjs"
+    "test": "node web-ui/test_serve.mjs && node web-ui/test_http.mjs && node web-ui/test_phone.mjs && node web-ui/test_ntfy.mjs && node web-ui/test_telegram.mjs && node web-ui/test_nav.mjs && node web-ui/test_deploy.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
