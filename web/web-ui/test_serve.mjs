@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
+import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
@@ -321,6 +321,28 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   ]);
   assert.equal(msgs.length, 1);
   assert.equal(msgs[0].content, 'after the shot');
+}
+
+// With media, a hydrated shot reaches the model as an image, not as a dropped item.
+{
+  const shot = { role: 'user', shot: '/tmp/x.png', content: [{ type: 'input_image', detail: 'high', image_url: 'data:image/png;base64,xx' }] };
+  const msgs = histToAnthropicMessages([shot], { media: true });
+  assert.equal(msgs.length, 1);
+  assert.deepEqual(msgs[0].content, [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'xx' } }]);
+}
+
+// The Anthropic tool_result carries the png itself; a repeat says so instead.
+{
+  const src = fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /content\.push\(\{ type: 'image', source: \{ type: 'base64', media_type: 'image\/png', data: image_b64 \} \}\)/);
+  const items = [];
+  const shots = new Set();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'case-dedupe-'));
+  pushShot(items, shots, 'AAAA', dir);
+  pushShot(items, shots, 'AAAA', dir);
+  assert.equal(items.length, 2);
+  assert.ok(items[0].shot, 'first shot is stashed');
+  assert.match(items[1].content[0].text, /has not changed/);
 }
 
 // STOP keeps the turn — rewind only on provider errors, not disconnect.

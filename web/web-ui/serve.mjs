@@ -683,6 +683,19 @@ export function stashShot(b64, dir = shotsDir()) {
   return { role: 'user', shot: file, content: [{ type: 'input_text', text: '[screenshot]' }] };
 }
 
+// A click that changed nothing yields a byte-identical png. Re-sending it buys
+// no information and then rides along in every later round of the turn.
+export function pushShot(items, shots, b64, dir = shotsDir()) {
+  const h = crypto.createHash('sha1').update(b64).digest('hex');
+  if (shots.has(h)) {
+    items.push({ role: 'user', content: [{ type: 'input_text',
+      text: 'screenshot identical to an earlier one this turn — the screen has not changed' }] });
+    return;
+  }
+  shots.add(h);
+  items.push(stashShot(b64, dir));
+}
+
 export function hydrateShots(items, dir = shotsDir()) {
   const root = path.resolve(dir) + path.sep;
   return (items || []).map((it) => {
@@ -948,6 +961,7 @@ export async function runTurn({
   try {
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
+      const shots = new Set();
       const { text: out, finished, spend, overBudget } = await anthropicToolLoop({
         key: auth.key,
         model,
@@ -983,6 +997,7 @@ export async function runTurn({
             actFor(name, args || {}, id));
           const { image_b64, ...persist } = result;
           hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(persist) });
+          if (image_b64) pushShot(hist.items, shots, image_b64);
           return result;
         },
       });
@@ -1119,18 +1134,7 @@ export async function runTurn({
         if (image_b64) images.push(image_b64);
       }
       hist.items = histCloseOpenCalls(hist.items, { keepReasoning: true });
-      for (const b64 of images) {
-        // A click that changed nothing yields a byte-identical png. Re-sending it buys
-        // no information and then rides along in every later round of the turn.
-        const h = crypto.createHash('sha1').update(b64).digest('hex');
-        if (shots.has(h)) {
-          hist.items.push({ role: 'user', content: [{ type: 'input_text',
-            text: 'screenshot identical to an earlier one this turn — the screen has not changed' }] });
-          continue;
-        }
-        shots.add(h);
-        hist.items.push(stashShot(b64));
-      }
+      for (const b64 of images) pushShot(hist.items, shots, b64);
     }
     if (!finished && !stopped()) {
       // Out of steps or out of budget mid-task. Say so — silence here reads as

@@ -315,7 +315,7 @@ export function histToAnthropicMessages(items, { media = false } = {}) {
     pendingResults = [];
   };
   for (const it of items || []) {
-    if (it.shot) continue;
+    if (it.shot && !media) continue;
     if (it.role === 'user' && it.content != null && !it.type) {
       flushAssistant();
       flushResults();
@@ -512,11 +512,10 @@ export async function anthropicToolLoop({
         ok: !!toolResult.ok,
         detail: clipJson(toolResult.error || toolResult.result || toolResult, 400),
       });
-      results.push({
-        type: 'tool_result',
-        tool_use_id: call.call_id || call.id,
-        content: clipJson(toolResult),
-      });
+      const { image_b64, ...rest } = toolResult;
+      const content = [{ type: 'text', text: clipJson(rest) }];
+      if (image_b64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image_b64 } });
+      results.push({ type: 'tool_result', tool_use_id: call.call_id || call.id, content });
     }
     messages.push({ role: 'user', content: results });
   }
