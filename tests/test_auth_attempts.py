@@ -22,6 +22,11 @@ from store import store  # noqa: E402
 # Never publish a real handoff notify from unit tests.
 handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
 
+# WP-B store helpers, mocked until that branch merges: approvals sign their ntfy
+# answer URL, and expire_stale reaps abandoned attempts.
+store.sign = lambda text: "sig-" + text
+store.stale_active_auth_attempts = lambda cutoff: []
+
 COMP = {"id": "c_1", "name": "ava", "state": "running"}
 
 
@@ -387,7 +392,7 @@ def test_malformed_proof_spec_never_authenticates():
             "c_1", "github", "https://example.com/login",
             proof_spec=bad, idempotency_key=f"bad-{i}")
         assert a["proof_level"] == "heuristic", (bad, a)
-        assert auth_attempts._check_proof(
+        assert auth_attempts.check_proof(
             COMP, bad, observation={"href": "https://evil.invalid/"}) is False
         with mock.patch("lifecycle.get_computer", return_value=COMP), \
              mock.patch("deskclient.observe_auth",

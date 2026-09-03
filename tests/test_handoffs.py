@@ -25,6 +25,11 @@ ROW = {"id": "c_1", "name": "ava", "state": "running"}
 # guarantee — stub it so these tests can never publish a real handoff to a real phone.
 handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
 
+# WP-B store helpers, mocked until that branch merges: approvals sign their ntfy
+# answer URL, and expire_stale reaps abandoned attempts.
+store.sign = lambda text: "sig-" + text
+store.stale_active_auth_attempts = lambda cutoff: []
+
 
 def _cleanup(*ids):
     for hid in ids or IDS:
@@ -37,6 +42,7 @@ def _mk(*a, **kw):
     the returned shape, not on persistence, and must not leave state for the next run."""
     h = handoffs.create_handoff(*a, **kw)
     store.delete_handoff(h["id"])
+    store.q("DELETE FROM assist_tokens")
     handoffs.LOGIN_CTX.pop(h["id"], None)
     return h
 
@@ -47,6 +53,35 @@ def _persist(hid, kind, prompt, login_credential=None, domain=None, **kw):
     if login_credential:
         handoffs.LOGIN_CTX[hid] = {"computer_id": "c_1", "credential": login_credential}
     return store.get_handoff(hid)
+
+
+def test_only_approvals_carry_a_signed_answer_url():
+    _cleanup()
+    seen = []
+    handoffs.notifier = type("N", (), {"notify": lambda self, h, name: seen.append(h)})()
+    try:
+        _mk(ROW, "approval", "ok?")
+        _mk(ROW, "question", "who?")
+        assert seen[0]["answer_url"].endswith(f"/answer/{seen[0]['id']}/sig-answer:{seen[0]['id']}")
+        assert seen[1]["answer_url"] == ""
+    finally:
+        handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
+        _cleanup()
+
+
+def test_expire_stale_fails_abandoned_auth_attempts():
+    # store.stale_active_auth_attempts lands with WP-B; the reaper loop is what's under test.
+    import auth_attempts
+    _cleanup()
+    store.q("DELETE FROM auth_attempts WHERE computer_id='c_stale'")
+    try:
+        a = auth_attempts.start_attempt("c_stale", "github", "https://example.com/login")
+        with mock.patch.object(store, "stale_active_auth_attempts",
+                               return_value=[{"id": a["id"]}], create=True):
+            handoffs.expire_stale()
+        assert auth_attempts.get_attempt(a["id"])["status"] == "failed"
+    finally:
+        store.q("DELETE FROM auth_attempts WHERE computer_id='c_stale'")
 
 
 def test_rebuild_login_ctx_recovers_pending_login_handoff():

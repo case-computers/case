@@ -20,6 +20,10 @@ for _k in ("CASE_DBC_USERNAME", "CASE_DBC_PASSWORD", "CASE_DBC_AUTHTOKEN",
     os.environ.pop(_k, None)
 
 import captcha  # noqa: E402
+from store import store  # noqa: E402
+
+# WP-B store helper, mocked until that branch merges: expire_stale reaps abandoned attempts.
+store.stale_active_auth_attempts = lambda cutoff: []
 
 
 # ---- enabled() ----
@@ -1027,7 +1031,7 @@ def test_login_success_ungated_reports_success():
          mock.patch("cased.desk_json", return_value={"status": "success"}), \
          mock.patch("cased.store.touch"), \
          mock.patch("login_flow._post_login_gate", return_value=None), \
-         mock.patch("auth_attempts._check_proof", return_value=True), \
+         mock.patch("auth_attempts.check_proof", return_value=True), \
          mock.patch("cased.store.record_credential_result") as rec, \
          mock.patch("cased.events.emit"):
         out = cased.login("c_1", {

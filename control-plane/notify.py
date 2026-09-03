@@ -16,8 +16,6 @@ import time
 
 import requests
 
-from config import API_BASE
-
 log = logging.getLogger("cased.notify")
 OUTBOUND_TAG = "case-outbound"
 
@@ -39,11 +37,10 @@ def _tags(ev):
 
 
 class Ntfy:
-    def __init__(self, url, topic, answer_topic, api_base):
+    def __init__(self, url, topic, answer_topic):
         self.url = url.rstrip("/")
         self.topic = topic
         self.answer_topic = answer_topic
-        self.api_base = api_base
         if not topic:
             log.warning("CASE_NTFY_TOPIC unset — handoff notifications disabled")
         if topic and answer_topic and topic == answer_topic:
@@ -63,14 +60,17 @@ class Ntfy:
             tags = [OUTBOUND_TAG]
             if h.get("id"):
                 tags.append(h["id"])
+            prompt = " ".join((h.get("prompt") or "").split())    # header values can't hold newlines
             headers = {
                 **_auth_headers(),
                 "X-Title": ascii_(f"[Case] {h['kind']} — {computer_name}"),
                 "X-Tags": ",".join(tags),
-                "X-Message": ascii_(h["prompt"])[:800],
+                "X-Message": ascii_(prompt)[:800],
             }
-            if h["kind"] == "approval":
-                a = f"{self.api_base}/handoffs/{h['id']}/answer"
+            if h.get("assist_url"):
+                headers["X-Click"] = h["assist_url"]
+            if h.get("answer_url"):
+                a = h["answer_url"]
                 headers["X-Actions"] = (
                     f"http, Approve, {a}, method=POST, body={{\"value\":\"approve\"}}; "
                     f"http, Deny, {a}, method=POST, body={{\"value\":\"deny\"}}")
@@ -107,7 +107,7 @@ class Ntfy:
         while True:
             try:
                 r = requests.get(f"{self.url}/{self.answer_topic}/sse", stream=True,
-                                 headers=headers, timeout=(10, None))
+                                 headers=headers, timeout=(10, 90))
                 for line in r.iter_lines():
                     if not line or not line.startswith(b"data: "):
                         continue
@@ -126,15 +126,15 @@ class Ntfy:
                             on_answer(None, msg)
                     except Exception as e:
                         log.warning("answer via ntfy rejected: %s", e)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("ntfy listen: %s", e)
             time.sleep(5)
 
 
 def build_notifier():
     return Ntfy(os.environ.get("CASE_NTFY_URL", "https://ntfy.sh"),
                 os.environ.get("CASE_NTFY_TOPIC"),
-                os.environ.get("CASE_NTFY_ANSWER_TOPIC"), API_BASE)
+                os.environ.get("CASE_NTFY_ANSWER_TOPIC"))
 
 
 notifier = build_notifier()

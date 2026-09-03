@@ -35,14 +35,16 @@ def compute_next(kind, spec, jitter_s):
     """Next fire time as UTC ISO. Lexicographic order == chronological (zero-padded, Z)."""
     j = random.randint(0, int(jitter_s or 0))
     if kind == "interval":
+        if int(spec) < 60:
+            raise ApiError(400, "bad_request", "interval must be at least 60 seconds")
         nxt = datetime.now(timezone.utc) + timedelta(seconds=int(spec) + j)
     elif kind == "daily":
-        local = datetime.now().astimezone()
+        local = datetime.now()
         hh, mm = (int(x) for x in str(spec).split(":"))
         t = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if t <= local:
             t += timedelta(days=1)
-        nxt = (t + timedelta(seconds=j)).astimezone(timezone.utc)
+        nxt = (t + timedelta(seconds=j)).astimezone(timezone.utc)   # naive→aware picks that date's offset
     else:
         raise ApiError(400, "bad_kind", "kind must be 'interval' or 'daily'")
     return nxt.strftime("%Y-%m-%dT%H:%M:%SZ")
