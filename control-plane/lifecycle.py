@@ -143,7 +143,7 @@ def provision(name=None, cpus=1, ram_mb=2048):
     except Exception as e:
         dockerd.destroy_infra(cid, volume)
         store.delete_computer(cid)
-        raise ApiError(500, "create_failed", f"{type(e).__name__}: {e}")
+        raise ApiError(500, "create_failed", f"create failed: {type(e).__name__}")
     if not _try_set(cid, "running"):
         # raced a DELETE while provisioning, tear down the infra we just built
         dockerd.destroy_infra(cid, volume)

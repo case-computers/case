@@ -5,7 +5,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ.setdefault("CASE_HOME", "/tmp/case-lifecycle-test")
+# assignment, NOT setdefault: these tests create and delete computer rows, and an
+# inherited CASE_HOME (a dev shell, ~/.case/env) would point that at the real vault.
+os.environ["CASE_HOME"] = "/tmp/case-lifecycle-test"
 from errors import ApiError  # noqa: E402
 from lifecycle import can_transition, do_sleep, ensure_running  # noqa: E402
 from store import store  # noqa: E402
@@ -157,8 +159,9 @@ def test_sleep_all_parks_awake_computers_and_survives_a_failure():
 
 def test_health_exposes_awake_cap():
     import cased
+    from types import SimpleNamespace
     from config import MAX_RUNNING
-    h = cased.health()
+    h = cased.health(SimpleNamespace(headers={}))   # untokened box: every caller is trusted
     assert h["ok"] is True
     assert h["max_running"] == MAX_RUNNING
     assert "running" in h

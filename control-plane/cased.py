@@ -91,7 +91,7 @@ async def validation_error(_, e):
 @app.exception_handler(Exception)
 async def internal_error(_, e):
     log.exception("internal error")
-    return JSONResponse({"error": {"code": "internal", "message": f"{type(e).__name__}: {e}"}},
+    return JSONResponse({"error": {"code": "internal", "message": "internal error"}},
                         status_code=500)
 
 
@@ -108,36 +108,52 @@ def bearer_ok(authorization):
     auth = authorization or ""
     if not auth.lower().startswith("bearer "):
         return False
-    got = auth[7:].strip()
-    if len(got) != len(want):
+    return hmac.compare_digest(auth[7:].strip(), want)
+
+
+PUBLIC_PREFIXES = ("/fill/", "/assist/", "/answer/")   # token-in-URL doors, no bearer
+
+
+def allowed_hosts():
+    """Names a browser may address us as; anything else is a rebinding page."""
+    hosts = {"127.0.0.1", "localhost", "[::1]", "cased"}
+    hosts.update(h.strip().lower()
+                 for h in (os.environ.get("CASE_ALLOWED_HOSTS") or "").split(",") if h.strip())
+    pub = (os.environ.get("CASE_PUBLIC_HOST") or "").strip().lower()
+    if pub:
+        hosts.add(pub)
+    return hosts
+
+
+def _host_of(value):
+    v = (value or "").strip().lower()
+    return v[:v.find("]") + 1] if v.startswith("[") else v.split(":")[0]
+
+
+def browser_ok(request):
+    """Host must be ours; a present Origin must be ours too (CSRF)."""
+    if _host_of(request.headers.get("host")) not in allowed_hosts():
         return False
-    return hmac.compare_digest(got, want)
-
-
-@app.middleware("http")
-async def token_guard(request: Request, call_next):
-    # /health stays open so compose can probe us without circulating the token.
-    if request.url.path == "/health":
-        return await call_next(request)
-    if not bearer_ok(request.headers.get("authorization")):
-        return JSONResponse(
-            {"error": {"code": "unauthorized", "message": "unauthorized"}},
-            status_code=401)
-    return await call_next(request)
+    origin = request.headers.get("origin")
+    return not origin or _host_of(origin.split("//", 1)[-1]) in allowed_hosts()
 
 
 # ---------- audit log ----------
 # One JSONL line per API call, ~/.case/audit/<date>.jsonl. Answers "what did the
 # agent do on this machine" without agents self-logging transcripts. Sessions are
-# whatever the client sends as X-Case-Session (the MCP server sends one per process).
+# whatever the client sends as X-Case-Session (the MCP server sends one per process),
+# alongside the caller's address and the query string.
 # Security invariant: response bodies are NEVER logged (screenshots, file contents),
 # and request bodies that can carry secrets are redacted, secrets never hit disk.
 # Redacted routes: /credentials (password/TOTP), /answer (OTP codes relayed by the
 # human), /files (uploaded file contents may hold tokens), /fill (the human
 # credential form posts the password itself).
+# Registered BEFORE token_guard: Starlette runs the last-registered middleware
+# outermost, so an unauthorized call is rejected without reaching the log.
 
 def _redacted(path):
     return ("/credentials" in path or path.endswith("/answer")
+            or path.startswith("/answer/")
             or path.endswith("/files") or path.startswith("/fill/")
             or path.endswith("/fill")   # agent form-fill bodies carry user data
             or path.startswith("/assist/"))
@@ -145,25 +161,32 @@ def _redacted(path):
 
 @app.middleware("http")
 async def audit_mw(request: Request, call_next):
-    body = b"" if request.method in ("GET", "DELETE") else await request.body()
+    path = request.url.path
+    big = int(request.headers.get("content-length") or 0) > 64 * 1024
+    skip_body = request.method in ("GET", "DELETE") or _redacted(path) or big
+    body = b"" if skip_body else await request.body()
     t0 = time.time()
     resp = await call_next(request)
-    path = request.url.path
-    if path != "/health" and not path.endswith("/events"):   # skip noise + SSE streams
+    # skip noise + SSE streams; a desk open is ~25 asset GETs through the live relay
+    if path != "/health" and not path.endswith("/events") and "/live/" not in path:
         req = "[redacted]" if _redacted(path) else body[:2000].decode("utf-8", "replace")
-        # a fill/assist token is a live capability, the log records that the door
-        # was used, never the key itself
+        # a fill/assist/answer token is a live capability, the log records that the
+        # door was used, never the key itself
         if path.startswith("/fill/"):
             logged_path = "/fill/[token]"
         elif path.startswith("/assist/"):
             logged_path = "/assist/[token]" + (
                 "/submit" if path.endswith("/submit") else
                 "/done" if path.endswith("/done") else "")
+        elif path.startswith("/answer/"):
+            logged_path = "/answer/[token]"
         else:
             logged_path = path
         line = {"ts": now(), "session": request.headers.get("x-case-session", "-"),
-                "method": request.method, "path": logged_path, "status": resp.status_code,
-                "ms": int((time.time() - t0) * 1000), "req": req}
+                "client": request.client.host if request.client else "-",
+                "method": request.method, "path": logged_path, "query": request.url.query,
+                "status": resp.status_code, "ms": int((time.time() - t0) * 1000),
+                "req": "[large]" if big else req}
         await asyncio.to_thread(_audit_append, line)
     return resp
 
@@ -172,6 +195,25 @@ def _audit_append(line):
     os.makedirs(AUDIT_DIR, exist_ok=True)
     with open(os.path.join(AUDIT_DIR, time.strftime("%Y-%m-%d") + ".jsonl"), "a") as f:
         f.write(json.dumps(line) + "\n")
+
+
+@app.middleware("http")
+async def token_guard(request: Request, call_next):
+    path = request.url.path
+    # /health stays open so compose can probe us without circulating the token.
+    if path == "/health":
+        return await call_next(request)
+    if path.startswith(PUBLIC_PREFIXES) or not case_token():
+        if not browser_ok(request):
+            return JSONResponse(
+                {"error": {"code": "bad_host", "message": "unexpected Host or Origin"}},
+                status_code=403)
+        return await call_next(request)
+    if not bearer_ok(request.headers.get("authorization")):
+        return JSONResponse(
+            {"error": {"code": "unauthorized", "message": "unauthorized"}},
+            status_code=401)
+    return await call_next(request)
 
 
 def unlink_run_artifacts(paths):
@@ -286,7 +328,11 @@ def wake_computer(cid: str):
 
 
 @app.get("/health")
-def health():
+def health(request: Request):
+    # Open door (compose probes it without the token), so an unauthenticated caller
+    # learns liveness only — the inventory is for whoever holds the bearer.
+    if not bearer_ok(request.headers.get("authorization")):
+        return {"ok": True}
     n = len(store.list_computers())
     try:
         dockerd.dc().ping()
@@ -617,7 +663,7 @@ def _assist_set_cookie(set_sess):
 
 @app.get("/assist/static/assist.js")
 def assist_static_js():
-    """Same-origin poll script, CSP script-src 'self' (no inline)."""
+    """Same-origin poll script, served as a file so the page carries no inline JS."""
     return Response(assist.ASSIST_JS, media_type="application/javascript",
                     headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
@@ -876,6 +922,13 @@ def answer_handoff_ep(hid: str, body: dict = Body(...)):
     if "value" not in body:
         raise ApiError(400, "bad_request", "missing 'value'")
     return handoffs.handoff_json(handoffs.answer_handoff(hid, str(body["value"])))
+
+
+@app.post("/answer/{hid}/{token}")
+def answer_public(hid: str, token: str, body: dict = Body(...)):
+    """ntfy's Approve/Deny buttons. The signed token in the URL is the whole auth —
+    a phone has no bearer, and the notification is the only place it leaks to."""
+    return handoffs.answer_by_token(hid, token, body.get("value"))
 
 
 # ---------- schedules ----------
