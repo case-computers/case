@@ -227,6 +227,33 @@ def test_tick_respects_cadence_and_skips_recent_live_session():
     assert wakes == [], wakes
 
 
+def test_tick_is_not_reentrant():
+    session_keeper._TICK.acquire()
+    try:
+        with mock.patch.object(session_keeper, "_tick") as inner:
+            session_keeper.tick()
+        inner.assert_not_called()
+    finally:
+        session_keeper._TICK.release()
+    with mock.patch.object(session_keeper, "_tick") as inner:
+        session_keeper.tick()          # lock released again
+    inner.assert_called_once()
+
+
+def test_tick_forgets_computers_that_no_longer_have_probes():
+    _cleanup()
+    _reset_keeper_clock()
+    session_keeper._last_probe_at["c_gone"] = 1.0
+    cid = _computer(state="asleep")
+    _cred(cid, proof_spec={"url_contains": "/a"})
+    with mock.patch.object(session_keeper, "do_wake"), \
+         mock.patch.object(session_keeper, "do_sleep"), \
+         mock.patch.object(session_keeper, "_probe_one_awake", return_value="ok"):
+        session_keeper.tick()
+    assert "c_gone" not in session_keeper._last_probe_at
+    assert cid in session_keeper._last_probe_at
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

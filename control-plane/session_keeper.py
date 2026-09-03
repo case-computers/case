@@ -13,6 +13,7 @@ Heuristic-only "looks fine" is never recorded as durable `ok`.
 Unhealthy → record `failed`; optionally open an AuthAttempt for human recovery later.
 """
 import os
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -33,6 +34,7 @@ BUSY_S = max(0, int(os.environ.get("CASE_SESSION_KEEPER_BUSY_S", "900")))
 
 # computer_id → monotonic timestamp of last completed probe pass for that box
 _last_probe_at = {}
+_TICK = threading.Lock()
 
 
 def _has_probe_profile(row):
@@ -175,6 +177,15 @@ def _probe_one_awake(computer_id, name):
 
 def tick():
     """Sweeper entry: probe due credentials, batched per computer, with busy/cadence guards."""
+    if not _TICK.acquire(blocking=False):   # a pass can outlast the sweep interval
+        return
+    try:
+        _tick()
+    finally:
+        _TICK.release()
+
+
+def _tick():
     try:
         creds = [c for c in store.list_all_credentials() if _has_probe_profile(c)]
     except Exception:
@@ -184,6 +195,9 @@ def tick():
     by_cid = {}
     for c in creds:
         by_cid.setdefault(c["computer_id"], []).append(c)
+    for cid in list(_last_probe_at):        # destroyed computers must not leak the cadence map
+        if cid not in by_cid:
+            _last_probe_at.pop(cid)
 
     for cid, group in by_cid.items():
         if not _due(cid):
