@@ -417,17 +417,7 @@ CLEAR_PASS = "[...document.querySelectorAll('input[type=\"password\"]')].forEach
 # Generic auth observation — no website names. The JS only collects raw material
 # (fields, frame markers, page text); challenge_signals are computed in Python
 # (challenge_signals_from_text) so the phrase map lives in exactly one place.
-OBSERVE_AUTH_JS = r"""
-(() => {
-  const vis = e => {
-    if (!e || e.disabled || e.offsetParent === null) return false;
-    const st = getComputedStyle(e);
-    if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
-    const r = e.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-  const userSel = 'input[autocomplete="username"],input[type="email"],input[name*="user" i],input[name*="email" i],input[name*="login" i],input[id*="user" i],input[id*="email" i],input[id*="login" i],input[type="text"]';
-  const codeSel = 'input[autocomplete="one-time-code"],input[name*="otp" i],input[name*="code" i],input[id*="otp" i],input[id*="code" i],input[type="tel"],input[type="number"],input[type="text"]';
+_OBSERVE_BODY = r"""
   const u = [...document.querySelectorAll(userSel)].find(vis);
   const p = [...document.querySelectorAll('input[type="password"]')].find(vis);
   const c = [...document.querySelectorAll(codeSel)].find(vis);
@@ -456,6 +446,10 @@ OBSERVE_AUTH_JS = r"""
   };
 })()
 """
+
+OBSERVE_AUTH_JS = ("(() => {" + VIS
+                   + f"const userSel='{USER_SEL}';const codeSel='{CODE_SEL}';"
+                   + _OBSERVE_BODY)
 
 # Watchdog RE_BLOCK scans arbitrary page text (DMs, feeds, drafts). Bare "2fa" / "captcha"
 # false-positive on outreach copy ("asking about 2fa and captcha flows") and spam handoff
@@ -565,7 +559,7 @@ def domain_ok(host, domains):
     return any(host == d.lower() or host.endswith("." + d.lower()) for d in domains)
 
 
-def challenge(tab, cred, kind, prompt):
+def challenge(cred, kind, prompt):
     state["login"] = {"kind": kind, "cred_name": cred["name"], "at": time.time()}
     try:
         shot = base64.b64encode(grab()).decode()
@@ -590,10 +584,10 @@ def classify(tab, cred):
     # by matching concrete path segments only — never the full opaque query blob.
     path = (urlparse(href).path or "").lower()
     if any(seg in path for seg in ("/codeentry", "/checkpoint", "/two_factor", "/two-factor")):
-        return challenge(tab, cred, "otp", f"{host}: verification code entry")
+        return challenge(cred, "otp", f"{host}: verification code entry")
 
     if RE_CAPTCHA.search(blob):
-        return challenge(tab, cred, "captcha", f"{host}: {snippet(blob, RE_CAPTCHA)}")
+        return challenge(cred, "captcha", f"{host}: {snippet(blob, RE_CAPTCHA)}")
     if RE_OTP.search(blob):
         if cred.get("totp_seed"):
             fill(tab, FOCUS_CODE, totp(cred["totp_seed"]))
@@ -605,9 +599,9 @@ def classify(tab, cred):
             return {"status": "success", "totp_used": True}
         # SMS OTP / other code challenge -> human (or Twilio, decided by cased)
         kind = "otp"
-        return challenge(tab, cred, kind, f"{host}: {snippet(blob, RE_OTP)}")
+        return challenge(cred, kind, f"{host}: {snippet(blob, RE_OTP)}")
     if RE_APPROVAL.search(blob):
-        return challenge(tab, cred, "approval", f"{host}: {snippet(blob, RE_APPROVAL)}")
+        return challenge(cred, "approval", f"{host}: {snippet(blob, RE_APPROVAL)}")
     if fields.get("pass") and RE_FAIL.search(text):
         return {"status": "failed", "reason": snippet(text, RE_FAIL)}
     if fields.get("pass"):
@@ -942,6 +936,8 @@ def _stop_capture():
 
 @app.post("/capture/start")
 def capture_start(b: dict = Body(...)):
+    # ponytail: no regex-backtracking guard — CPython has no regex timeout, and a
+    # caller who can reach this route already has /exec on the box.
     pattern = b.get("pattern")
     if not pattern:
         return err(400, "bad_request", "body needs 'pattern'")

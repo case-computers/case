@@ -24,10 +24,12 @@ def test_vis_rejects_opacity_zero_and_zero_size():
     assert "opacity" in deskd.VIS
     assert "getBoundingClientRect" in deskd.VIS
     assert "visibility" in deskd.VIS
-    # Observe uses its own vis helper; keep the same opacity/rect guards there.
+    # Observe is built from VIS and the shared selectors, not a retyped copy.
     assert "opacity" in deskd.OBSERVE_AUTH_JS
     assert "getBoundingClientRect" in deskd.OBSERVE_AUTH_JS
     assert "visibility" in deskd.OBSERVE_AUTH_JS
+    assert deskd.USER_SEL in deskd.OBSERVE_AUTH_JS
+    assert deskd.CODE_SEL in deskd.OBSERVE_AUTH_JS
 
 
 def test_focus_helpers_select_before_insert():
