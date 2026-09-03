@@ -515,6 +515,41 @@ def test_file_put_rejects_oversized_content_length():
             assert r.status_code == 413
             assert not os.path.exists(f"{home}/big")       # rejected before any write
 
+
+# ---- login clears the typed password before the injection gate drops ----
+
+class RecordingTab:
+    """Records every js() with the gate state at that moment."""
+
+    def __init__(self):
+        self.js_calls = []
+
+    def js(self, expr):
+        self.js_calls.append((expr, deskd.state["injecting"]))
+        return None
+
+    def cmd(self, *a, **k):
+        return {}
+
+    def close(self):
+        pass
+
+
+def test_login_clears_password_field_while_still_gated():
+    # A failed submit leaves the secret in the DOM; clearing it after injecting
+    # goes False would expose it to /screenshot and /eval in between.
+    tab = RecordingTab()
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "navigate"), \
+         mock.patch.object(deskd, "domain_ok", return_value=True), \
+         mock.patch.object(deskd, "fill_login_form", return_value=None), \
+         mock.patch.object(deskd, "wait_post_submit"), \
+         mock.patch.object(deskd, "classify", return_value={"status": "success"}):
+        out = deskd.login({"credential": {"name": "x"}, "url": "https://site.com/login"})
+    assert out == {"status": "success"}, out
+    assert (deskd.CLEAR_PASS, True) in tab.js_calls, tab.js_calls
+    assert deskd.state["injecting"] is False
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

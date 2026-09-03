@@ -412,6 +412,7 @@ FOCUS_PASS = (f"(()=>{{{VIS}const p=[...document.querySelectorAll('input[type=\"
 FOCUS_CODE = (f"(()=>{{{VIS}const c=[...document.querySelectorAll('{CODE_SEL}')].find(vis);"
               "if(!c)return false; c.focus(); if(c.select)c.select(); return true;})()")
 PAGE_TEXT = "(document.body ? document.body.innerText.slice(0, 5000) : '')"
+CLEAR_PASS = "[...document.querySelectorAll('input[type=\"password\"]')].forEach(p=>{p.value=''})"
 
 # Generic auth observation — no website names. The JS only collects raw material
 # (fields, frame markers, page text); challenge_signals are computed in Python
@@ -693,6 +694,10 @@ def login(b: dict = Body(...)):
             wait_post_submit(tab)
             return classify(tab, cred)
         finally:
+            try:
+                tab.js(CLEAR_PASS)   # the DOM keeps the typed secret if the page did not navigate
+            except Exception:
+                pass
             tab.close()
     except Exception as e:
         return {"status": "failed", "reason": f"login error: {type(e).__name__}: {e}"}
@@ -730,6 +735,10 @@ def login_resume(b: dict = Body(...)):
                 return {"status": "failed", "reason": "challenge still present"}
             return {"status": "success"}
         finally:
+            try:
+                tab.js(CLEAR_PASS)   # the DOM keeps the typed secret if the page did not navigate
+            except Exception:
+                pass
             tab.close()
     except Exception as e:
         return {"status": "failed", "reason": f"resume error: {type(e).__name__}: {e}"}
