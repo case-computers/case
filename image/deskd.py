@@ -45,6 +45,11 @@ def err(status, code, message):
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
 
 
+def injecting():
+    if state["injecting"]:
+        return err(423, "credential_injection", "blocked during credential injection")
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next):
     got = request.headers.get("authorization") or ""
@@ -115,8 +120,8 @@ def health():
 
 @app.get("/screenshot")
 def screenshot():
-    if state["injecting"]:
-        return err(423, "credential_injection", "screenshots blocked during credential injection")
+    if (r := injecting()):
+        return r
     return Response(grab(), media_type="image/png")
 
 
@@ -152,9 +157,11 @@ def do_action(a):
             xdo("click", "--repeat", str(min(abs(dy), 50)), "--delay", "40", "5" if dy > 0 else "4")
     elif t == "type":
         text = str(a["text"])
+        if len(text) > 10000:
+            raise ValueError("text over 10000 chars")
         # a killed xdotool leaves text half-typed and the caller retrying the
         # whole thing — scale the timeout so long texts can't hit it
-        xdo("type", "--delay", "15", "--", text, timeout=15 + len(text) // 10)
+        xdo("type", "--delay", "15", "--", text, timeout=min(15 + len(text) // 10, 300))
     elif t == "key":
         xdo("key", "--", str(a["keys"]))
     elif t == "wait":
@@ -165,6 +172,8 @@ def do_action(a):
 
 @app.post("/action")
 def action(a: dict = Body(...)):
+    if (r := injecting()):
+        return r
     try:
         do_action(a)
     except KeyError as e:
@@ -174,16 +183,27 @@ def action(a: dict = Body(...)):
     out = {"ok": True}
     if a.get("screenshot"):
         time.sleep(min(int(a.get("delay_ms", 300)), 5000) / 1000)
-        if state["injecting"]:
-            return err(423, "credential_injection", "screenshots blocked during credential injection")
+        if (r := injecting()):
+            return r
         out["screenshot_png_b64"] = base64.b64encode(grab()).decode()
     return out
 
 
 # ---------- exec & files ----------
 
+HOME = "/home/agent"
+FILE_MAX = 8 * 1024 * 1024
+
+
+def home_path(path):
+    p = os.path.realpath(path or "")
+    return p if p.startswith(HOME + "/") else None
+
+
 @app.post("/exec")
 def exec_(b: dict = Body(...)):
+    if (r := injecting()):
+        return r
     if "command" not in b:
         return err(400, "bad_request", "command required")
     timeout = min(int(b.get("timeout_s", 30)), 600)
@@ -195,7 +215,7 @@ def exec_(b: dict = Body(...)):
     except subprocess.TimeoutExpired as e:
         code, out = 124, e.stdout or b""
         errb = (e.stderr or b"") + b"\n[deskd] command timed out"
-    except NotADirectoryError:
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
         return err(400, "bad_cwd", f"no such directory: {cwd}")
     truncated = len(out) > CAP or len(errb) > CAP
     return {"exit_code": code, "stdout": out[:CAP].decode(errors="replace"),
@@ -204,20 +224,35 @@ def exec_(b: dict = Body(...)):
 
 @app.put("/file")
 async def file_put(request: Request, path: str):
+    if (r := injecting()):
+        return r
+    p = home_path(path)
+    if not p:
+        return err(400, "bad_path", f"path must be under {HOME}/")
+    if int(request.headers.get("content-length") or 0) > FILE_MAX:
+        return err(413, "too_large", f"file over {FILE_MAX} bytes")
     data = await request.body()
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(data)
-    return JSONResponse({"path": path, "bytes": len(data)}, status_code=201)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        return err(400, "bad_path", str(e))
+    return JSONResponse({"path": p, "bytes": len(data)}, status_code=201)
 
 
 @app.get("/file")
 def file_get(path: str):
-    if not os.path.isfile(path):
-        return err(404, "not_found", path)
-    with open(path, "rb") as f:
+    if (r := injecting()):
+        return r
+    p = home_path(path)
+    if not p:
+        return err(400, "bad_path", f"path must be under {HOME}/")
+    if not os.path.isfile(p):
+        return err(404, "not_found", p)
+    if os.path.getsize(p) > FILE_MAX:
+        return err(413, "too_large", f"file over {FILE_MAX} bytes")
+    with open(p, "rb") as f:
         return Response(f.read(), media_type="application/octet-stream")
 
 
@@ -325,8 +360,8 @@ def press_enter(tab):
 
 @app.post("/eval")
 def eval_(b: dict = Body(...)):
-    if state["injecting"]:
-        return err(423, "credential_injection", "eval blocked during credential injection")
+    if (r := injecting()):
+        return r
     if "expression" not in b:
         return err(400, "bad_request", "body needs 'expression'")
     timeout = min(int(b.get("timeout_s", 20)), 120)
@@ -707,8 +742,8 @@ def login_resume(b: dict = Body(...)):
 
 @app.post("/auth/observe")
 def auth_observe():
-    if state["injecting"]:
-        return err(423, "credential_injection", "observe blocked during credential injection")
+    if (r := injecting()):
+        return r
     try:
         tab = Tab()
         try:
@@ -754,9 +789,8 @@ def auth_submit_challenge(b: dict = Body(...)):
 def auth_navigate_verification(b: dict = Body(...)):
     if "url" not in b:
         return err(400, "bad_request", "body needs 'url'")
-    if state["injecting"]:
-        return err(423, "credential_injection",
-                   "navigate_verification blocked during credential injection")
+    if (r := injecting()):
+        return r
     url = b["url"]
     domains = b.get("domains")
     host = urlparse(url).hostname
@@ -920,8 +954,8 @@ def capture_start(b: dict = Body(...)):
 
 @app.get("/capture")
 def capture_get():
-    if state["injecting"]:
-        return err(423, "credential_injection", "capture blocked during credential injection")
+    if (r := injecting()):
+        return r
     cap = state["capture"]
     if not cap:
         return {"items": [], "running": False, "error": None}
@@ -932,8 +966,8 @@ def capture_get():
 
 @app.delete("/capture")
 def capture_delete():
-    if state["injecting"]:
-        return err(423, "credential_injection", "capture blocked during credential injection")
+    if (r := injecting()):
+        return r
     cap = _stop_capture()
     return {"items": _drain(cap["buf"]) if cap else [], "running": False,
             "error": cap["error"] if cap else None}

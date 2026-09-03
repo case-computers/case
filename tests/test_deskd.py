@@ -455,6 +455,66 @@ def test_capture_step_getResponseBody_error_is_visible():
     assert buf[0]["error"] == "No data found for resource" and "body" not in buf[0]
 
 
+# ---- the injection gate and /file scoping, over the real ASGI app ----
+
+import tempfile  # noqa: E402
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+H = {"Authorization": "Bearer test"}
+
+
+def _client():
+    return TestClient(deskd.app, raise_server_exceptions=False)
+
+
+def test_no_bearer_is_401():
+    assert _client().get("/health").status_code == 401
+    assert _client().get("/health", headers=H).status_code == 200
+
+
+def test_injection_gates_screenshot_exec_and_file():
+    deskd.state["injecting"] = True
+    try:
+        c = _client()
+        for r in (c.get("/screenshot", headers=H),
+                  c.post("/exec", headers=H, json={"command": "id"}),
+                  c.get("/file", headers=H, params={"path": "/home/agent/x"})):
+            assert r.status_code == 423
+            assert r.json()["error"]["code"] == "credential_injection"
+    finally:
+        deskd.state["injecting"] = False
+
+
+def test_file_get_rejects_paths_outside_home():
+    c = _client()
+    assert c.get("/file", headers=H, params={"path": "/etc/passwd"}).status_code == 400
+    esc = c.get("/file", headers=H, params={"path": "/home/agent/../../etc/passwd"})
+    assert esc.status_code == 400                          # realpath resolves .. before the check
+    assert esc.json()["error"]["code"] == "bad_path"
+
+
+def test_file_put_get_roundtrip_under_home():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            c = _client()
+            p = f"{home}/sub/note.txt"
+            put = c.put("/file", headers=H, params={"path": p}, content=b"hello")
+            assert put.status_code == 201 and put.json()["bytes"] == 5
+            got = c.get("/file", headers=H, params={"path": p})
+            assert got.status_code == 200 and got.content == b"hello"
+
+
+def test_file_put_rejects_oversized_content_length():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            r = _client().put("/file", headers={**H, "content-length": "99999999"},
+                              params={"path": f"{home}/big"}, content=b"x")
+            assert r.status_code == 413
+            assert not os.path.exists(f"{home}/big")       # rejected before any write
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
