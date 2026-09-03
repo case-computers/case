@@ -47,11 +47,17 @@ Xvfb :0 -screen 0 "$RES" -nolisten tcp -fbdir /dev/shm &
 XVFB_PID=$!
 
 for _ in $(seq 1 100); do [ -e /tmp/.X11-unix/X0 ] && break; sleep 0.1; done
+[ -e /tmp/.X11-unix/X0 ] || { echo "[start] Xvfb did not come up" >&2; exit 1; }
 
-x11vnc -display :0 -forever -shared -nopw -quiet -bg
+x11vnc -display :0 -localhost -forever -shared -nopw -quiet -bg
+# On a shared network the only client is cased, which holds DESK_TOKEN. Host mode
+# stays open: 6080 is loopback-only there and the /desk proxy door cannot add the header.
+# -localhost on x11vnc matters too — without it a peer skips websockify and speaks RFB to 5900.
+auth=()
+[ -n "$CASE_DOCKER_NETWORK" ] && auth=(--auth-plugin BasicHTTPAuth --auth-source "agent:$DESK_TOKEN")
 # log to file, not compose stdout: its per-connection "Plain non-SSL (ws://)"
 # lines read like TLS errors to people skimming `docker compose logs`
-/opt/deskd/bin/websockify --web /usr/share/novnc 6080 localhost:5900 >>/tmp/websockify.log 2>&1 &
+/opt/deskd/bin/websockify "${auth[@]}" --web /usr/share/novnc 6080 localhost:5900 >>/tmp/websockify.log 2>&1 &
 # DESK_DEBUG=1 (docker run -e, or on cased to cover every desktop): mirror the
 # in-container logs to docker logs
 [ "$DESK_DEBUG" = "1" ] && tail -n +1 -F /tmp/chromium.log /tmp/websockify.log 2>/dev/null &
