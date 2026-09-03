@@ -17,13 +17,14 @@ Status: pending → validating → completed|failed; TTL → expired. All status
 writes go through store.transition_handoff (CAS + revision bump). Legacy
 `answered` is treated as completed on read for one release.
 """
+import hmac
 import os
 
 import assist
 import captcha
 from datetime import datetime, timezone
 
-from config import HANDOFF_TTL, log
+from config import API_BASE, HANDOFF_TTL, log
 from deskclient import auth_submit_challenge, desk_json, eval_js, screenshot_b64
 from errors import ApiError
 from events import emit
@@ -139,6 +140,9 @@ def create_handoff(computer_row, kind, prompt, screenshot=None, login_credential
     assist_url = f"https://{host}/assist/{raw_token}" if host else ""
     if not host:
         log.warning("CASE_PUBLIC_HOST unset — notification carries no assist link")
+    answer_url = ""
+    if kind == "approval":
+        answer_url = f"{API_BASE.removesuffix('/v1')}/answer/{hid}/{store.sign('answer:' + hid)}"
     notifier.notify({
         "id": hid,
         "computer_id": computer_row["id"],
@@ -147,6 +151,7 @@ def create_handoff(computer_row, kind, prompt, screenshot=None, login_credential
         "screenshot": screenshot,
         "domain": domain,
         "assist_url": assist_url,
+        "answer_url": answer_url,
         "expires_at": expires_at,
     }, computer_row["name"])
     return handoff_json(row)
@@ -444,6 +449,17 @@ def answer_handoff(hid, value):
                        "verify_page handoff expects value 'done' (or 'approve')")
     raise ApiError(400, "bad_request",
                    f"handoff continuation {cont!r} cannot be answered this way")
+
+
+def answer_token_ok(hid, token):
+    return hmac.compare_digest(store.sign("answer:" + hid), token or "")
+
+
+def answer_by_token(hid, token, value):
+    """Public ntfy-button door: the token is the only credential, so a bad one is a 404."""
+    if not answer_token_ok(hid, token):
+        raise ApiError(404, "not_found", "no such handoff")
+    return answer_handoff(hid, value)
 
 
 def on_ntfy_answer(hid, value):

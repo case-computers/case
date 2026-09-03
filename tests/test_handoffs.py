@@ -25,6 +25,9 @@ ROW = {"id": "c_1", "name": "ava", "state": "running"}
 # guarantee — stub it so these tests can never publish a real handoff to a real phone.
 handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
 
+# Approval handoffs sign their ntfy answer URL with store.sign (WP-B).
+mock.patch.object(store, "sign", lambda text: "sig-" + text, create=True).start()
+
 
 def _cleanup(*ids):
     for hid in ids or IDS:
@@ -47,6 +50,20 @@ def _persist(hid, kind, prompt, login_credential=None, domain=None, **kw):
     if login_credential:
         handoffs.LOGIN_CTX[hid] = {"computer_id": "c_1", "credential": login_credential}
     return store.get_handoff(hid)
+
+
+def test_only_approvals_carry_a_signed_answer_url():
+    _cleanup()
+    seen = []
+    handoffs.notifier = type("N", (), {"notify": lambda self, h, name: seen.append(h)})()
+    try:
+        _mk(ROW, "approval", "ok?")
+        _mk(ROW, "question", "who?")
+        assert seen[0]["answer_url"].endswith(f"/answer/{seen[0]['id']}/sig-answer:{seen[0]['id']}")
+        assert seen[1]["answer_url"] == ""
+    finally:
+        handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
+        _cleanup()
 
 
 def test_rebuild_login_ctx_recovers_pending_login_handoff():
