@@ -77,6 +77,28 @@ def test_unauthorized_calls_leave_no_audit_line():
     _tokened(check)
 
 
+def test_oversized_upload_is_refused_before_the_desktop_wakes():
+    # The body is buffered whole, so the cap has to fire on Content-Length —
+    # nothing is mocked here because nothing downstream is reached.
+    os.environ.pop("CASE_TOKEN", None)
+    r = _client().put("/v1/computers/c_x/files?path=/x", content=b"",
+                      headers={"Content-Length": "9999999"})
+    assert r.status_code == 413, r.text
+
+
+def test_login_url_must_be_https():
+    # login posts the vault's plaintext to the desktop; over http:// the target site
+    # sees it on the wire.
+    from unittest import mock
+    os.environ.pop("CASE_TOKEN", None)
+    with mock.patch.object(cased.lifecycle, "ensure_running", return_value={"id": "c_x"}), \
+         mock.patch.object(cased.store, "credential_material", return_value={"name": "a"}):
+        r = _client().post("/v1/computers/c_x/login",
+                           json={"credential": "a", "url": "http://x"})
+    assert r.status_code == 400, r.text
+    assert "https" in r.json()["error"]["message"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

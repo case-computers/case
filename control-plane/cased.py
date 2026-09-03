@@ -479,9 +479,18 @@ def tabs_(cid: str, body: dict = Body(default={}), wake: bool = False):
                            target_id=body.get("target_id"), url=body.get("url"))
 
 
+FILE_MAX = 8 * 1024 * 1024   # the body is buffered whole, so this is cased's RSS too
+
+
 @app.put("/v1/computers/{cid}/files", status_code=201)
 async def file_put(cid: str, path: str, request: Request, wake: bool = False):
+    if int(request.headers.get("content-length") or 0) > FILE_MAX:
+        raise ApiError(413, "too_large", "file over 8MB")
     data = await request.body()
+    return await asyncio.to_thread(_file_put, cid, path, data, wake)
+
+
+def _file_put(cid, path, data, wake):
     with awake(cid, wake) as row:
         return desk_json(row, "PUT", "/file", params={"path": path}, data=data, timeout=120)
 
@@ -694,26 +703,36 @@ def assist_state(token: str, request: Request):
     return JSONResponse(assist.state_payload(view), headers=headers)
 
 
+async def _assist_form(token, request):
+    """The preamble every assist POST shares: CSRF, session cookie, a still-live
+    view, and the urlencoded body. Returns (sess, view, form, expected_revision),
+    or the HTMLResponse to send back instead."""
+    if not assist.check_same_origin(request):
+        raise ApiError(403, "csrf", "missing or mismatched Origin")
+    gone = HTMLResponse(assist.GONE_HTML, status_code=410,
+                        headers={"Cache-Control": "no-store"})
+    sess = _assist_cookie(request)
+    if not sess:
+        return gone
+    try:
+        view, _ = assist.resolve_view(token, request.headers.get("cookie", ""))
+    except ApiError:
+        return gone
+    form = assist.parse_form(await request.body())
+    rev = form.get("expected_revision")
+    return sess, view, form, int(rev) if rev not in (None, "") else None
+
+
 @app.post("/assist/{token}/open")
 async def assist_open(token: str, request: Request):
     """Navigate remote Chromium to a pastable HTTPS URL (allowlisted hosts only)."""
-    if not assist.check_same_origin(request):
-        raise ApiError(403, "csrf", "missing or mismatched Origin")
-    sess = _assist_cookie(request)
-    if not sess:
-        return HTMLResponse(assist.GONE_HTML, status_code=410,
-                            headers={"Cache-Control": "no-store"})
+    got = await _assist_form(token, request)
+    if isinstance(got, HTMLResponse):
+        return got
+    sess, _, form, expected = got
     try:
-        assist.resolve_view(token, request.headers.get("cookie", ""))
-    except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410,
-                            headers={"Cache-Control": "no-store"})
-    form = assist.parse_form(await request.body())
-    url = (form.get("url") or "").strip()
-    rev = form.get("expected_revision")
-    expected = int(rev) if rev not in (None, "") else None
-    try:
-        assist.open_with_session(sess, url, expected_revision=expected)
+        await asyncio.to_thread(assist.open_with_session, sess,
+                                (form.get("url") or "").strip(), expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
             return HTMLResponse(assist.GONE_HTML, status_code=410,
@@ -728,27 +747,20 @@ async def assist_open(token: str, request: Request):
 @app.post("/assist/{token}/submit")
 async def assist_submit(token: str, request: Request):
     """OTP / submit_value, auth is the case_assist session cookie."""
-    if not assist.check_same_origin(request):
-        raise ApiError(403, "csrf", "missing or mismatched Origin")
-    sess = _assist_cookie(request)
-    if not sess:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
-    try:
-        view, _ = assist.resolve_view(token, request.headers.get("cookie", ""))
-    except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
+    got = await _assist_form(token, request)
+    if isinstance(got, HTMLResponse):
+        return got
+    sess, view, form, expected = got
     if "submit_value" not in view["allowed_actions"]:
         return HTMLResponse(
             assist.render_page(view, token),
             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-    form = assist.parse_form(await request.body())
     value = (form.get("value") or "").strip()
     if not value:
         raise ApiError(400, "bad_request", "value is required")
-    rev = form.get("expected_revision")
-    expected = int(rev) if rev not in (None, "") else None
     try:
-        row = assist.submit_with_session(sess, value, expected_revision=expected)
+        row = await asyncio.to_thread(assist.submit_with_session, sess, value,
+                                      expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
             return HTMLResponse(assist.GONE_HTML, status_code=410)
@@ -767,20 +779,13 @@ async def assist_submit(token: str, request: Request):
 @app.post("/assist/{token}/done")
 async def assist_done(token: str, request: Request):
     """CAPTCHA / verify_page, human cleared the live desk challenge."""
-    if not assist.check_same_origin(request):
-        raise ApiError(403, "csrf", "missing or mismatched Origin")
-    sess = _assist_cookie(request)
-    if not sess:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
+    got = await _assist_form(token, request)
+    if isinstance(got, HTMLResponse):
+        return got
+    sess, _, _, expected = got
     try:
-        assist.resolve_view(token, request.headers.get("cookie", ""))
-    except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
-    form = assist.parse_form(await request.body())
-    rev = form.get("expected_revision")
-    expected = int(rev) if rev not in (None, "") else None
-    try:
-        row = assist.done_with_session(sess, expected_revision=expected)
+        row = await asyncio.to_thread(assist.done_with_session, sess,
+                                      expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
             return HTMLResponse(assist.GONE_HTML, status_code=410)
@@ -865,8 +870,8 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
     material = store.credential_material(cid, name)
     if not material:
         raise ApiError(404, "not_found", f"no credential {name!r}")
-    if not body.get("url"):
-        raise ApiError(400, "bad_request", "missing 'url'")
+    if not str(body.get("url", "")).startswith("https://"):
+        raise ApiError(400, "bad_request", "url must be https")
 
     proof_spec = login_flow._credential_proof_spec(cid, name, body.get("proof_spec"))
     attempt = auth_attempts.start_attempt(
