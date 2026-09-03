@@ -179,6 +179,7 @@ def _attempt_id_of(row):
 
 def expire_stale():
     cutoff = (datetime.now(timezone.utc) - HANDOFF_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+    import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
     for h in store.stale_pending_handoffs(cutoff):
         if store.transition_handoff(h["id"], "expired") is None:
             continue   # another writer (answer/resume) won the race; not ours to expire
@@ -187,7 +188,6 @@ def expire_stale():
         if aid:
             # Attempt owns credential outcome, do not double-write from LOGIN_CTX.
             try:
-                import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
                 auth_attempts.fail_attempt(aid, reason="handoff_expired")
             except Exception as e:
                 log.warning("expire_stale fail_attempt %s: %s", aid, e)
@@ -197,7 +197,6 @@ def expire_stale():
             store.record_credential_result(ctx["computer_id"], ctx["credential"], "failed")
             emit("login_completed", {"computer_id": ctx["computer_id"],
                                      "credential": ctx["credential"], "status": "failed"})
-    import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
     # An attempt whose challenge was answered elsewhere (or never raised one) has no
     # handoff to expire, so it would sit `active` forever and 409 every later login.
     for a in store.stale_active_auth_attempts(cutoff):
