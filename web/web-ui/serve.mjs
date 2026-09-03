@@ -29,6 +29,21 @@ const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
 const BIND = process.env.CASE_BIND || '127.0.0.1';
 const TOKEN = (process.env.CASE_TOKEN || '').trim();
+const HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', 'ui',
+  ...(process.env.CASE_ALLOWED_HOSTS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  ...((process.env.CASE_PUBLIC_HOST || '').trim() ? [process.env.CASE_PUBLIC_HOST.trim().toLowerCase()] : [])]);
+export function hostOf(v) {
+  v = String(v || '').toLowerCase();
+  return v.startsWith('[') ? v.slice(0, v.indexOf(']') + 1) : v.split(':')[0];
+}
+// Host must be ours, and so must a present Origin: the two together stop DNS
+// rebinding, cross-site form posts and cross-site websocket opens.
+export function browserOk(req, hosts = HOSTS) {
+  if (!hosts.has(hostOf(req.headers.host))) return false;
+  const o = req.headers.origin;
+  if (!o) return true;
+  try { return hosts.has(hostOf(new URL(o).host)); } catch { return false; }
+}
 
 export function parseCaseUrl(raw) {
   const u = new URL(String(raw || 'http://127.0.0.1:8787'));
@@ -1518,6 +1533,21 @@ export function pageFile(p) {
 export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://x');
   const p = url.pathname;
+  if (!browserOk(req)) return json(res, 403, { error: 'unexpected Host or Origin' });
+  if (TOKEN && req.method === 'GET' && url.searchParams.has('token') && tokenMatches(req)) {
+    res.writeHead(302, {
+      Location: p === '/' ? '/' : p,
+      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+      'Cache-Control': 'no-store',
+    });
+    return res.end();
+  }
+  if (!tokenMatches(req)) {
+    if (p.startsWith('/api/') || p.startsWith('/live')) {
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    return send(res, 401, 'unauthorized — open with ?token=…');
+  }
   if (p === '/api/health' && req.method === 'GET') {
     try {
       const h = await originHealth();
@@ -1531,20 +1561,6 @@ export const server = http.createServer(async (req, res) => {
     } catch {
       return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0 });
     }
-  }
-  if (TOKEN && url.searchParams.get('token') === TOKEN && req.method === 'GET') {
-    res.writeHead(302, {
-      Location: p === '/' ? '/' : p,
-      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
-      'Cache-Control': 'no-store',
-    });
-    return res.end();
-  }
-  if (!tokenMatches(req)) {
-    if (p.startsWith('/api/') || p.startsWith('/live')) {
-      return json(res, 401, { error: 'unauthorized' });
-    }
-    return send(res, 401, 'unauthorized — open with ?token=…');
   }
   try {
     if (req.method === 'GET' && p === '/api/computers') return computers(res);
@@ -1577,7 +1593,7 @@ export const server = http.createServer(async (req, res) => {
   send(res, 200, fs.readFileSync(abs), mimeFor(abs));
 });
 server.on('upgrade', (req, socket, head) => {
-  if (!tokenMatches(req)) { socket.destroy(); return; }
+  if (!browserOk(req) || !tokenMatches(req)) { socket.destroy(); return; }
   if ((req.url || '').startsWith('/live')) return vncWs(req, socket, head);
   socket.destroy();
 });
