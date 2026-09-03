@@ -197,6 +197,14 @@ def expire_stale():
             store.record_credential_result(ctx["computer_id"], ctx["credential"], "failed")
             emit("login_completed", {"computer_id": ctx["computer_id"],
                                      "credential": ctx["credential"], "status": "failed"})
+    import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
+    # An attempt whose challenge was answered elsewhere (or never raised one) has no
+    # handoff to expire, so it would sit `active` forever and 409 every later login.
+    for a in store.stale_active_auth_attempts(cutoff):
+        try:
+            auth_attempts.fail_attempt(a["id"], reason="stale")
+        except Exception as e:
+            log.warning("expire_stale attempt %s: %s", a["id"], e)
 
 
 # Lists never carry the screenshot. A pending 2FA handoff holds a full-display PNG as

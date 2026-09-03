@@ -22,6 +22,11 @@ from store import store  # noqa: E402
 # Never publish a real handoff notify from unit tests.
 handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
 
+# WP-B store helpers, mocked until that branch merges: approvals sign their ntfy
+# answer URL, and expire_stale reaps abandoned attempts.
+store.sign = lambda text: "sig-" + text
+store.stale_active_auth_attempts = lambda cutoff: []
+
 COMP = {"id": "c_1", "name": "ava", "state": "running"}
 
 
