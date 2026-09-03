@@ -5,8 +5,8 @@
  * Serves Drive at / (index.html) and the computer deployer at /deploy.
  *
  * CASE_LOCAL (default on): 127.0.0.1 / compose `cased` — no SSH tunnel, /live
- * proxies noVNC on the host port or docker network. CASE_LOCAL=0 is a no-op
- * here (this process never tunnels); it only flips the health `local` flag.
+ * relays noVNC through cased. CASE_LOCAL=0 is a no-op here (this process never
+ * tunnels); it only flips the health `local` flag.
  *
  * OpenAI key arrives per-request in x-openai-key; Anthropic in x-anthropic-key;
  * never logged.
@@ -101,15 +101,6 @@ export function tokenMatches(req, need = TOKEN) {
   }
   if (!got || got.length !== need.length) return false;
   return crypto.timingSafeEqual(Buffer.from(got), Buffer.from(need));
-}
-
-const vncById = new Map();
-export function liveTarget(cid) {
-  if (!cid) return null;
-  if ((process.env.CASE_DOCKER_NETWORK || '').trim()) return { hostname: `case-${cid}`, port: 6080 };
-  const port = vncById.get(cid);
-  if (port) return { hostname: '127.0.0.1', port };
-  return null;
 }
 
 // ---------- small helpers (exported for tests) ----------
@@ -217,14 +208,11 @@ async function computers(res) {
       originHealth().catch(() => ({ json: null })),
     ]);
     if (r.status >= 400 || !r.json) return json(res, 502, { error: r.json?.error?.message || 'cased unreachable', up: false, local: LOCAL });
-    const rows = (r.json.computers || []).map((c) => {
-      if (c.id && c.vnc_port) vncById.set(c.id, c.vnc_port);
-      return {
-        id: c.id, name: c.name, state: c.state === 'running' ? 'awake' : c.state,
-        credentials: c.credentials || [], pending_handoffs: c.pending_handoffs || 0,
-        cpus: c.resources?.cpus ?? null, ram_mb: c.resources?.ram_mb ?? null,
-      };
-    });
+    const rows = (r.json.computers || []).map((c) => ({
+      id: c.id, name: c.name, state: c.state === 'running' ? 'awake' : c.state,
+      credentials: c.credentials || [], pending_handoffs: c.pending_handoffs || 0,
+      cpus: c.resources?.cpus ?? null, ram_mb: c.resources?.ram_mb ?? null,
+    }));
     const pick = rows.find((c) => c.state === 'awake') || rows[0];
     if (pick) cachedCid = pick.id;
     const awake = ['awake', 'running', 'waking', 'creating'];
@@ -1484,20 +1472,29 @@ export function startPhoneTelegram(env = process.env) {
   return true;
 }
 
-// ---------- noVNC proxy (compose network or host-mapped vnc_port) ----------
+// ---------- live view (relayed by cased; only cased touches desktops) ----------
+const LIVE_PASS = ['accept', 'accept-language', 'user-agent', 'if-none-match', 'if-modified-since'];
+const LIVE_WS_PASS = ['connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version',
+  'sec-websocket-protocol', 'sec-websocket-extensions'];
+// Allowlist, not {...req.headers}: the browser's Drive cookie/Authorization are
+// Drive's credentials and must not ride upstream.
+export function liveHeaders(req, ws = false, token = TOKEN) {
+  const out = { host: `${CASE.hostname}:${CASE.port}` };
+  for (const k of ws ? [...LIVE_PASS, ...LIVE_WS_PASS] : LIVE_PASS) if (req.headers[k] != null) out[k] = req.headers[k];
+  if (token) out.authorization = `Bearer ${token}`;
+  return out;
+}
 function vncUpstream(req) {
   if (livePathHasDotDot(req.url)) return null;
   const destPath = liveDestPath(req.url);
-  if (destPath.includes('..')) return null;
   const cid = liveCid(new URL(req.url || '/', 'http://x').pathname) || cachedCid;
-  const t = liveTarget(cid);
-  if (!t) return null;
-  return { ...t, path: destPath, hostHeader: `${t.hostname}:${t.port}` };
+  if (!cid) return null;
+  return { hostname: CASE.hostname, port: CASE.port, path: `/v1/computers/${encodeURIComponent(cid)}/live${destPath}` };
 }
 function vncHttp(req, res) {
   const t = vncUpstream(req);
   if (!t) { res.writeHead(502).end('no computer / vnc'); return; }
-  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: req.method, headers: { ...req.headers, host: t.hostHeader } }, (upRes) => {
+  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: req.method, headers: liveHeaders(req) }, (upRes) => {
     res.writeHead(upRes.statusCode || 502, upRes.headers);
     upRes.pipe(res);
   });
@@ -1507,7 +1504,7 @@ function vncHttp(req, res) {
 function vncWs(req, socket, head) {
   const t = vncUpstream(req);
   if (!t) { socket.destroy(); return; }
-  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: 'GET', headers: { ...req.headers, host: t.hostHeader } });
+  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: 'GET', headers: liveHeaders(req, true) });
   up.on('upgrade', (upRes, upSocket, upHead) => {
     const lines = ['HTTP/1.1 101 Switching Protocols'];
     for (const [k, v] of Object.entries(upRes.headers)) lines.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);

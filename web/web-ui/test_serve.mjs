@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
+import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
@@ -140,11 +140,20 @@ assert.ok(tokenMatches({ headers: { authorization: 'Bearer secret' }, url: '/' }
 assert.ok(tokenMatches({ headers: { cookie: 'case_token=secret' }, url: '/' }, 'secret'));
 assert.ok(tokenMatches({ headers: {}, url: '/?token=secret' }, 'secret'));
 
-process.env.CASE_DOCKER_NETWORK = 'case';
-assert.deepEqual(liveTarget('c_abc12'), { hostname: 'case-c_abc12', port: 6080 });
-delete process.env.CASE_DOCKER_NETWORK;
-assert.equal(liveTarget('c_abc12'), null);
-assert.equal(liveTarget(''), null);
+{
+  const h = liveHeaders({ headers: { cookie: 'case_token=s', accept: '*/*' } }, false, 'tok');
+  assert.equal(h.authorization, 'Bearer tok');
+  assert.equal(h.cookie, undefined);
+  assert.equal(h.accept, '*/*');
+}
+
+assert.equal(hostOf('[::1]:4174'), '[::1]');
+assert.equal(hostOf('127.0.0.1:4174'), '127.0.0.1');
+assert.ok(browserOk({ headers: { host: '[::1]:4174' } }));
+assert.ok(browserOk({ headers: { host: 'localhost:4174' } }), 'no Origin is a same-site navigation');
+assert.ok(browserOk({ headers: { host: 'localhost:4174', origin: 'http://127.0.0.1:4174' } }));
+assert.ok(!browserOk({ headers: { host: 'localhost:4174', origin: 'https://evil.example' } }));
+assert.ok(!browserOk({ headers: { host: 'evil.example' } }), 'DNS rebinding');
 
 const loginPlan = extraPlan('computer_login', { credential: 'x.com', url: 'https://x.com' }, 'c_ab');
 assert.equal(loginPlan.method, 'POST');
