@@ -24,10 +24,12 @@ def test_vis_rejects_opacity_zero_and_zero_size():
     assert "opacity" in deskd.VIS
     assert "getBoundingClientRect" in deskd.VIS
     assert "visibility" in deskd.VIS
-    # Observe uses its own vis helper; keep the same opacity/rect guards there.
+    # Observe is built from VIS and the shared selectors, not a retyped copy.
     assert "opacity" in deskd.OBSERVE_AUTH_JS
     assert "getBoundingClientRect" in deskd.OBSERVE_AUTH_JS
     assert "visibility" in deskd.OBSERVE_AUTH_JS
+    assert deskd.USER_SEL in deskd.OBSERVE_AUTH_JS
+    assert deskd.CODE_SEL in deskd.OBSERVE_AUTH_JS
 
 
 def test_focus_helpers_select_before_insert():
@@ -454,6 +456,101 @@ def test_capture_step_getResponseBody_error_is_visible():
     deskd.capture_step(reply, re.compile("x"), want, pending, buf)
     assert buf[0]["error"] == "No data found for resource" and "body" not in buf[0]
 
+
+# ---- the injection gate and /file scoping, over the real ASGI app ----
+
+import tempfile  # noqa: E402
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+H = {"Authorization": "Bearer test"}
+
+
+def _client():
+    return TestClient(deskd.app, raise_server_exceptions=False)
+
+
+def test_no_bearer_is_401():
+    assert _client().get("/health").status_code == 401
+    assert _client().get("/health", headers=H).status_code == 200
+
+
+def test_injection_gates_screenshot_exec_and_file():
+    deskd.state["injecting"] = True
+    try:
+        c = _client()
+        for r in (c.get("/screenshot", headers=H),
+                  c.post("/exec", headers=H, json={"command": "id"}),
+                  c.get("/file", headers=H, params={"path": "/home/agent/x"})):
+            assert r.status_code == 423
+            assert r.json()["error"]["code"] == "credential_injection"
+    finally:
+        deskd.state["injecting"] = False
+
+
+def test_file_get_rejects_paths_outside_home():
+    c = _client()
+    assert c.get("/file", headers=H, params={"path": "/etc/passwd"}).status_code == 400
+    esc = c.get("/file", headers=H, params={"path": "/home/agent/../../etc/passwd"})
+    assert esc.status_code == 400                          # realpath resolves .. before the check
+    assert esc.json()["error"]["code"] == "bad_path"
+
+
+def test_file_put_get_roundtrip_under_home():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            c = _client()
+            p = f"{home}/sub/note.txt"
+            put = c.put("/file", headers=H, params={"path": p}, content=b"hello")
+            assert put.status_code == 201 and put.json()["bytes"] == 5
+            got = c.get("/file", headers=H, params={"path": p})
+            assert got.status_code == 200 and got.content == b"hello"
+
+
+def test_file_put_rejects_oversized_content_length():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            r = _client().put("/file", headers={**H, "content-length": "99999999"},
+                              params={"path": f"{home}/big"}, content=b"x")
+            assert r.status_code == 413
+            assert not os.path.exists(f"{home}/big")       # rejected before any write
+
+
+# ---- login clears the typed password before the injection gate drops ----
+
+class RecordingTab:
+    """Records every js() with the gate state at that moment."""
+
+    def __init__(self):
+        self.js_calls = []
+
+    def js(self, expr):
+        self.js_calls.append((expr, deskd.state["injecting"]))
+        return None
+
+    def cmd(self, *a, **k):
+        return {}
+
+    def close(self):
+        pass
+
+
+def test_login_clears_password_field_while_still_gated():
+    # A failed submit leaves the secret in the DOM; clearing it after injecting
+    # goes False would expose it to /screenshot and /eval in between.
+    tab = RecordingTab()
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "navigate"), \
+         mock.patch.object(deskd, "domain_ok", return_value=True), \
+         mock.patch.object(deskd, "fill_login_form", return_value=None), \
+         mock.patch.object(deskd, "wait_post_submit"), \
+         mock.patch.object(deskd, "classify", return_value={"status": "success"}):
+        out = deskd.login({"credential": {"name": "x"}, "url": "https://site.com/login"})
+    assert out == {"status": "success"}, out
+    assert (deskd.CLEAR_PASS, True) in tab.js_calls, tab.js_calls
+    assert deskd.state["injecting"] is False
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
