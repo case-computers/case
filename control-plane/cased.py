@@ -8,6 +8,7 @@ in the modules it delegates to — lifecycle, handoffs, scheduler, deskclient,
 dockerd, store, events.
 """
 import asyncio
+import base64
 from contextlib import asynccontextmanager, contextmanager
 import hmac
 import html
@@ -16,12 +17,14 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
+import requests
 import uvicorn
-from fastapi import Body, FastAPI, Query, Request
+from fastapi import Body, FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from websockets.asyncio.client import connect as ws_connect
 
 import auth_attempts
 import captcha
@@ -837,6 +840,68 @@ def desk_check_ep(request: Request):
         "Set-Cookie": (f"case_desk={set_tok}; Path=/desk; Max-Age={links.seconds_left(link)}; "
                        "Secure; HttpOnly; SameSite=Lax"),
         "Cache-Control": "no-store"})
+
+
+# ---------- live view (noVNC, relayed) ----------
+
+def live_upstream(row):
+    """(base_url, headers) for a computer's noVNC: same dial deskclient uses for deskd."""
+    auth = base64.b64encode(f"agent:{row['desk_token']}".encode()).decode()
+    return dockerd.desk_base(row["id"], row["vnc_port"]), {"Authorization": f"Basic {auth}"}
+
+
+def live_path_ok(path):
+    return ".." not in path and ".." not in unquote(path)   # Starlette decoded once already
+
+
+@app.get("/v1/computers/{cid}/live/{path:path}")
+def live_http(cid: str, path: str, request: Request):
+    """noVNC's static files, relayed so Drive never needs the desks network."""
+    if not live_path_ok(path):
+        raise ApiError(400, "bad_request", "bad path")
+    base, headers = live_upstream(lifecycle.ensure_running(cid, False))
+    q = request.url.query
+    r = requests.get(f"{base}/{path}" + (f"?{q}" if q else ""), headers=headers, timeout=15)
+    return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"))
+
+
+@app.websocket("/v1/computers/{cid}/live/websockify")
+async def live_ws(ws: WebSocket, cid: str):
+    # token_guard is HTTP-only middleware; this is the only bearer check on the socket.
+    if not bearer_ok(ws.headers.get("authorization")):
+        await ws.close(code=1008)
+        return
+    try:
+        base, headers = live_upstream(lifecycle.ensure_running(cid, False))
+    except ApiError:
+        await ws.close(code=1011)
+        return
+    subs = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    # max_size=None: a full-screen framebuffer update is larger than the 1 MiB default.
+    async with ws_connect("ws" + base[4:] + "/websockify", additional_headers=headers,
+                          subprotocols=subs or None, max_size=None) as up:
+        await ws.accept(subprotocol=up.subprotocol)
+
+        async def to_desk():
+            try:
+                while True:
+                    m = await ws.receive()
+                    if m["type"] != "websocket.receive":
+                        break
+                    await up.send(m["bytes"] if m.get("bytes") is not None else m["text"])
+            finally:
+                await up.close()
+
+        pump = asyncio.create_task(to_desk())
+        try:
+            async for msg in up:
+                await ws.send_bytes(msg if isinstance(msg, bytes) else msg.encode())
+        finally:
+            pump.cancel()
+            try:
+                await ws.close()
+            except RuntimeError:
+                pass   # peer already closed
 
 
 @app.get("/v1/auth-attempts/{aid}")

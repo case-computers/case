@@ -99,6 +99,34 @@ def test_login_url_must_be_https():
     assert "https" in r.json()["error"]["message"]
 
 
+def test_live_relay_needs_the_bearer_on_both_halves():
+    # HTTP middleware never sees a websocket scope, so the socket has to check the
+    # token itself or the desktop is one upgrade away from anyone.
+    from starlette.websockets import WebSocketDisconnect
+
+    def check():
+        c = _client()
+        assert c.get("/v1/computers/c_x/live/vnc.html").status_code == 401
+        try:
+            with c.websocket_connect("/v1/computers/c_x/live/websockify"):
+                assert False, "socket accepted without a bearer"
+        except WebSocketDisconnect as e:
+            assert e.code == 1008, e.code
+    _tokened(check)
+
+
+def test_live_upstream_dials_the_desk_with_websockify_basic_auth():
+    import base64
+    os.environ.pop("CASE_DOCKER_NETWORK", None)
+    base, headers = cased.live_upstream({"id": "c_x", "vnc_port": 32771, "desk_token": "t0k"})
+    assert base == "http://127.0.0.1:32771"
+    assert headers == {"Authorization": "Basic " + base64.b64encode(b"agent:t0k").decode()}
+    # the relay forwards the tail of the URL verbatim, so traversal has to die here
+    assert cased.live_path_ok("vnc.html")
+    assert not cased.live_path_ok("../../etc/passwd")
+    assert not cased.live_path_ok("%2e%2e/x")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
