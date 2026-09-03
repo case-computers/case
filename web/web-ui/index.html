@@ -1009,7 +1009,7 @@ $('flist').addEventListener('click',e=>{
   if(f)openFile(f.dataset.file);
 });
 const TEXT_RE=/\.(md|txt|json|js|mjs|ts|py|sh|ya?ml|toml|csv|log|html?|css|xml|svg|conf|cfg|ini|env|lock)$|^[^.]+$/i;
-const IMG_RE=/\.(png|jpe?g|gif|webp|svg)$/i;
+const IMG_RE=/\.(png|jpe?g|gif|webp)$/i;
 let fileGen=0;
 async function openFile(p){
   const gen=++fileGen;

@@ -155,6 +155,15 @@ assert.ok(browserOk({ headers: { host: 'localhost:4174', origin: 'http://127.0.0
 assert.ok(!browserOk({ headers: { host: 'localhost:4174', origin: 'https://evil.example' } }));
 assert.ok(!browserOk({ headers: { host: 'evil.example' } }), 'DNS rebinding');
 
+// A file off the computer is a download, never a page.
+{
+  const src = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  const fn = src.slice(src.indexOf('async function fsFile('), src.indexOf('async function creds('));
+  assert.match(fn, /'application\/octet-stream'/);
+  assert.match(fn, /'x-content-type-options': 'nosniff'/);
+  assert.ok(!/svg/.test(html.match(/const IMG_RE=[^\n]*/)[0]), 'svg previews as text, not as an image');
+}
+
 const loginPlan = extraPlan('computer_login', { credential: 'x.com', url: 'https://x.com' }, 'c_ab');
 assert.equal(loginPlan.method, 'POST');
 assert.equal(loginPlan.rel, '/computers/c_ab/login?wake=true');

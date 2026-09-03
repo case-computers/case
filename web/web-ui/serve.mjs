@@ -285,7 +285,14 @@ async function fsFile(res, url) {
       return json(res, r.status, { error: msg });
     }
     if (r.buf.length > FILE_CAP) return json(res, 413, { error: 'file over 8MB' });
-    return send(res, 200, r.buf, mimeFor(p));
+    const ext = path.extname(p).toLowerCase();
+    const inline = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'].includes(ext);
+    res.writeHead(200, {
+      'content-type': inline ? mimeFor(p) : 'application/octet-stream',
+      'content-disposition': inline ? 'inline' : `attachment; filename="${path.basename(p).replace(/["\r\n]/g, '')}"`,
+      'x-content-type-options': 'nosniff', 'cache-control': 'no-store',
+    });
+    return res.end(r.buf);
   } catch (err) {
     return json(res, 502, { error: err.message || 'cased unreachable' });
   }
