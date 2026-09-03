@@ -157,6 +157,43 @@ def test_sleep_all_parks_awake_computers_and_survives_a_failure():
         store.delete_computer(stuck)
 
 
+def test_vault_directory_and_database_are_private():
+    # ~/.case holds the Fernet key and every encrypted secret. An install that
+    # predates this (or a loose umask) leaves them world-readable.
+    import shutil
+    from store import Store
+    home = "/tmp/case-perms-test"
+    shutil.rmtree(home, ignore_errors=True)
+    os.makedirs(home, mode=0o755)                  # the permissive dir an upgrade inherits
+    try:
+        Store(home)
+        assert os.stat(home).st_mode & 0o777 == 0o700
+        assert os.stat(os.path.join(home, "case.db")).st_mode & 0o777 == 0o600
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_destroy_takes_the_schedules_with_it():
+    # An orphaned schedule keeps firing against a deleted computer, and every run
+    # fails on a row that is no longer there.
+    import lifecycle
+    cid, sid = "c_unittest_destroy_sched", "s_unittest_destroy_sched"
+    store.delete_computer(cid)
+    store.delete_schedule(sid)
+    real = lifecycle.dockerd.destroy_infra
+    lifecycle.dockerd.destroy_infra = lambda cid, volume: None
+    try:
+        store.insert_computer(cid, "doomed", "img", 1, 512, "vol-d", "tok-d")
+        store.set_state(cid, "running")
+        store.insert_schedule(sid, cid, "nightly", "do a thing", "cron", "0 3 * * *", 0, None)
+        lifecycle.destroy(cid)
+        assert store.get_schedule(sid) is None
+    finally:
+        lifecycle.dockerd.destroy_infra = real
+        store.delete_schedule(sid)
+        store.delete_computer(cid)
+
+
 def test_health_exposes_awake_cap():
     import cased
     from types import SimpleNamespace

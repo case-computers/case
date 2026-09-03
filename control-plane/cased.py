@@ -192,8 +192,9 @@ async def audit_mw(request: Request, call_next):
 
 
 def _audit_append(line):
-    os.makedirs(AUDIT_DIR, exist_ok=True)
-    with open(os.path.join(AUDIT_DIR, time.strftime("%Y-%m-%d") + ".jsonl"), "a") as f:
+    os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
+    p = os.path.join(AUDIT_DIR, time.strftime("%Y-%m-%d") + ".jsonl")
+    with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as f:
         f.write(json.dumps(line) + "\n")
 
 

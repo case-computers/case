@@ -166,6 +166,7 @@ def destroy(cid):
     row = get_computer(cid)
     dockerd.destroy_infra(cid, row["volume"])
     store.delete_credentials(cid)
+    store.delete_schedules_for(cid)
     # deletion is terminal and the infra is already gone, force it, so a concurrent
     # wake that moved the row to 'waking' can't leave it un-deleted.
     _force_state(cid, row["state"], "deleted")
