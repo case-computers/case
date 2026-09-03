@@ -1028,7 +1028,9 @@ def sweeper():
                 prune_old_audit_files()
                 store.prune_terminal_handoffs(cutoff)
             scheduler.fire_due_schedules(_spawn)
-            session_keeper.tick()      # preflight persistent session health
+            # preflight persistent session health: it drives desks over the network,
+            # and a hung one must not stall reconcile or the schedule fire loop
+            threading.Thread(target=session_keeper.tick, daemon=True).start()
         except Exception:
             log.exception("sweeper")
 
