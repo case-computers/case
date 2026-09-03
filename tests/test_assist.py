@@ -389,12 +389,12 @@ def test_repeat_submit_on_terminal_attempt_renders_status_not_expired():
 
     import cased
     from fastapi.testclient import TestClient
-    client = TestClient(cased.app, raise_server_exceptions=False)
+    client = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
     response = client.post(
         f"/assist/{raw}/submit",
         data={"value": "123456", "expected_revision": "1"},
         cookies={assist.COOKIE: session},
-        headers={"Origin": "http://testserver"})
+        headers={"Origin": "http://127.0.0.1"})
     assert response.status_code == 200, response.text
     assert "Signed in" in response.text
     assert "Link expired" not in response.text
@@ -497,7 +497,7 @@ def test_first_click_of_fresh_link_sets_session_cookie_over_http():
     raw, _ = assist.mint_assist_token("h_otp")
 
     from fastapi.testclient import TestClient
-    client = TestClient(cased.app, raise_server_exceptions=False)
+    client = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
     r = client.get(f"/assist/{raw}")
     assert r.status_code == 200, r.text
     set_cookie = r.headers.get("set-cookie") or ""
@@ -510,7 +510,7 @@ def test_first_click_of_fresh_link_sets_session_cookie_over_http():
     assert r2.status_code == 200, r2.text
     assert assist.COOKIE + "=" not in (r2.headers.get("set-cookie") or "")
     # Burned token, no cookie → 410.
-    bare = TestClient(cased.app, raise_server_exceptions=False)
+    bare = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
     assert bare.get(f"/assist/{raw}").status_code == 410
 
 
