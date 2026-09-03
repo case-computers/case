@@ -143,38 +143,6 @@ def session_cookie_header(session_raw, max_age=None):
             "Secure; HttpOnly; SameSite=Lax")
 
 
-def resolve(raw_token, cookie_header=""):
-    """Auth for /assist/{token}: exchange if needed, else accept matching session cookie.
-
-    Returns (handoff_row, set_session_raw|None). The handoff is the *current*
-    challenge when attempt-scoped. Raises ApiError(410) when nothing works.
-    """
-    cookies = _cookies(cookie_header)
-    sess = cookies.get(COOKIE, "")
-    th = _hash(raw_token)
-    row = store.get_assist_by_token_hash(th)
-
-    # Fresh exchange token → burn and issue session.
-    if row and row["burned_at"] is None and row["expires_at"] > now():
-        session, handoff = exchange(raw_token)
-        view = session_view(session)
-        if view:
-            _bound, current, attempt = view
-            return current or handoff, session
-        return handoff, session
-
-    # Burned exchange (or unknown token): session cookie must match this binding.
-    if sess:
-        view = session_view(sess)
-        if view:
-            bound, current, attempt = view
-            if row and row["handoff_id"] != bound["id"]:
-                raise ApiError(410, "gone", "assist link does not match this session")
-            return current or bound, None
-
-    raise ApiError(410, "gone", "assist link invalid or expired")
-
-
 def resolve_view(raw_token, cookie_header=""):
     """Auth + attempt-scoped view. Returns (view_dict, set_session_raw|None).
 

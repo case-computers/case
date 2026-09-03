@@ -231,17 +231,17 @@ def test_resolve_get_exchanges_then_replay_needs_cookie():
     _cleanup()
     _pending("h_otp", "otp")
     raw, _ = assist.mint_assist_token("h_otp")
-    handoff, set_sess = assist.resolve(raw, cookie_header="")
-    assert handoff["id"] == "h_otp" and set_sess
+    view, set_sess = assist.resolve_view(raw, cookie_header="")
+    assert view["handoff"]["id"] == "h_otp" and set_sess
     # burned exchange alone fails
     try:
-        assist.resolve(raw, cookie_header="")
+        assist.resolve_view(raw, cookie_header="")
         assert False, "burned exchange without cookie must fail"
     except ApiError as e:
         assert e.status == 410
     # same URL + session cookie still opens the page
-    handoff2, set2 = assist.resolve(raw, cookie_header=f"case_assist={set_sess}")
-    assert handoff2["id"] == "h_otp" and set2 is None
+    view2, set2 = assist.resolve_view(raw, cookie_header=f"case_assist={set_sess}")
+    assert view2["handoff"]["id"] == "h_otp" and set2 is None
 
 
 # ---- Wave 3: dynamic phases, state shape, open_url policy, attempt scope ----

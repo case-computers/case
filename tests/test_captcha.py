@@ -1031,7 +1031,7 @@ def test_login_success_ungated_reports_success():
          mock.patch("cased.desk_json", return_value={"status": "success"}), \
          mock.patch("cased.store.touch"), \
          mock.patch("login_flow._post_login_gate", return_value=None), \
-         mock.patch("auth_attempts._check_proof", return_value=True), \
+         mock.patch("auth_attempts.check_proof", return_value=True), \
          mock.patch("cased.store.record_credential_result") as rec, \
          mock.patch("cased.events.emit"):
         out = cased.login("c_1", {
