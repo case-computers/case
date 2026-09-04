@@ -136,7 +136,10 @@ def test_a1_boot():
     shot = save_shot("a1_desktop.png")
     assert shot.status_code == 200
     assert png_dims(shot.content) == (1280, 800)
-    assert len(shot.content) > 30_000, "screenshot suspiciously small — likely a black screen"
+    # A painted xfce desktop measures 22k-25k here; black is 3k, a blank X root 5k,
+    # near-black with noise 9k. 30k sat above every real screenshot on arm64, so it
+    # could never pass. 15k keeps the black-screen catch with margin either side.
+    assert len(shot.content) > 15_000, "screenshot suspiciously small — likely a black screen"
 
 
 # ---------- A2 exec ----------
