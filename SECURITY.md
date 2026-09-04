@@ -34,9 +34,12 @@ Case holds logins. These are promises, with code you can read.
 - **cased binds loopback by default.** Compose publishes `127.0.0.1:8787` and
   `127.0.0.1:4174`. Set `CASE_TOKEN` before exposing those ports.
 - **Desktops sit on their own Docker network (`case-desks`).** Compose joins
-  only cased to both networks, so Drive, the MCP server and one desktop's
-  neighbours have no route to a desktop. Desktop containers publish no host
-  ports under compose.
+  only cased to both networks, so Drive and the MCP server have no route to a
+  desktop. Desktops share `case-desks` with each other, so a desktop can still
+  address its neighbours; what stops it there is the desk token, not the
+  network — deskd and websockify both answer a neighbour with 401, and x11vnc
+  listens on loopback only. Desktop containers publish no host ports under
+  compose.
 - **The live desk is behind the desk token.** With `CASE_DOCKER_NETWORK` set,
   websockify runs under basic auth `agent:$DESK_TOKEN` (`image/start.sh`).
   Drive's `/live/<id>/…` is a proxy to cased `/v1/computers/<id>/live/…`, and
@@ -87,10 +90,12 @@ joins `case-desks` to dial the desktops, so a desktop can dial cased back on
 `:8787`. The Host check does not help, because a container writes its own
 `Host:` header. This does not require a compromise: anything running inside a
 desktop by design has that reach, including whatever the agent starts through
-`/exec` and any gateway installed into the box. The separate network keeps
-Drive, MCP and the other desktops out of a desktop's reach; it does not put
-cased out of reach. `CASE_TOKEN` is the thing that stops a compromised desktop
-from driving the API. This is a known limit, not a closed hole.
+`/exec` and any gateway installed into the box. The separate network keeps Drive
+and MCP out of a desktop's reach; it does not put cased out of reach, and it
+does not separate desktops from each other. `CASE_TOKEN` is the thing that stops
+a compromised desktop from driving the API, and each desktop's `DESK_TOKEN` is
+what stops it from driving its neighbours. This is a known limit, not a closed
+hole.
 
 (c) **`~/.case/` is secret-equivalent.** The Fernet encryption key lives beside the
 SQLite database. Treat the whole directory like a password manager export: back it
