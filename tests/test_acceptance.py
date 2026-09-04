@@ -4,7 +4,7 @@
 Requires: cased running on 127.0.0.1:8787 (logs at ~/.case/cased.log), image built.
 A7 is manual (phone). A8 is gated behind CASE_A8=1 (restarts the Docker VM).
 A9 runs via Claude Code separately. Set CASE_KEEP=1 to keep the test computer around
-(A1 reaps any previous accept-1 first, so at most one ever survives).
+(A1 reaps any previous fixture box first, so at most one ever survives).
 """
 import base64
 import contextlib
@@ -23,6 +23,10 @@ import pytest
 import requests
 
 BASE = "http://127.0.0.1:8787/v1"
+# reap_stale() deletes by name, and DELETE takes the volume with it. Anything a human
+# might plausibly name a computer is therefore unsafe to use here: point this suite at
+# a real vault and it would eat their box. Nobody names one this.
+BOX = "acceptance-fixture-1"
 SITE_USER = "agent@example.com"
 SITE_PASS = "s3cr3t-" + secrets.token_hex(8)          # unique per run so log-grep is meaningful
 # Durable auth requires a positive proof_spec for status=success (else unverified).
@@ -44,11 +48,11 @@ def api(method, path, timeout=180, **kw):
 
 
 def cid():
-    if not _computer:  # standalone run (e.g. CASE_A8=1): reuse the kept accept-1
+    if not _computer:  # standalone run (e.g. CASE_A8=1): reuse the kept fixture
         for c in api("GET", "/computers").json()["computers"]:
-            if c["name"] == "accept-1":
+            if c["name"] == BOX:
                 _computer.update(c)
-    assert _computer, "A1 must run first (or a kept accept-1 must exist)"
+    assert _computer, f"A1 must run first (or a kept {BOX} must exist)"
     return _computer["id"]
 
 
@@ -62,7 +66,7 @@ def spare_slot():
     "Bind for 127.0.0.1:6080 failed: port is already allocated". A Mac has the headroom
     and never notices, which is why these tests passed there and only there.
 
-    Waking accept-1 again is not optional — every later test calls cid() and expects a
+    Waking the fixture again is not optional — every later test calls cid() and expects a
     live desktop behind it.
     """
     api("POST", f"/computers/{cid()}/sleep")
@@ -110,23 +114,27 @@ def save_shot(name):
 # ---------- A1 boot ----------
 
 def reap_stale():
-    """Delete leftover accept-1 boxes before minting a fresh one.
+    """Delete leftover fixture boxes before minting a fresh one.
 
     CASE_KEEP=1 (the documented way to run this suite) skips test_zz_cleanup, so
-    without this every run left another accept-1 behind — they pile up in the DB
+    without this every run left another fixture behind — they pile up in the DB
     and in Drive, and each one holds five test credentials. Reaping here rather
     than at teardown keeps CASE_KEEP's whole point (one box survives to poke at)
-    while capping the count at one. Only ever touches the name this file creates.
+    while capping the count at one.
+
+    This matches on name alone and DELETE destroys the volume, so it cannot tell a
+    leftover of ours from someone else's box of the same name. That is why BOX is a
+    name no human would choose; run this suite against a scratch CASE_HOME anyway.
     """
     for c in api("GET", "/computers").json()["computers"]:
-        if c["name"] == "accept-1":
+        if c["name"] == BOX:
             api("DELETE", f"/computers/{c['id']}", json={"name": c["name"]})
 
 
 def test_a1_boot():
     reap_stale()
     t0 = time.time()
-    r = api("POST", "/computers", json={"name": "accept-1"})
+    r = api("POST", "/computers", json={"name": BOX})
     assert r.status_code == 201, r.text
     c = r.json()
     assert c["state"] == "running"
@@ -358,7 +366,7 @@ def test_desk_check():
     # a token is not enough: it must name the computer that is actually behind the
     # door, or the human meets whichever desktop happens to be awake
     # desk-bind only ever has to exist and be asleep, so it never needs the slot at the
-    # same time as accept-1 — but creating it does, because create starts the container.
+    # same time as the fixture — but creating it does, because create starts the container.
     with spare_slot():
         r = api("POST", "/computers", json={"name": "desk-bind"})
         assert r.status_code == 201, r.text
