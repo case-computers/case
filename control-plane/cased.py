@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import requests
 import uvicorn
@@ -936,8 +936,12 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
     material = store.credential_material(cid, name)
     if not material:
         raise ApiError(404, "not_found", f"no credential {name!r}")
-    if not str(body.get("url", "")).startswith("https://"):
-        raise ApiError(400, "bad_request", "url must be https")
+    url = str(body.get("url", ""))
+    # Credentials must not cross a network in the clear. The desktop's own loopback
+    # never leaves the box, so a local test site over http is still allowed.
+    if not (url.startswith("https://") or (url.startswith("http://")
+            and urlsplit(url).hostname in ("localhost", "127.0.0.1", "::1"))):
+        raise ApiError(400, "bad_request", "url must be https, or http to loopback")
 
     proof_spec = login_flow._credential_proof_spec(cid, name, body.get("proof_spec"))
     attempt = auth_attempts.start_attempt(

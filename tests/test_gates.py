@@ -88,15 +88,19 @@ def test_oversized_upload_is_refused_before_the_desktop_wakes():
 
 def test_login_url_must_be_https():
     # login posts the vault's plaintext to the desktop; over http:// the target site
-    # sees it on the wire.
+    # sees it on the wire. Loopback is the exception: it never leaves the desktop,
+    # and the acceptance suite logs into a test site it runs there.
     from unittest import mock
     os.environ.pop("CASE_TOKEN", None)
     with mock.patch.object(cased.lifecycle, "ensure_running", return_value={"id": "c_x"}), \
          mock.patch.object(cased.store, "credential_material", return_value={"name": "a"}):
-        r = _client().post("/v1/computers/c_x/login",
-                           json={"credential": "a", "url": "http://x"})
-    assert r.status_code == 400, r.text
-    assert "https" in r.json()["error"]["message"]
+        c = _client()
+        bad = c.post("/v1/computers/c_x/login", json={"credential": "a", "url": "http://x"})
+        assert bad.status_code == 400, bad.text
+        assert "https" in bad.json()["error"]["message"]
+        for ok in ("http://localhost:8088/plain", "http://127.0.0.1:8088/plain"):
+            r = c.post("/v1/computers/c_x/login", json={"credential": "a", "url": ok})
+            assert r.status_code != 400, (ok, r.text)
 
 
 def test_live_relay_needs_the_bearer_on_both_halves():
