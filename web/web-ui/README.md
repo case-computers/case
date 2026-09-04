@@ -15,8 +15,9 @@ landing in someone else's sessions, so a missing pick says so and stops.
 
 **Transport:** `CASE_LOCAL=1` (default when `CASE_URL` is loopback or compose
 `cased`). Talks to cased on `CASE_URL` — no SSH tunnel. Compose sets
-`http://cased:8787/v1` and `CASE_DOCKER_NETWORK=case` so `/live` proxies noVNC
-at `case-<id>:6080` on the compose network.
+`http://cased:8787/v1`. `/live/<id>/…` proxies to cased
+`/v1/computers/<id>/live/…`, which relays noVNC: Drive is not on the desks
+network and never dials a desktop itself.
 
 **Files view** uses `computer_exec` `find` (`/api/fs`) and cased `GET /files`
 (`/api/file`).

@@ -13,8 +13,8 @@ What the agent gets, over MCP:
   exec, files, network capture — no coordinate guessing. Navigate and click
   return the first 2000 characters of page text.
 - **Vault logins**: the human saves a credential once (encrypted, via a one-time
-  link); the machine types it into the site's own login page. The agent and the
-  API never see the password.
+  link); the machine types it into the site's own login page. The password is
+  never handed to the agent or returned by the API.
 - **Human handoff**: 2FA codes, captchas and approvals pause the run and reach a
   human — in Drive, on their phone over Telegram (Approve / Deny buttons, reply
   with the code), or via a one-shot Assist link (ntfy).
@@ -27,6 +27,10 @@ Drive UI (4174) ──┐
 agent / MCP (8788)┼─→ cased (8787: REST, vault, lifecycle) ─→ deskd (in-container:
 bin/case ─────────┘                                            display, input, Chromium)
 ```
+
+cased is the only thing that talks to a desktop. Under compose the desktops sit
+on their own Docker network (`case-desks`) with no published ports, and Drive's
+live desk is a proxy through cased (`/v1/computers/<id>/live/…`).
 
 ## Quick start
 
@@ -233,6 +237,14 @@ Compose uses a Docker volume instead. Same engine, same desktops, two separate
 databases: computers you create one way are not listed by the other, and both
 want port 8787, so run one at a time.
 
+### Desktops made before the network split
+
+New desktops are created on the `case-desks` network. One made earlier keeps the
+network it was created on until its container is rebuilt, and waking it only
+starts the container that already exists. To move it: sleep it, `docker rm
+case-<id>`, then wake it. The volume is the identity, so the desktop comes back
+with its files, profile and logins.
+
 ### RAM budget
 
 Pick each computer's size when you create it (`+ New computer` → SIZE, default 2 GB and
@@ -265,6 +277,11 @@ and the REST API (`http://<host>:4174/?token=…`). `CASE_TOKEN` does **not** lo
 `:8788`: that door is loopback-only in compose; publish it only behind your own
 reverse proxy (TLS + bearer).
 HTTPS and DNS are not shipped here.
+
+Drive and cased answer only to hostnames they know (`127.0.0.1`, `localhost`,
+`[::1]`, the compose service name) and 403 the rest, so a proxy that fronts them
+under some other name needs that name in `CASE_ALLOWED_HOSTS` (comma-separated).
+`CASE_PUBLIC_HOST` counts as allowed without repeating it there.
 
 ## What you get
 
