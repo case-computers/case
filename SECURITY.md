@@ -85,10 +85,12 @@ loopback-only.
 (b) **A desktop can still reach cased.** Docker bridges are bidirectional: cased
 joins `case-desks` to dial the desktops, so a desktop can dial cased back on
 `:8787`. The Host check does not help, because a container writes its own
-`Host:` header. The separate network keeps Drive, MCP and the other desktops out
-of a desktop's reach; it does not put cased out of reach. `CASE_TOKEN` is the
-thing that stops a compromised desktop from driving the API. This is a known
-limit, not a closed hole.
+`Host:` header. This does not require a compromise: anything running inside a
+desktop by design has that reach, including whatever the agent starts through
+`/exec` and any gateway installed into the box. The separate network keeps
+Drive, MCP and the other desktops out of a desktop's reach; it does not put
+cased out of reach. `CASE_TOKEN` is the thing that stops a compromised desktop
+from driving the API. This is a known limit, not a closed hole.
 
 (c) **`~/.case/` is secret-equivalent.** The Fernet encryption key lives beside the
 SQLite database. Treat the whole directory like a password manager export: back it
