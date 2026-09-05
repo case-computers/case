@@ -5,6 +5,7 @@ Extracted from cased.py so the composition root stays thin and captcha-auto wiri
 can move into lifespan without import-time side effects.
 """
 import time
+from urllib.parse import urlsplit
 
 import auth_attempts
 import captcha
@@ -202,10 +203,14 @@ def _try_captcha_auto(row, cid, name, resume=True, record=True):
         # Re-assert page URL from the live tab (detect can race a soft nav).
         try:
             live_href = eval_value(row, "location.href", timeout_s=5)
-            if isinstance(live_href, str) and live_href.startswith("http"):
+            if isinstance(live_href, str) and live_href.startswith("https://"):
                 pageurl = live_href
         except Exception:
             pass
+        # The solver is a third party: it needs scheme+host+path, never the session
+        # tokens and continuation URLs a login page carries in its query string.
+        if isinstance(pageurl, str):
+            pageurl = urlsplit(pageurl)._replace(query="", fragment="").geturl()
         solved = captcha.solve_if_capable(family, pageurl, key, enterprise=enterprise)
         if not solved:
             log.info("captcha_auto=fail reason=solve")

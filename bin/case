@@ -44,7 +44,7 @@ case "${1:-help}" in
           pkill -f '[c]ased.py' 2>/dev/null || true
           [ "$(uname)" = Darwin ] && colima stop || true ;;
   new)    c -X POST "$BASE/computers" -H 'Content-Type: application/json' \
-            -d "{\"name\":\"${2:-}\"}" | pp ;;
+            -d "$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1]}))' "${2:-}")" | pp ;;
   ls)     c "$BASE/computers" | pp ;;
   sleep)  c -X POST "$BASE/computers/$2/sleep" | pp ;;
   wake)   c -X POST "$BASE/computers/$2/wake" | pp ;;
@@ -63,13 +63,14 @@ for c in json.load(sys.stdin)["computers"]: print("  " + c["id"] + "  " + c["nam
           [ -n "$NAME" ]    || read -r -p "credential name (e.g. github): " NAME
           [ -n "$USERN" ]   || read -r -p "username / email: " USERN
           [ -n "$DOMAINS" ] || read -r -p "domains (comma-separated, e.g. github.com): " DOMAINS
-          [ -n "$TOTP" ]    || read -r -p "TOTP seed (enter to skip): " TOTP
+          [ -n "$TOTP" ]    || { read -r -s -p "TOTP seed (enter to skip): " TOTP; echo; }
           read -r -s -p "secret for $NAME: " SECRET; echo
-          python3 - "$BASE" "$CID" "$NAME" "$USERN" "$DOMAINS" "$TOTP" "$SECRET" <<'EOF'
+          # secrets ride the environment, not argv: /proc/<pid>/cmdline is world-readable
+          SECRET="$SECRET" TOTP="$TOTP" python3 - "$BASE" "$CID" "$NAME" "$USERN" "$DOMAINS" <<'EOF'
 import json, os, sys, urllib.request
-base, cid, name, user, domains, totp, secret = sys.argv[1:8]
-body = {"name": name, "username": user, "secret": secret, "domains": domains.split(",")}
-if totp: body["totp_seed"] = totp
+base, cid, name, user, domains = sys.argv[1:6]
+body = {"name": name, "username": user, "secret": os.environ["SECRET"], "domains": domains.split(",")}
+if os.environ.get("TOTP"): body["totp_seed"] = os.environ["TOTP"]
 headers = {"Content-Type": "application/json"}
 tok = (os.environ.get("CASE_TOKEN") or "").strip()
 if tok:

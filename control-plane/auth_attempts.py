@@ -81,9 +81,6 @@ def parse_proof_spec(raw):
     return None
 
 
-_parse_proof_spec = parse_proof_spec
-
-
 def attempt_public(row):
     """Public AuthAttempt, never secrets, OTP answers, or raw proof_spec."""
     if row is None:
@@ -228,7 +225,7 @@ def start_attempt(computer_id, credential_name, target_url, proof_spec=None,
     while another attempt is active → 409 auth_in_progress.
     """
     # Drop unknown/empty predicates so a typo never looks "configured".
-    proof_spec = _parse_proof_spec(proof_spec)
+    proof_spec = parse_proof_spec(proof_spec)
     if idempotency_key:
         existing = store.get_auth_attempt_by_idempotency(computer_id, idempotency_key)
         if existing:
@@ -508,9 +505,6 @@ def observation_looks_logged_out(observation):
     return bool(signals)
 
 
-_observation_looks_logged_out = observation_looks_logged_out
-
-
 def check_proof(computer, proof_spec, observation=None):
     """Evaluate proof_spec against the live tab / last observation. Never logs secrets.
 
@@ -563,9 +557,6 @@ def check_proof(computer, proof_spec, observation=None):
     return True
 
 
-_check_proof = check_proof
-
-
 def prove_attempt(attempt_id, expected_revision=None, observation=None):
     """Prove step: missing/false proof_spec → unverified; verified → authenticated.
 
@@ -589,7 +580,7 @@ def prove_attempt(attempt_id, expected_revision=None, observation=None):
         row = store.get_auth_attempt(attempt_id)
         rev = int(row["revision"] or 0)
 
-    proof_spec = _parse_proof_spec(row["proof_spec"])
+    proof_spec = parse_proof_spec(row["proof_spec"])
     from events import emit
     from lifecycle import get_computer
 
@@ -606,7 +597,7 @@ def prove_attempt(attempt_id, expected_revision=None, observation=None):
         return pub
 
     computer = get_computer(row["computer_id"])
-    ok = _check_proof(computer, proof_spec, observation=observation)
+    ok = check_proof(computer, proof_spec, observation=observation)
     if ok:
         pub = _cas_or_conflict(attempt_id, "proving", "authenticated", rev)
         store.record_credential_result(row["computer_id"], row["credential"], "success")
@@ -671,7 +662,8 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
         if material and material.get("totp_seed"):
             try:
                 code = _totp(material["totp_seed"])
-                out = auth_submit_challenge(computer, "otp", value=code)
+                out = auth_submit_challenge(computer, "otp", value=code,
+                                            domains=material.get("domains") or [])
                 if isinstance(out, dict) and out.get("ok"):
                     return advance_attempt(attempt_id, observation=None, _depth=_depth + 1)
             except Exception:
@@ -708,7 +700,7 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
             attempt_id, handoff_kind, prompt, domain=domain, expected_revision=rev)
 
     # No challenge left → prove (missing proof_spec → unverified).
-    if _observation_looks_logged_out(observation) and _parse_proof_spec(row["proof_spec"]):
+    if observation_looks_logged_out(observation) and parse_proof_spec(row["proof_spec"]):
         # Password form still up with a configured proof, treat as failed login.
         return fail_attempt(attempt_id, reason="still_on_login_form",
                             expected_revision=rev)

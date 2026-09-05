@@ -13,6 +13,7 @@ import time
 
 import requests
 
+from config import log
 from dockerd import desk_base
 from errors import ApiError
 
@@ -34,7 +35,9 @@ def _raise(r):
         e = r.json()["error"]
         raise ApiError(r.status_code, e["code"], e["message"])
     except (ValueError, KeyError):
-        raise ApiError(r.status_code, "desk_error", r.text[:300])
+        # deskd's raw body can echo a page or a credential, keep it in the log only
+        log.warning("deskd %s: %s", r.status_code, r.text[:300])
+        raise ApiError(r.status_code, "desk_error", f"deskd returned {r.status_code}")
 
 
 def desk_json(row, method, path, timeout=35, **kw):
@@ -221,11 +224,13 @@ def observe_auth(row):
     return desk_json(row, "POST", "/auth/observe", timeout=35)
 
 
-def auth_submit_challenge(row, kind, value=None):
+def auth_submit_challenge(row, kind, value=None, domains=None):
     """POST /auth/submit_challenge, otp/code fill+enter, or approval settle."""
     body = {"kind": kind}
     if value is not None:
         body["value"] = value
+    if domains is not None:
+        body["domains"] = domains
     return desk_json(row, "POST", "/auth/submit_challenge", json=body, timeout=90)
 
 

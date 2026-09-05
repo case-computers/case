@@ -1,4 +1,4 @@
-# Drive UI. Proxies cased + noVNC on the compose network.
+# Drive UI. Proxies the API and live desktop through cased.
 FROM node:22-slim
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./

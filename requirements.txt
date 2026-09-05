@@ -2,7 +2,8 @@
 fastapi==0.139.0
 uvicorn==0.50.2
 docker==7.1.0
-cryptography==49.0.0
+cryptography==50.0.0
 requests==2.34.2
 mcp==1.28.1
-Pillow==12.2.0
+Pillow==12.3.0
+websockets==15.0.1

@@ -5,7 +5,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ.setdefault("CASE_HOME", "/tmp/case-token-test")
+# assignment, NOT setdefault: an inherited CASE_HOME (a dev shell, ~/.case/env)
+# would open the real vault just to read a token setting.
+os.environ["CASE_HOME"] = "/tmp/case-token-test"
 import cased  # noqa: E402
 
 
@@ -25,7 +27,7 @@ def test_requires_matching_bearer():
         assert cased.bearer_ok("Bearer share-me") is True
         assert cased.bearer_ok("bearer share-me") is True
         assert cased.bearer_ok("Bearer share-me ") is True
-        assert cased.bearer_ok("Bearer share-meX") is False  # length mismatch, no throw
+        assert cased.bearer_ok("Bearer share-meX") is False
     finally:
         os.environ.pop("CASE_TOKEN", None)
 

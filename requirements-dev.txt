@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest==9.1.1
+# fastapi.testclient needs it; it arrives transitively via mcp, so pin it here rather
+# than let the suite break the day mcp drops the dependency.
+httpx==0.28.1

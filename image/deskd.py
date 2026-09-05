@@ -45,6 +45,11 @@ def err(status, code, message):
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
 
 
+def injecting():
+    if state["injecting"]:
+        return err(423, "credential_injection", "blocked during credential injection")
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next):
     got = request.headers.get("authorization") or ""
@@ -115,8 +120,8 @@ def health():
 
 @app.get("/screenshot")
 def screenshot():
-    if state["injecting"]:
-        return err(423, "credential_injection", "screenshots blocked during credential injection")
+    if (r := injecting()):
+        return r
     return Response(grab(), media_type="image/png")
 
 
@@ -152,9 +157,11 @@ def do_action(a):
             xdo("click", "--repeat", str(min(abs(dy), 50)), "--delay", "40", "5" if dy > 0 else "4")
     elif t == "type":
         text = str(a["text"])
+        if len(text) > 10000:
+            raise ValueError("text over 10000 chars")
         # a killed xdotool leaves text half-typed and the caller retrying the
         # whole thing — scale the timeout so long texts can't hit it
-        xdo("type", "--delay", "15", "--", text, timeout=15 + len(text) // 10)
+        xdo("type", "--delay", "15", "--", text, timeout=min(15 + len(text) // 10, 300))
     elif t == "key":
         xdo("key", "--", str(a["keys"]))
     elif t == "wait":
@@ -165,6 +172,8 @@ def do_action(a):
 
 @app.post("/action")
 def action(a: dict = Body(...)):
+    if (r := injecting()):
+        return r
     try:
         do_action(a)
     except KeyError as e:
@@ -174,16 +183,27 @@ def action(a: dict = Body(...)):
     out = {"ok": True}
     if a.get("screenshot"):
         time.sleep(min(int(a.get("delay_ms", 300)), 5000) / 1000)
-        if state["injecting"]:
-            return err(423, "credential_injection", "screenshots blocked during credential injection")
+        if (r := injecting()):
+            return r
         out["screenshot_png_b64"] = base64.b64encode(grab()).decode()
     return out
 
 
 # ---------- exec & files ----------
 
+HOME = "/home/agent"
+FILE_MAX = 8 * 1024 * 1024
+
+
+def home_path(path):
+    p = os.path.realpath(path or "")
+    return p if p.startswith(HOME + "/") else None
+
+
 @app.post("/exec")
 def exec_(b: dict = Body(...)):
+    if (r := injecting()):
+        return r
     if "command" not in b:
         return err(400, "bad_request", "command required")
     timeout = min(int(b.get("timeout_s", 30)), 600)
@@ -195,7 +215,7 @@ def exec_(b: dict = Body(...)):
     except subprocess.TimeoutExpired as e:
         code, out = 124, e.stdout or b""
         errb = (e.stderr or b"") + b"\n[deskd] command timed out"
-    except NotADirectoryError:
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
         return err(400, "bad_cwd", f"no such directory: {cwd}")
     truncated = len(out) > CAP or len(errb) > CAP
     return {"exit_code": code, "stdout": out[:CAP].decode(errors="replace"),
@@ -204,20 +224,41 @@ def exec_(b: dict = Body(...)):
 
 @app.put("/file")
 async def file_put(request: Request, path: str):
-    data = await request.body()
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(data)
-    return JSONResponse({"path": path, "bytes": len(data)}, status_code=201)
+    if (r := injecting()):
+        return r
+    p = home_path(path)
+    if not p:
+        return err(400, "bad_path", f"path must be under {HOME}/")
+    if int(request.headers.get("content-length") or 0) > FILE_MAX:
+        return err(413, "too_large", f"file over {FILE_MAX} bytes")
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > FILE_MAX:
+            return err(413, "too_large", f"file over {FILE_MAX} bytes")
+        data.extend(chunk)
+    if (r := injecting()):
+        return r
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        return err(400, "bad_path", str(e))
+    return JSONResponse({"path": p, "bytes": len(data)}, status_code=201)
 
 
 @app.get("/file")
 def file_get(path: str):
-    if not os.path.isfile(path):
-        return err(404, "not_found", path)
-    with open(path, "rb") as f:
+    if (r := injecting()):
+        return r
+    p = home_path(path)
+    if not p:
+        return err(400, "bad_path", f"path must be under {HOME}/")
+    if not os.path.isfile(p):
+        return err(404, "not_found", p)
+    if os.path.getsize(p) > FILE_MAX:
+        return err(413, "too_large", f"file over {FILE_MAX} bytes")
+    with open(p, "rb") as f:
         return Response(f.read(), media_type="application/octet-stream")
 
 
@@ -325,8 +366,8 @@ def press_enter(tab):
 
 @app.post("/eval")
 def eval_(b: dict = Body(...)):
-    if state["injecting"]:
-        return err(423, "credential_injection", "eval blocked during credential injection")
+    if (r := injecting()):
+        return r
     if "expression" not in b:
         return err(400, "bad_request", "body needs 'expression'")
     timeout = min(int(b.get("timeout_s", 20)), 120)
@@ -377,21 +418,12 @@ FOCUS_PASS = (f"(()=>{{{VIS}const p=[...document.querySelectorAll('input[type=\"
 FOCUS_CODE = (f"(()=>{{{VIS}const c=[...document.querySelectorAll('{CODE_SEL}')].find(vis);"
               "if(!c)return false; c.focus(); if(c.select)c.select(); return true;})()")
 PAGE_TEXT = "(document.body ? document.body.innerText.slice(0, 5000) : '')"
+CLEAR_PASS = "[...document.querySelectorAll('input[type=\"password\"]')].forEach(p=>{p.value=''})"
 
 # Generic auth observation — no website names. The JS only collects raw material
 # (fields, frame markers, page text); challenge_signals are computed in Python
 # (challenge_signals_from_text) so the phrase map lives in exactly one place.
-OBSERVE_AUTH_JS = r"""
-(() => {
-  const vis = e => {
-    if (!e || e.disabled || e.offsetParent === null) return false;
-    const st = getComputedStyle(e);
-    if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
-    const r = e.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-  const userSel = 'input[autocomplete="username"],input[type="email"],input[name*="user" i],input[name*="email" i],input[name*="login" i],input[id*="user" i],input[id*="email" i],input[id*="login" i],input[type="text"]';
-  const codeSel = 'input[autocomplete="one-time-code"],input[name*="otp" i],input[name*="code" i],input[id*="otp" i],input[id*="code" i],input[type="tel"],input[type="number"],input[type="text"]';
+_OBSERVE_BODY = r"""
   const u = [...document.querySelectorAll(userSel)].find(vis);
   const p = [...document.querySelectorAll('input[type="password"]')].find(vis);
   const c = [...document.querySelectorAll(codeSel)].find(vis);
@@ -420,6 +452,10 @@ OBSERVE_AUTH_JS = r"""
   };
 })()
 """
+
+OBSERVE_AUTH_JS = ("(() => {" + VIS
+                   + f"const userSel='{USER_SEL}';const codeSel='{CODE_SEL}';"
+                   + _OBSERVE_BODY)
 
 # Watchdog RE_BLOCK scans arbitrary page text (DMs, feeds, drafts). Bare "2fa" / "captcha"
 # false-positive on outreach copy ("asking about 2fa and captcha flows") and spam handoff
@@ -529,8 +565,24 @@ def domain_ok(host, domains):
     return any(host == d.lower() or host.endswith("." + d.lower()) for d in domains)
 
 
-def challenge(tab, cred, kind, prompt):
-    state["login"] = {"kind": kind, "cred_name": cred["name"], "at": time.time()}
+def credential_origin_error(tab, cred):
+    href = tab.js("location.href") or ""
+    parsed = urlparse(href)
+    host = parsed.hostname
+    if not domain_ok(host, cred.get("domains") or []):
+        return f"page origin {host!r} not in credential domains"
+    if parsed.scheme == "https":
+        return None
+    if parsed.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
+        return None
+    return f"page origin scheme {parsed.scheme!r} on host {host!r} is not HTTPS"
+
+
+def challenge(cred, kind, prompt):
+    state["login"] = {
+        "kind": kind, "cred_name": cred["name"],
+        "domains": cred.get("domains") or [], "at": time.time(),
+    }
     try:
         shot = base64.b64encode(grab()).decode()
     except Exception:
@@ -554,12 +606,14 @@ def classify(tab, cred):
     # by matching concrete path segments only — never the full opaque query blob.
     path = (urlparse(href).path or "").lower()
     if any(seg in path for seg in ("/codeentry", "/checkpoint", "/two_factor", "/two-factor")):
-        return challenge(tab, cred, "otp", f"{host}: verification code entry")
+        return challenge(cred, "otp", f"{host}: verification code entry")
 
     if RE_CAPTCHA.search(blob):
-        return challenge(tab, cred, "captcha", f"{host}: {snippet(blob, RE_CAPTCHA)}")
+        return challenge(cred, "captcha", f"{host}: {snippet(blob, RE_CAPTCHA)}")
     if RE_OTP.search(blob):
         if cred.get("totp_seed"):
+            if reason := credential_origin_error(tab, cred):
+                return {"status": "failed", "reason": reason}
             fill(tab, FOCUS_CODE, totp(cred["totp_seed"]))
             press_enter(tab)
             settle(tab)
@@ -569,9 +623,9 @@ def classify(tab, cred):
             return {"status": "success", "totp_used": True}
         # SMS OTP / other code challenge -> human (or Twilio, decided by cased)
         kind = "otp"
-        return challenge(tab, cred, kind, f"{host}: {snippet(blob, RE_OTP)}")
+        return challenge(cred, kind, f"{host}: {snippet(blob, RE_OTP)}")
     if RE_APPROVAL.search(blob):
-        return challenge(tab, cred, "approval", f"{host}: {snippet(blob, RE_APPROVAL)}")
+        return challenge(cred, "approval", f"{host}: {snippet(blob, RE_APPROVAL)}")
     if fields.get("pass") and RE_FAIL.search(text):
         return {"status": "failed", "reason": snippet(text, RE_FAIL)}
     if fields.get("pass"):
@@ -599,14 +653,20 @@ def fill_login_form(tab, cred):
     if not fields.get("user") and not fields.get("pass"):
         return "no login fields found"
     if fields.get("user"):
+        if reason := credential_origin_error(tab, cred):
+            return reason
         fill(tab, FOCUS_USER, cred["username"])
     if fields.get("pass"):
+        if reason := credential_origin_error(tab, cred):
+            return reason
         fill(tab, FOCUS_PASS, cred["secret"])
         press_enter(tab)
     else:  # two-step (username first)
         press_enter(tab)
         settle(tab)
         if (tab.js(HAS_FIELDS) or {}).get("pass"):
+            if reason := credential_origin_error(tab, cred):
+                return reason
             fill(tab, FOCUS_PASS, cred["secret"])
             press_enter(tab)
         elif not advanced_past_identifier(tab):
@@ -648,16 +708,19 @@ def login(b: dict = Body(...)):
         tab = Tab()
         try:
             navigate(tab, url)
-            host = urlparse(tab.js("location.href") or url).hostname
-            if not domain_ok(host, cred.get("domains") or []):
+            if reason := credential_origin_error(tab, cred):
                 return err(400, "domain_mismatch",
-                           f"page origin {host!r} not in credential domains")
+                           reason)
             reason = fill_login_form(tab, cred)
             if reason:
                 return {"status": "failed", "reason": reason}
             wait_post_submit(tab)
             return classify(tab, cred)
         finally:
+            try:
+                tab.js(CLEAR_PASS)   # the DOM keeps the typed secret if the page did not navigate
+            except Exception:
+                pass
             tab.close()
     except Exception as e:
         return {"status": "failed", "reason": f"login error: {type(e).__name__}: {e}"}
@@ -678,7 +741,11 @@ def login_resume(b: dict = Body(...)):
     try:
         tab = Tab()
         try:
-            if ctx["kind"] == "approval" or value.lower() in ("approve", "deny"):
+            is_approval = ctx["kind"] == "approval" or value.lower() in ("approve", "deny")
+            if not is_approval:
+                if reason := credential_origin_error(tab, {"domains": ctx.get("domains") or []}):
+                    return {"status": "failed", "reason": reason}
+            if is_approval:
                 reason = apply_challenge_action(tab, "approval", value)
                 if reason:
                     return {"status": "failed", "reason": reason}
@@ -695,6 +762,10 @@ def login_resume(b: dict = Body(...)):
                 return {"status": "failed", "reason": "challenge still present"}
             return {"status": "success"}
         finally:
+            try:
+                tab.js(CLEAR_PASS)   # the DOM keeps the typed secret if the page did not navigate
+            except Exception:
+                pass
             tab.close()
     except Exception as e:
         return {"status": "failed", "reason": f"resume error: {type(e).__name__}: {e}"}
@@ -707,8 +778,8 @@ def login_resume(b: dict = Body(...)):
 
 @app.post("/auth/observe")
 def auth_observe():
-    if state["injecting"]:
-        return err(423, "credential_injection", "observe blocked during credential injection")
+    if (r := injecting()):
+        return r
     try:
         tab = Tab()
         try:
@@ -728,11 +799,17 @@ def auth_submit_challenge(b: dict = Body(...)):
         return err(400, "bad_request", "body needs 'kind'")
     kind = b["kind"]
     value = b.get("value")
+    if str(kind).lower() in ("otp", "code") and (
+            not isinstance(b.get("domains"), list) or not b["domains"]):
+        return err(400, "bad_request", "body needs 'domains' for otp/code")
     state["in_login"] = True
     state["injecting"] = True
     try:
         tab = Tab()
         try:
+            if str(kind).lower() in ("otp", "code"):
+                if reason := credential_origin_error(tab, {"domains": b["domains"]}):
+                    return {"ok": False, "reason": reason}
             reason = apply_challenge_action(tab, kind, value)
             if reason == "missing challenge value":
                 return err(400, "bad_request", "body needs 'value' for otp/code")
@@ -754,9 +831,8 @@ def auth_submit_challenge(b: dict = Body(...)):
 def auth_navigate_verification(b: dict = Body(...)):
     if "url" not in b:
         return err(400, "bad_request", "body needs 'url'")
-    if state["injecting"]:
-        return err(423, "credential_injection",
-                   "navigate_verification blocked during credential injection")
+    if (r := injecting()):
+        return r
     url = b["url"]
     domains = b.get("domains")
     host = urlparse(url).hostname
@@ -899,6 +975,8 @@ def _stop_capture():
 
 @app.post("/capture/start")
 def capture_start(b: dict = Body(...)):
+    # ponytail: no regex-backtracking guard — CPython has no regex timeout, and a
+    # caller who can reach this route already has /exec on the box.
     pattern = b.get("pattern")
     if not pattern:
         return err(400, "bad_request", "body needs 'pattern'")
@@ -920,8 +998,8 @@ def capture_start(b: dict = Body(...)):
 
 @app.get("/capture")
 def capture_get():
-    if state["injecting"]:
-        return err(423, "credential_injection", "capture blocked during credential injection")
+    if (r := injecting()):
+        return r
     cap = state["capture"]
     if not cap:
         return {"items": [], "running": False, "error": None}
@@ -932,8 +1010,8 @@ def capture_get():
 
 @app.delete("/capture")
 def capture_delete():
-    if state["injecting"]:
-        return err(423, "credential_injection", "capture blocked during credential injection")
+    if (r := injecting()):
+        return r
     cap = _stop_capture()
     return {"items": _drain(cap["buf"]) if cap else [], "running": False,
             "error": cap["error"] if cap else None}

@@ -7,6 +7,9 @@ receive rows/dicts, never SQL. Secrets are encrypted/decrypted only inside this
 module — the vault boundary never leaks plaintext to callers except through
 credential_material(), which login uses.
 """
+import base64
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -90,15 +93,22 @@ ACTIVE_STATES = ("creating", "waking", "running")   # states that count against 
 class Store:
     def __init__(self, home=None):
         home = home or CASE_HOME
-        os.makedirs(home, exist_ok=True)
+        # the vault key and every stored secret live here; a pre-existing 0755
+        # ~/.case (or a permissive umask) is the whole disclosure
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        os.chmod(home, 0o700)
         key_path = os.path.join(home, "key")
         if not os.path.exists(key_path):
             fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             os.write(fd, Fernet.generate_key())
             os.close(fd)
         with open(key_path, "rb") as f:
-            self.fernet = Fernet(f.read())
-        self.db = sqlite3.connect(os.path.join(home, "case.db"), check_same_thread=False)
+            key = f.read()
+        self.fernet = Fernet(key)
+        self._key = base64.urlsafe_b64decode(key)
+        db_path = os.path.join(home, "case.db")
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        os.chmod(db_path, 0o600)      # sqlite mirrors this onto -wal/-shm
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
@@ -161,10 +171,13 @@ class Store:
             return cur
 
     def one(self, sql, args=()):
-        return self.q(sql, args).fetchone()
+        # A shared connection needs the lock until the cursor has been read.
+        with self.lock:
+            return self.db.execute(sql, args).fetchone()
 
     def all(self, sql, args=()):
-        return self.q(sql, args).fetchall()
+        with self.lock:
+            return self.db.execute(sql, args).fetchall()
 
     # ---- vault ----
     def enc(self, s):
@@ -175,6 +188,10 @@ class Store:
         """Decrypt a stored secret. Callers outside this module should not need
         this — credential_material() is the sanctioned plaintext exit."""
         return self.fernet.decrypt(b).decode() if b is not None else None
+
+    def sign(self, text):
+        """Stable HMAC for URL capabilities (ntfy answer buttons); keyed by the vault key."""
+        return hmac.new(self._key, text.encode(), hashlib.sha256).hexdigest()
 
     # ---- computers ----
     def get_computer(self, cid):
@@ -434,6 +451,11 @@ class Store:
             "ORDER BY created_at DESC LIMIT 1",
             (computer_id, *self.AUTH_ATTEMPT_ACTIVE))
 
+    def stale_active_auth_attempts(self, cutoff):
+        qs = ",".join("?" * len(self.AUTH_ATTEMPT_ACTIVE))
+        return self.all(f"SELECT * FROM auth_attempts WHERE status IN ({qs}) AND updated_at < ?",
+                        (*self.AUTH_ATTEMPT_ACTIVE, cutoff))
+
     def get_auth_attempt_by_idempotency(self, computer_id, idempotency_key):
         if not idempotency_key:
             return None
@@ -534,6 +556,9 @@ class Store:
 
     def delete_schedule(self, sid):
         return self.q("DELETE FROM schedules WHERE id=?", (sid,)).rowcount
+
+    def delete_schedules_for(self, cid):
+        return self.q("DELETE FROM schedules WHERE computer_id=?", (cid,)).rowcount
 
     def set_schedule_next(self, sid, next_run_at):
         self.q("UPDATE schedules SET next_run_at=? WHERE id=?", (next_run_at, sid))

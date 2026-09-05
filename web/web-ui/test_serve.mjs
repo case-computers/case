@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveTarget, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
+import { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
@@ -84,6 +84,17 @@ assert.equal(mimeFor('/a/b.PY'.toLowerCase()), 'text/plain; charset=utf-8');
 assert.equal(mimeFor('/a/b'), 'application/octet-stream');
 assert.equal(mimeFor('/a/b.exe'), 'application/octet-stream');
 
+assert.equal(parseErr(Buffer.from('{"error":{"message":"nope"}}'), 'read failed'), 'nope');
+assert.equal(parseErr(Buffer.from('<html>502</html>'), 'read failed'), 'read failed');
+
+// threads.json is replaced, never half-written; a stale one must not vanish silently.
+{
+  const src = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /renameSync\(THREADS_FILE \+ '\.tmp', THREADS_FILE\)/);
+  assert.match(src, /console\.warn\('threads:', err\.message\)/);
+  assert.ok(!/fonts\.(googleapis|gstatic)/.test(html), 'no font CDN on the page');
+}
+
 // histTrim: conversation memory drops WHOLE turns, never splitting a function_call
 // from its output (an orphan of either kind 400s every later request).
 const turn = (n, pad) => [
@@ -140,11 +151,29 @@ assert.ok(tokenMatches({ headers: { authorization: 'Bearer secret' }, url: '/' }
 assert.ok(tokenMatches({ headers: { cookie: 'case_token=secret' }, url: '/' }, 'secret'));
 assert.ok(tokenMatches({ headers: {}, url: '/?token=secret' }, 'secret'));
 
-process.env.CASE_DOCKER_NETWORK = 'case';
-assert.deepEqual(liveTarget('c_abc12'), { hostname: 'case-c_abc12', port: 6080 });
-delete process.env.CASE_DOCKER_NETWORK;
-assert.equal(liveTarget('c_abc12'), null);
-assert.equal(liveTarget(''), null);
+{
+  const h = liveHeaders({ headers: { cookie: 'case_token=s', accept: '*/*' } }, false, 'tok');
+  assert.equal(h.authorization, 'Bearer tok');
+  assert.equal(h.cookie, undefined);
+  assert.equal(h.accept, '*/*');
+}
+
+assert.equal(hostOf('[::1]:4174'), '[::1]');
+assert.equal(hostOf('127.0.0.1:4174'), '127.0.0.1');
+assert.ok(browserOk({ headers: { host: '[::1]:4174' } }));
+assert.ok(browserOk({ headers: { host: 'localhost:4174' } }), 'no Origin is a same-site navigation');
+assert.ok(browserOk({ headers: { host: 'localhost:4174', origin: 'http://127.0.0.1:4174' } }));
+assert.ok(!browserOk({ headers: { host: 'localhost:4174', origin: 'https://evil.example' } }));
+assert.ok(!browserOk({ headers: { host: 'evil.example' } }), 'DNS rebinding');
+
+// A file off the computer is a download, never a page.
+{
+  const src = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  const fn = src.slice(src.indexOf('async function fsFile('), src.indexOf('async function creds('));
+  assert.match(fn, /'application\/octet-stream'/);
+  assert.match(fn, /'x-content-type-options': 'nosniff'/);
+  assert.ok(!/svg/.test(html.match(/const IMG_RE=[^\n]*/)[0]), 'svg previews as text, not as an image');
+}
 
 const loginPlan = extraPlan('computer_login', { credential: 'x.com', url: 'https://x.com' }, 'c_ab');
 assert.equal(loginPlan.method, 'POST');
@@ -305,6 +334,28 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(msgs[0].content, 'after the shot');
 }
 
+// With media, a hydrated shot reaches the model as an image, not as a dropped item.
+{
+  const shot = { role: 'user', shot: '/tmp/x.png', content: [{ type: 'input_image', detail: 'high', image_url: 'data:image/png;base64,xx' }] };
+  const msgs = histToAnthropicMessages([shot], { media: true });
+  assert.equal(msgs.length, 1);
+  assert.deepEqual(msgs[0].content, [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'xx' } }]);
+}
+
+// The Anthropic tool_result carries the png itself; a repeat says so instead.
+{
+  const src = fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /content\.push\(\{ type: 'image', source: \{ type: 'base64', media_type: 'image\/png', data: image_b64 \} \}\)/);
+  const items = [];
+  const shots = new Set();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'case-dedupe-'));
+  pushShot(items, shots, 'AAAA', dir);
+  pushShot(items, shots, 'AAAA', dir);
+  assert.equal(items.length, 2);
+  assert.ok(items[0].shot, 'first shot is stashed');
+  assert.match(items[1].content[0].text, /has not changed/);
+}
+
 // STOP keeps the turn — rewind only on provider errors, not disconnect.
 {
   const serveSrc = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
@@ -317,7 +368,8 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(outOfSteps.length, 2, 'Anthropic + OpenAI out-of-steps gates');
   assert.ok(outOfSteps.every((m) => m[0].includes('!stopped()')), 'STOP is not out-of-rounds');
   assert.ok(!/turnStart/.test(loopFn), 'no turn rollback on provider error');
-  assert.match(loopFn, /histCloseOpenCalls\(hist\.items\)/);
+  assert.match(loopFn, /finishTurn\(hist, thread\)/);
+  assert.match(serveSrc, /function finishTurn[\s\S]*?histCloseOpenCalls\(hist\.items\)/);
   assert.match(loopFn, /withRateRetry\(round, emit, 5, gone\.signal\)/);
   assert.match(chatFn, /res\.on\('close', \(\) => \{ clientGone\(\); gone\.abort\(\); \}\)/);
   assert.match(loopFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);

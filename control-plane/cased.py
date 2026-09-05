@@ -8,6 +8,7 @@ in the modules it delegates to — lifecycle, handoffs, scheduler, deskclient,
 dockerd, store, events.
 """
 import asyncio
+import base64
 from contextlib import asynccontextmanager, contextmanager
 import hmac
 import html
@@ -16,12 +17,14 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import requests
 import uvicorn
-from fastapi import Body, FastAPI, Query, Request
+from fastapi import Body, FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from websockets.asyncio.client import connect as ws_connect
 
 import auth_attempts
 import captcha
@@ -91,7 +94,7 @@ async def validation_error(_, e):
 @app.exception_handler(Exception)
 async def internal_error(_, e):
     log.exception("internal error")
-    return JSONResponse({"error": {"code": "internal", "message": f"{type(e).__name__}: {e}"}},
+    return JSONResponse({"error": {"code": "internal", "message": "internal error"}},
                         status_code=500)
 
 
@@ -108,36 +111,52 @@ def bearer_ok(authorization):
     auth = authorization or ""
     if not auth.lower().startswith("bearer "):
         return False
-    got = auth[7:].strip()
-    if len(got) != len(want):
+    return hmac.compare_digest(auth[7:].strip(), want)
+
+
+PUBLIC_PREFIXES = ("/fill/", "/assist/", "/answer/")   # token-in-URL doors, no bearer
+
+
+def allowed_hosts():
+    """Names a browser may address us as; anything else is a rebinding page."""
+    hosts = {"127.0.0.1", "localhost", "[::1]", "cased"}
+    hosts.update(h.strip().lower()
+                 for h in (os.environ.get("CASE_ALLOWED_HOSTS") or "").split(",") if h.strip())
+    pub = (os.environ.get("CASE_PUBLIC_HOST") or "").strip().lower()
+    if pub:
+        hosts.add(pub)
+    return hosts
+
+
+def _host_of(value):
+    v = (value or "").strip().lower()
+    return v[:v.find("]") + 1] if v.startswith("[") else v.split(":")[0]
+
+
+def browser_ok(request):
+    """Host must be ours; a present Origin must be ours too (CSRF)."""
+    if _host_of(request.headers.get("host")) not in allowed_hosts():
         return False
-    return hmac.compare_digest(got, want)
-
-
-@app.middleware("http")
-async def token_guard(request: Request, call_next):
-    # /health stays open so compose can probe us without circulating the token.
-    if request.url.path == "/health":
-        return await call_next(request)
-    if not bearer_ok(request.headers.get("authorization")):
-        return JSONResponse(
-            {"error": {"code": "unauthorized", "message": "unauthorized"}},
-            status_code=401)
-    return await call_next(request)
+    origin = request.headers.get("origin")
+    return not origin or _host_of(origin.split("//", 1)[-1]) in allowed_hosts()
 
 
 # ---------- audit log ----------
 # One JSONL line per API call, ~/.case/audit/<date>.jsonl. Answers "what did the
 # agent do on this machine" without agents self-logging transcripts. Sessions are
-# whatever the client sends as X-Case-Session (the MCP server sends one per process).
+# whatever the client sends as X-Case-Session (the MCP server sends one per process),
+# alongside the caller's address and the query string.
 # Security invariant: response bodies are NEVER logged (screenshots, file contents),
 # and request bodies that can carry secrets are redacted, secrets never hit disk.
 # Redacted routes: /credentials (password/TOTP), /answer (OTP codes relayed by the
 # human), /files (uploaded file contents may hold tokens), /fill (the human
 # credential form posts the password itself).
+# Registered BEFORE token_guard: Starlette runs the last-registered middleware
+# outermost, so an unauthorized call is rejected without reaching the log.
 
 def _redacted(path):
     return ("/credentials" in path or path.endswith("/answer")
+            or path.startswith("/answer/")
             or path.endswith("/files") or path.startswith("/fill/")
             or path.endswith("/fill")   # agent form-fill bodies carry user data
             or path.startswith("/assist/"))
@@ -145,33 +164,60 @@ def _redacted(path):
 
 @app.middleware("http")
 async def audit_mw(request: Request, call_next):
-    body = b"" if request.method in ("GET", "DELETE") else await request.body()
+    path = request.url.path
+    big = int(request.headers.get("content-length") or 0) > 64 * 1024
+    skip_body = request.method in ("GET", "DELETE") or _redacted(path) or big
+    body = b"" if skip_body else await request.body()
     t0 = time.time()
     resp = await call_next(request)
-    path = request.url.path
-    if path != "/health" and not path.endswith("/events"):   # skip noise + SSE streams
+    # skip noise + SSE streams; a desk open is ~25 asset GETs through the live relay
+    if path != "/health" and not path.endswith("/events") and "/live/" not in path:
         req = "[redacted]" if _redacted(path) else body[:2000].decode("utf-8", "replace")
-        # a fill/assist token is a live capability, the log records that the door
-        # was used, never the key itself
+        # a fill/assist/answer token is a live capability, the log records that the
+        # door was used, never the key itself
         if path.startswith("/fill/"):
             logged_path = "/fill/[token]"
         elif path.startswith("/assist/"):
             logged_path = "/assist/[token]" + (
                 "/submit" if path.endswith("/submit") else
                 "/done" if path.endswith("/done") else "")
+        elif path.startswith("/answer/"):
+            logged_path = "/answer/[token]"
         else:
             logged_path = path
         line = {"ts": now(), "session": request.headers.get("x-case-session", "-"),
-                "method": request.method, "path": logged_path, "status": resp.status_code,
-                "ms": int((time.time() - t0) * 1000), "req": req}
+                "client": request.client.host if request.client else "-",
+                "method": request.method, "path": logged_path, "query": request.url.query,
+                "status": resp.status_code, "ms": int((time.time() - t0) * 1000),
+                "req": "[large]" if big else req}
         await asyncio.to_thread(_audit_append, line)
     return resp
 
 
 def _audit_append(line):
-    os.makedirs(AUDIT_DIR, exist_ok=True)
-    with open(os.path.join(AUDIT_DIR, time.strftime("%Y-%m-%d") + ".jsonl"), "a") as f:
+    os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
+    p = os.path.join(AUDIT_DIR, time.strftime("%Y-%m-%d") + ".jsonl")
+    with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as f:
         f.write(json.dumps(line) + "\n")
+
+
+@app.middleware("http")
+async def token_guard(request: Request, call_next):
+    path = request.url.path
+    # /health stays open so compose can probe us without circulating the token.
+    if path == "/health":
+        return await call_next(request)
+    if path.startswith(PUBLIC_PREFIXES) or not case_token():
+        if not browser_ok(request):
+            return JSONResponse(
+                {"error": {"code": "bad_host", "message": "unexpected Host or Origin"}},
+                status_code=403)
+        return await call_next(request)
+    if not bearer_ok(request.headers.get("authorization")):
+        return JSONResponse(
+            {"error": {"code": "unauthorized", "message": "unauthorized"}},
+            status_code=401)
+    return await call_next(request)
 
 
 def unlink_run_artifacts(paths):
@@ -286,7 +332,11 @@ def wake_computer(cid: str):
 
 
 @app.get("/health")
-def health():
+def health(request: Request):
+    # Open door (compose probes it without the token), so an unauthenticated caller
+    # learns liveness only — the inventory is for whoever holds the bearer.
+    if not bearer_ok(request.headers.get("authorization")):
+        return {"ok": True}
     n = len(store.list_computers())
     try:
         dockerd.dc().ping()
@@ -433,9 +483,22 @@ def tabs_(cid: str, body: dict = Body(default={}), wake: bool = False):
                            target_id=body.get("target_id"), url=body.get("url"))
 
 
+FILE_MAX = 8 * 1024 * 1024
+
+
 @app.put("/v1/computers/{cid}/files", status_code=201)
 async def file_put(cid: str, path: str, request: Request, wake: bool = False):
-    data = await request.body()
+    if int(request.headers.get("content-length") or 0) > FILE_MAX:
+        raise ApiError(413, "too_large", "file over 8MB")
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > FILE_MAX:
+            raise ApiError(413, "too_large", "file over 8MB")
+        data.extend(chunk)
+    return await asyncio.to_thread(_file_put, cid, path, bytes(data), wake)
+
+
+def _file_put(cid, path, data, wake):
     with awake(cid, wake) as row:
         return desk_json(row, "PUT", "/file", params={"path": path}, data=data, timeout=120)
 
@@ -617,7 +680,7 @@ def _assist_set_cookie(set_sess):
 
 @app.get("/assist/static/assist.js")
 def assist_static_js():
-    """Same-origin poll script, CSP script-src 'self' (no inline)."""
+    """Same-origin poll script, served as a file so the page carries no inline JS."""
     return Response(assist.ASSIST_JS, media_type="application/javascript",
                     headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
@@ -648,26 +711,36 @@ def assist_state(token: str, request: Request):
     return JSONResponse(assist.state_payload(view), headers=headers)
 
 
+async def _assist_form(token, request):
+    """The preamble every assist POST shares: CSRF, session cookie, a still-live
+    view, and the urlencoded body. Returns (sess, view, form, expected_revision),
+    or the HTMLResponse to send back instead."""
+    if not assist.check_same_origin(request):
+        raise ApiError(403, "csrf", "missing or mismatched Origin")
+    gone = HTMLResponse(assist.GONE_HTML, status_code=410,
+                        headers={"Cache-Control": "no-store"})
+    sess = _assist_cookie(request)
+    if not sess:
+        return gone
+    try:
+        view, _ = assist.resolve_view(token, request.headers.get("cookie", ""))
+    except ApiError:
+        return gone
+    form = assist.parse_form(await request.body())
+    rev = form.get("expected_revision")
+    return sess, view, form, int(rev) if rev not in (None, "") else None
+
+
 @app.post("/assist/{token}/open")
 async def assist_open(token: str, request: Request):
     """Navigate remote Chromium to a pastable HTTPS URL (allowlisted hosts only)."""
-    if not assist.check_same_origin(request):
-        raise ApiError(403, "csrf", "missing or mismatched Origin")
-    sess = _assist_cookie(request)
-    if not sess:
-        return HTMLResponse(assist.GONE_HTML, status_code=410,
-                            headers={"Cache-Control": "no-store"})
+    got = await _assist_form(token, request)
+    if isinstance(got, HTMLResponse):
+        return got
+    sess, _, form, expected = got
     try:
-        assist.resolve_view(token, request.headers.get("cookie", ""))
-    except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410,
-                            headers={"Cache-Control": "no-store"})
-    form = assist.parse_form(await request.body())
-    url = (form.get("url") or "").strip()
-    rev = form.get("expected_revision")
-    expected = int(rev) if rev not in (None, "") else None
-    try:
-        assist.open_with_session(sess, url, expected_revision=expected)
+        await asyncio.to_thread(assist.open_with_session, sess,
+                                (form.get("url") or "").strip(), expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
             return HTMLResponse(assist.GONE_HTML, status_code=410,
@@ -682,27 +755,20 @@ async def assist_open(token: str, request: Request):
 @app.post("/assist/{token}/submit")
 async def assist_submit(token: str, request: Request):
     """OTP / submit_value, auth is the case_assist session cookie."""
-    if not assist.check_same_origin(request):
-        raise ApiError(403, "csrf", "missing or mismatched Origin")
-    sess = _assist_cookie(request)
-    if not sess:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
-    try:
-        view, _ = assist.resolve_view(token, request.headers.get("cookie", ""))
-    except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
+    got = await _assist_form(token, request)
+    if isinstance(got, HTMLResponse):
+        return got
+    sess, view, form, expected = got
     if "submit_value" not in view["allowed_actions"]:
         return HTMLResponse(
             assist.render_page(view, token),
             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-    form = assist.parse_form(await request.body())
     value = (form.get("value") or "").strip()
     if not value:
         raise ApiError(400, "bad_request", "value is required")
-    rev = form.get("expected_revision")
-    expected = int(rev) if rev not in (None, "") else None
     try:
-        row = assist.submit_with_session(sess, value, expected_revision=expected)
+        row = await asyncio.to_thread(assist.submit_with_session, sess, value,
+                                      expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
             return HTMLResponse(assist.GONE_HTML, status_code=410)
@@ -721,20 +787,13 @@ async def assist_submit(token: str, request: Request):
 @app.post("/assist/{token}/done")
 async def assist_done(token: str, request: Request):
     """CAPTCHA / verify_page, human cleared the live desk challenge."""
-    if not assist.check_same_origin(request):
-        raise ApiError(403, "csrf", "missing or mismatched Origin")
-    sess = _assist_cookie(request)
-    if not sess:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
+    got = await _assist_form(token, request)
+    if isinstance(got, HTMLResponse):
+        return got
+    sess, _, _, expected = got
     try:
-        assist.resolve_view(token, request.headers.get("cookie", ""))
-    except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410)
-    form = assist.parse_form(await request.body())
-    rev = form.get("expected_revision")
-    expected = int(rev) if rev not in (None, "") else None
-    try:
-        row = assist.done_with_session(sess, expected_revision=expected)
+        row = await asyncio.to_thread(assist.done_with_session, sess,
+                                      expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
             return HTMLResponse(assist.GONE_HTML, status_code=410)
@@ -787,6 +846,68 @@ def desk_check_ep(request: Request):
         "Cache-Control": "no-store"})
 
 
+# ---------- live view (noVNC, relayed) ----------
+
+def live_upstream(row):
+    """(base_url, headers) for a computer's noVNC: same dial deskclient uses for deskd."""
+    auth = base64.b64encode(f"agent:{row['desk_token']}".encode()).decode()
+    return dockerd.desk_base(row["id"], row["vnc_port"]), {"Authorization": f"Basic {auth}"}
+
+
+def live_path_ok(path):
+    return ".." not in path and ".." not in unquote(path)   # Starlette decoded once already
+
+
+@app.get("/v1/computers/{cid}/live/{path:path}")
+def live_http(cid: str, path: str, request: Request):
+    """noVNC's static files, relayed so Drive never needs the desks network."""
+    if not live_path_ok(path):
+        raise ApiError(400, "bad_request", "bad path")
+    base, headers = live_upstream(lifecycle.ensure_running(cid, False))
+    q = request.url.query
+    r = requests.get(f"{base}/{path}" + (f"?{q}" if q else ""), headers=headers, timeout=15)
+    return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"))
+
+
+@app.websocket("/v1/computers/{cid}/live/websockify")
+async def live_ws(ws: WebSocket, cid: str):
+    # HTTP middleware does not see WebSocket handshakes.
+    if not bearer_ok(ws.headers.get("authorization")) or (not case_token() and not browser_ok(ws)):
+        await ws.close(code=1008)
+        return
+    try:
+        base, headers = live_upstream(lifecycle.ensure_running(cid, False))
+    except ApiError:
+        await ws.close(code=1011)
+        return
+    subs = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    # max_size=None: a full-screen framebuffer update is larger than the 1 MiB default.
+    async with ws_connect("ws" + base[4:] + "/websockify", additional_headers=headers,
+                          subprotocols=subs or None, max_size=None) as up:
+        await ws.accept(subprotocol=up.subprotocol)
+
+        async def to_desk():
+            try:
+                while True:
+                    m = await ws.receive()
+                    if m["type"] != "websocket.receive":
+                        break
+                    await up.send(m["bytes"] if m.get("bytes") is not None else m["text"])
+            finally:
+                await up.close()
+
+        pump = asyncio.create_task(to_desk())
+        try:
+            async for msg in up:
+                await ws.send_bytes(msg if isinstance(msg, bytes) else msg.encode())
+        finally:
+            pump.cancel()
+            try:
+                await ws.close()
+            except RuntimeError:
+                pass   # peer already closed
+
+
 @app.get("/v1/auth-attempts/{aid}")
 def get_auth_attempt(aid: str):
     return auth_attempts.get_attempt(aid)
@@ -819,8 +940,12 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
     material = store.credential_material(cid, name)
     if not material:
         raise ApiError(404, "not_found", f"no credential {name!r}")
-    if not body.get("url"):
-        raise ApiError(400, "bad_request", "missing 'url'")
+    url = str(body.get("url", ""))
+    # Credentials must not cross a network in the clear. The desktop's own loopback
+    # never leaves the box, so a local test site over http is still allowed.
+    if not (url.startswith("https://") or (url.startswith("http://")
+            and urlsplit(url).hostname in ("localhost", "127.0.0.1", "::1"))):
+        raise ApiError(400, "bad_request", "url must be https, or http to loopback")
 
     proof_spec = login_flow._credential_proof_spec(cid, name, body.get("proof_spec"))
     attempt = auth_attempts.start_attempt(
@@ -876,6 +1001,13 @@ def answer_handoff_ep(hid: str, body: dict = Body(...)):
     if "value" not in body:
         raise ApiError(400, "bad_request", "missing 'value'")
     return handoffs.handoff_json(handoffs.answer_handoff(hid, str(body["value"])))
+
+
+@app.post("/answer/{hid}/{token}")
+def answer_public(hid: str, token: str, body: dict = Body(...)):
+    """ntfy's Approve/Deny buttons. The signed token in the URL is the whole auth —
+    a phone has no bearer, and the notification is the only place it leaks to."""
+    return handoffs.answer_by_token(hid, token, body.get("value"))
 
 
 # ---------- schedules ----------
@@ -969,7 +1101,9 @@ def sweeper():
                 prune_old_audit_files()
                 store.prune_terminal_handoffs(cutoff)
             scheduler.fire_due_schedules(_spawn)
-            session_keeper.tick()      # preflight persistent session health
+            # preflight persistent session health: it drives desks over the network,
+            # and a hung one must not stall reconcile or the schedule fire loop
+            threading.Thread(target=session_keeper.tick, daemon=True).start()
         except Exception:
             log.exception("sweeper")
 

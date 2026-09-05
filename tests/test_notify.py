@@ -36,7 +36,7 @@ def test_no_topic_means_warned_noop_not_a_crash():
 
 
 def test_ntfy_notify_posts_to_the_topic():
-    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None, "http://127.0.0.1:8787/v1")
+    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None)
     done = threading.Event()
     posted = {}
 
@@ -57,7 +57,7 @@ def test_ntfy_notify_posts_to_the_topic():
 
 def test_ntfy_notify_sends_bearer_token():
     os.environ["CASE_NTFY_TOKEN"] = "secret-tok"
-    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None, "http://127.0.0.1:8787/v1")
+    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None)
     done = threading.Event()
     posted = {}
 
@@ -78,14 +78,14 @@ def test_ntfy_notify_sends_bearer_token():
 
 
 def test_same_topic_does_not_start_answer_listen():
-    ntfy = notify.Ntfy("https://ntfy.sh", "same", "same", "http://127.0.0.1:8787/v1")
+    ntfy = notify.Ntfy("https://ntfy.sh", "same", "same")
     with mock.patch.object(notify.threading, "Thread") as th:
         ntfy.listen(lambda *a: None)
     th.assert_not_called()
 
 
 def test_push_marks_outbound():
-    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None, "http://127.0.0.1:8787/v1")
+    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None)
     done = threading.Event()
     posted = {}
 
@@ -98,6 +98,63 @@ def test_push_marks_outbound():
         ntfy.push("run finished ok")
         assert done.wait(2), "ntfy thread did not run"
     assert posted["headers"].get("X-Tags") == "case-outbound"
+
+
+def _post_once(payload, name="box"):
+    ntfy = notify.Ntfy("https://ntfy.sh", "topic-x", None)
+    done = threading.Event()
+    posted = {}
+
+    def fake_post(url, **kw):
+        posted.update(kw.get("headers") or {})
+        done.set()
+        return mock.Mock(status_code=200)
+
+    with mock.patch.object(notify.requests, "post", side_effect=fake_post):
+        ntfy.notify(payload, name)
+        assert done.wait(2), "ntfy thread did not run"
+    return posted
+
+
+def test_multiline_prompt_is_flattened_into_the_header():
+    h = _post_once({"id": "h_1", "kind": "question", "screenshot": None,
+                    "prompt": "line one\nline two\r\n  line three"})
+    assert h["X-Message"] == "line one line two line three"
+
+
+def test_assist_url_becomes_the_click_action():
+    h = _post_once({"id": "h_1", "kind": "question", "prompt": "hi", "screenshot": None,
+                    "assist_url": "https://acme.example/assist/tok"})
+    assert h["X-Click"] == "https://acme.example/assist/tok"
+    assert "X-Actions" not in h
+
+
+def test_approval_buttons_use_the_signed_answer_url():
+    h = _post_once({"id": "h_1", "kind": "approval", "prompt": "ok?", "screenshot": None,
+                    "answer_url": "https://case.example.com/answer/h_1/sig"})
+    assert h["X-Actions"].count("https://case.example.com/answer/h_1/sig") == 2
+    assert h["X-Actions"].count("headers.Content-Type=application/json") == 2
+    assert "approve" in h["X-Actions"] and "deny" in h["X-Actions"]
+
+
+def test_no_answer_url_means_no_buttons():
+    h = _post_once({"id": "h_1", "kind": "approval", "prompt": "ok?", "screenshot": None})
+    assert "X-Actions" not in h
+
+
+def test_answer_token_ok_only_for_the_matching_signature():
+    import handoffs
+    from store import store
+    with mock.patch.object(store, "sign", lambda text: "sig:" + text):
+        assert handoffs.answer_token_ok("h_1", "sig:answer:h_1")
+        assert not handoffs.answer_token_ok("h_1", "sig:answer:h_2")
+        assert not handoffs.answer_token_ok("h_1", "")
+        assert not handoffs.answer_token_ok("h_1", None)
+        try:
+            handoffs.answer_by_token("h_1", "nope", "approve")
+            assert False, "bad token must not reach the handoff"
+        except handoffs.ApiError as e:
+            assert e.status == 404, e
 
 
 def test_create_handoff_mints_assist_and_passes_url_to_notifier():

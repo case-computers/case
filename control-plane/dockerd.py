@@ -13,6 +13,8 @@ import docker
 from config import IMAGE, VNC_PORT
 from errors import ApiError
 
+NotFound = docker.errors.NotFound   # lifecycle catches this without importing docker-py
+
 DESK_INTERNAL_PORT = 8000
 VNC_INTERNAL_PORT = 6080
 
@@ -72,9 +74,13 @@ def container_run_kwargs(cid, cpus, ram_mb, volume, token):
                      # DESK_DEBUG=1 on cased mirrors chromium/websockify logs
                      # to every desktop's docker logs
                      "DESK_DEBUG": (os.environ.get("DESK_DEBUG") or "").strip(),
-                     "DESK_RESOLUTION": (os.environ.get("DESK_RESOLUTION") or "").strip()},
+                     "DESK_RESOLUTION": (os.environ.get("DESK_RESOLUTION") or "").strip(),
+                     # start.sh puts websockify behind basic auth when it is set
+                     "CASE_DOCKER_NETWORK": docker_network()},
         volumes={volume: {"bind": "/home/agent", "mode": "rw"}},
-        mem_limit=f"{int(ram_mb)}m", nano_cpus=int(cpus * 1e9), shm_size="1g",
+        # memswap_limit == mem_limit: without it the desktop swaps past its RAM cap
+        mem_limit=f"{int(ram_mb)}m", memswap_limit=f"{int(ram_mb)}m", pids_limit=512,
+        nano_cpus=int(cpus * 1e9), shm_size="1g",
         labels={"managed-by": "cased"})
     net = docker_network()
     if net:

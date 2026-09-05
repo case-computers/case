@@ -24,30 +24,42 @@ New files take the `SPDX-License-Identifier` of their directory (see
 
 ## Tests (no Docker)
 
+Use Python 3.12 and Node 22, matching CI.
+
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python tests/test_lifecycle.py
-.venv/bin/python tests/test_dockerd.py
-.venv/bin/python tests/test_token.py
-.venv/bin/python tests/test_deskd.py
-.venv/bin/python tests/test_browse.py
-node web/web-ui/test_serve.mjs
-node web/web-ui/test_phone.mjs
-node web/web-ui/test_ntfy.mjs
-node web/web-ui/test_telegram.mjs
-node web/web-ui/test_nav.mjs
-node web/web-ui/test_deploy.mjs
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+for f in tests/test_*.py; do
+  case "$f" in tests/test_acceptance.py) continue ;; esac
+  .venv/bin/python "$f" || exit 1
+done
+npm --prefix web ci
+npm --prefix web test
 ```
 
-Acceptance tests (`tests/test_acceptance.py`) need Docker and a running cased.
+## Acceptance tests (Docker)
+
+```bash
+docker build -t case-desk:acceptance image
+CASE_ACCEPTANCE_IMAGE=case-desk:acceptance .venv/bin/python -m pytest -q tests/test_acceptance.py
+```
+
+The suite starts its own cased on a random loopback port, with a temporary vault
+and token. It removes only computers created by that run. Failed runs retain
+logs and screenshots in the printed scratch directory. `CASE_KEEP=1` also keeps
+the primary test computer and its volume for inspection.
+
+A7 needs ntfy and a phone. A8 is skipped unless `CASE_A8=1` is set,
+because it restarts the Docker VM and interrupts every container using it.
+Run that check only on a dedicated test machine.
 
 ## Layout
 
-- `control-plane/` — REST API (composition root: `cased.py`)
-- `image/` — desktop container
-- `mcp/case_mcp.py` — MCP wrapper
-- `web/web-ui/` — Drive UI
-- `compose.yaml` — self-host stack
+- `control-plane/`: REST API (composition root: `cased.py`)
+- `image/`: desktop container
+- `mcp/case_mcp.py`: MCP wrapper
+- `web/web-ui/`: Drive UI
+- `compose.yaml`: self-host stack
 
 Be decent to people: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 

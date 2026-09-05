@@ -54,7 +54,12 @@ def call(method, path, **kw):
     r = requests.request(method, BASE + path, timeout=kw.pop("timeout", 150),
                          headers=_headers(), **kw)
     if r.status_code >= 400:
-        raise RuntimeError(r.text[:500])
+        try:
+            e = r.json()["error"]
+            msg = f"{e['code']}: {e['message']}"
+        except (ValueError, KeyError, TypeError):
+            msg = f"cased returned {r.status_code}"
+        raise RuntimeError(msg)
     return r
 
 
@@ -355,14 +360,15 @@ def computer_login(computer_id: str, credential: str, url: str,
 
 @mcp.tool()
 def computer_file_put(computer_id: str, path: str, content_b64: str) -> dict:
-    """Write a file on the computer (content is base64)."""
+    """Write a file on the computer (content is base64). Paths must be under /home/agent/."""
     return call("PUT", f"/computers/{computer_id}/files",
                 params={"path": path, "wake": "true"}, data=base64.b64decode(content_b64)).json()
 
 
 @mcp.tool()
 def computer_file_get(computer_id: str, path: str) -> dict:
-    """Read a file from the computer. Text files come back readable:
+    """Read a file from the computer. Paths must be under /home/agent/.
+    Text files come back readable:
     {encoding:"utf8", content, bytes}. Binary files come back as
     {encoding:"base64", content, bytes} — do not try to read base64 yourself;
     process binary files on the computer with computer_exec instead
@@ -399,8 +405,8 @@ def skill_name_ok(name):
 
 
 def skill_content_risky(content):
-    """True when content carries something secret-shaped (key: value secrets, or a
-    40+ char unbroken token). Vault names like 'credential: coupa' pass."""
+    """True when content is obviously secret-shaped (key: value secrets, or a 40+ char
+    unbroken token) — a lint, not a guarantee. Vault names like 'credential: coupa' pass."""
     m = _SKILL_RISKY_RE.search(content or "")
     return m.group(0)[:60] if m else None
 
@@ -438,7 +444,7 @@ def case_skill(computer_id: str, action: str, name: str = "", content: str = "")
     - End with a "Done means" section: how to verify the task actually succeeded.
     - Logins: ONE step — computer_login(credential=<vault name>) + auth_attempt_wait.
       NEVER write usernames, passwords, OTP codes, cookies or tokens into a skill;
-      save rejects secret-shaped content.
+      save refuses obviously secret-shaped content (a lint, not a guarantee).
     - On later runs where reality diverged: finish the task, then update the file
       and append a dated line to a `## Drift log` section — heal loudly.
     A new skill is a draft until a later run succeeds by following it."""

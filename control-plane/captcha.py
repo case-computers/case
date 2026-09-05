@@ -7,8 +7,9 @@ gate_open). Auto-solve is quarantined behind a capability adapter; Death By
 Captcha is the only vendor this release, and only for declared capabilities.
 
 Off unless CASE_DBC_* credentials are set. Only sitekey/publickey + pageurl
-(+ configured proxy) leave the box; tokens, DBC passwords, screenshots, and
-page text are never logged.
+(+ configured proxy) leave the box, and the caller strips the pageurl's query
+and fragment first, so session tokens in the URL stay here; tokens, DBC
+passwords, screenshots, and page text are never logged.
 
 Capabilities: recaptcha_v2 (DBC type 4), recaptcha_enterprise (type 25,
 requires proxy), arkose (type 6). Unsupported / terminal DBC answers

@@ -5,8 +5,8 @@
  * Serves Drive at / (index.html) and the computer deployer at /deploy.
  *
  * CASE_LOCAL (default on): 127.0.0.1 / compose `cased` — no SSH tunnel, /live
- * proxies noVNC on the host port or docker network. CASE_LOCAL=0 is a no-op
- * here (this process never tunnels); it only flips the health `local` flag.
+ * relays noVNC through cased. CASE_LOCAL=0 is a no-op here (this process never
+ * tunnels); it only flips the health `local` flag.
  *
  * OpenAI key arrives per-request in x-openai-key; Anthropic in x-anthropic-key;
  * never logged.
@@ -29,6 +29,21 @@ const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
 const BIND = process.env.CASE_BIND || '127.0.0.1';
 const TOKEN = (process.env.CASE_TOKEN || '').trim();
+const HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', 'ui',
+  ...(process.env.CASE_ALLOWED_HOSTS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  ...((process.env.CASE_PUBLIC_HOST || '').trim() ? [process.env.CASE_PUBLIC_HOST.trim().toLowerCase()] : [])]);
+export function hostOf(v) {
+  v = String(v || '').toLowerCase();
+  return v.startsWith('[') ? v.slice(0, v.indexOf(']') + 1) : v.split(':')[0];
+}
+// Host must be ours, and so must a present Origin: the two together stop DNS
+// rebinding, cross-site form posts and cross-site websocket opens.
+export function browserOk(req, hosts = HOSTS) {
+  if (!hosts.has(hostOf(req.headers.host))) return false;
+  const o = req.headers.origin;
+  if (!o) return true;
+  try { return hosts.has(hostOf(new URL(o).host)); } catch { return false; }
+}
 
 export function parseCaseUrl(raw) {
   const u = new URL(String(raw || 'http://127.0.0.1:8787'));
@@ -88,18 +103,13 @@ export function tokenMatches(req, need = TOKEN) {
   return crypto.timingSafeEqual(Buffer.from(got), Buffer.from(need));
 }
 
-const vncById = new Map();
-export function liveTarget(cid) {
-  if (!cid) return null;
-  if ((process.env.CASE_DOCKER_NETWORK || '').trim()) return { hostname: `case-${cid}`, port: 6080 };
-  const port = vncById.get(cid);
-  if (port) return { hostname: '127.0.0.1', port };
-  return null;
-}
-
 // ---------- small helpers (exported for tests) ----------
 export function shq(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+export function parseErr(buf, fallback) {
+  try { return JSON.parse(buf.toString('utf8'))?.error?.message || fallback; } catch { return fallback; }
 }
 
 export function pathOk(p) {
@@ -202,14 +212,11 @@ async function computers(res) {
       originHealth().catch(() => ({ json: null })),
     ]);
     if (r.status >= 400 || !r.json) return json(res, 502, { error: r.json?.error?.message || 'cased unreachable', up: false, local: LOCAL });
-    const rows = (r.json.computers || []).map((c) => {
-      if (c.id && c.vnc_port) vncById.set(c.id, c.vnc_port);
-      return {
-        id: c.id, name: c.name, state: c.state === 'running' ? 'awake' : c.state,
-        credentials: c.credentials || [], pending_handoffs: c.pending_handoffs || 0,
-        cpus: c.resources?.cpus ?? null, ram_mb: c.resources?.ram_mb ?? null,
-      };
-    });
+    const rows = (r.json.computers || []).map((c) => ({
+      id: c.id, name: c.name, state: c.state === 'running' ? 'awake' : c.state,
+      credentials: c.credentials || [], pending_handoffs: c.pending_handoffs || 0,
+      cpus: c.resources?.cpus ?? null, ram_mb: c.resources?.ram_mb ?? null,
+    }));
     const pick = rows.find((c) => c.state === 'awake') || rows[0];
     if (pick) cachedCid = pick.id;
     const awake = ['awake', 'running', 'waking', 'creating'];
@@ -277,12 +284,18 @@ async function fsFile(res, url) {
       `/computers/${encodeURIComponent(id)}/files?path=${encodeURIComponent(p)}&wake=true`,
       { timeoutMs: 60000, raw: true });
     if (r.status >= 400) {
-      let msg = 'read failed';
-      try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+      const msg = parseErr(r.buf, 'read failed');
       return json(res, r.status, { error: msg });
     }
     if (r.buf.length > FILE_CAP) return json(res, 413, { error: 'file over 8MB' });
-    return send(res, 200, r.buf, mimeFor(p));
+    const ext = path.extname(p).toLowerCase();
+    const inline = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'].includes(ext);
+    res.writeHead(200, {
+      'content-type': inline ? mimeFor(p) : 'application/octet-stream',
+      'content-disposition': inline ? 'inline' : `attachment; filename="${path.basename(p).replace(/["\r\n]/g, '')}"`,
+      'x-content-type-options': 'nosniff', 'cache-control': 'no-store',
+    });
+    return res.end(r.buf);
   } catch (err) {
     return json(res, 502, { error: err.message || 'cased unreachable' });
   }
@@ -481,8 +494,7 @@ async function runExtra(plan) {
       catch { return { ok: false, error: 'bad base64', act: plan.act }; }
       const r = await api(plan.method, plan.rel, { raw: true, rawBody: buf, timeoutMs: 120000 });
       if (r.status >= 400) {
-        let msg = 'write failed';
-        try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+        const msg = parseErr(r.buf, 'write failed');
         return { ok: false, status: r.status, error: msg, act: plan.act };
       }
       let json = null;
@@ -492,8 +504,7 @@ async function runExtra(plan) {
     if (plan.screenshot) {
       const r = await api(plan.method, plan.rel, { raw: true, timeoutMs: 30000 });
       if (r.status >= 400) {
-        let msg = 'screenshot failed';
-        try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+        const msg = parseErr(r.buf, 'screenshot failed');
         return { ok: false, status: r.status, error: msg, act: plan.act };
       }
       return {
@@ -505,8 +516,7 @@ async function runExtra(plan) {
     if (plan.rawFile) {
       const r = await api(plan.method, plan.rel, { raw: true, timeoutMs: 60000 });
       if (r.status >= 400) {
-        let msg = 'read failed';
-        try { msg = JSON.parse(r.buf.toString('utf8'))?.error?.message || msg; } catch { /* keep */ }
+        const msg = parseErr(r.buf, 'read failed');
         return { ok: false, status: r.status, error: msg, act: plan.act };
       }
       const buf = r.buf.slice(0, FILE_TOOL_CAP);
@@ -552,7 +562,9 @@ try {
     t.items = histCloseOpenCalls(migrateShots(t.items));
     THREADS.set(t.id, t);
   }
-} catch { /* fresh */ }
+} catch (err) {
+  if (err.code !== 'ENOENT') console.warn('threads:', err.message);
+}
 const CHAT_BUSY = new Set();
 const STEER = new Map(); // thread id -> user texts typed while the turn runs
 function takeSteers(tid) {
@@ -585,7 +597,10 @@ function saveThreads() {
         .slice(0, THREADS.size - MAX_THREADS);
       for (const t of stale) THREADS.delete(t.id);
     }
-    try { fs.writeFileSync(THREADS_FILE, JSON.stringify([...THREADS.values()])); } catch { /* best-effort */ }
+    try {
+      fs.writeFileSync(THREADS_FILE + '.tmp', JSON.stringify([...THREADS.values()]));
+      fs.renameSync(THREADS_FILE + '.tmp', THREADS_FILE);
+    } catch (err) { console.warn('threads:', err.message); }
   }, 400);
 }
 if (THREADS.size) saveThreads();
@@ -633,13 +648,22 @@ function threadsRoute(req, res, url) {
   if (req.method === 'DELETE') { THREADS.delete(id); saveThreads(); return json(res, 200, { ok: true }); }
   return json(res, 405, { error: 'method' });
 }
+function finishTurn(hist, thread) {
+  hist.items = histCloseOpenCalls(hist.items);
+  histTrim(hist);
+  thread.updated = Date.now();
+  saveThreads();
+}
+
 const HIST_MAX = 240_000;
 export function histTrim(h, max = HIST_MAX) {
   // Turn boundaries are derived, not tracked: the only user-role items are the ones
   // that open a turn, so they survive any filtering of the array.
   let starts = h.items.map((it, i) => (it.role === 'user' ? i : -1)).filter((i) => i >= 0);
-  while (starts.length > 1 && JSON.stringify(h.items).length > max) {
+  let size = JSON.stringify(h.items).length;
+  while (starts.length > 1 && size > max) {
     const cut = starts[1];
+    size -= JSON.stringify(h.items.slice(0, cut)).length;
     h.items.splice(0, cut);
     starts = starts.slice(1).map((i) => i - cut);
   }
@@ -671,6 +695,19 @@ export function stashShot(b64, dir = shotsDir()) {
     if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(String(b64 || ''), 'base64'));
   } catch { /* best-effort; hydrateShots falls back to a text note */ }
   return { role: 'user', shot: file, content: [{ type: 'input_text', text: '[screenshot]' }] };
+}
+
+// A click that changed nothing yields a byte-identical png. Re-sending it buys
+// no information and then rides along in every later round of the turn.
+export function pushShot(items, shots, b64, dir = shotsDir()) {
+  const h = crypto.createHash('sha1').update(b64).digest('hex');
+  if (shots.has(h)) {
+    items.push({ role: 'user', content: [{ type: 'input_text',
+      text: 'screenshot identical to an earlier one this turn — the screen has not changed' }] });
+    return;
+  }
+  shots.add(h);
+  items.push(stashShot(b64, dir));
 }
 
 export function hydrateShots(items, dir = shotsDir()) {
@@ -938,6 +975,7 @@ export async function runTurn({
   try {
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
+      const shots = new Set();
       const { text: out, finished, spend, overBudget } = await anthropicToolLoop({
         key: auth.key,
         model,
@@ -973,6 +1011,7 @@ export async function runTurn({
             actFor(name, args || {}, id));
           const { image_b64, ...persist } = result;
           hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(persist) });
+          if (image_b64) pushShot(hist.items, shots, image_b64);
           return result;
         },
       });
@@ -986,10 +1025,7 @@ export async function runTurn({
       } else if (text) {
         hist.items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
       }
-      hist.items = histCloseOpenCalls(hist.items);
-      histTrim(hist);
-      thread.updated = Date.now();
-      saveThreads();
+      finishTurn(hist, thread);
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
       return { text, computerId: id, threadId: thread.id };
     }
@@ -1109,18 +1145,7 @@ export async function runTurn({
         if (image_b64) images.push(image_b64);
       }
       hist.items = histCloseOpenCalls(hist.items, { keepReasoning: true });
-      for (const b64 of images) {
-        // A click that changed nothing yields a byte-identical png. Re-sending it buys
-        // no information and then rides along in every later round of the turn.
-        const h = crypto.createHash('sha1').update(b64).digest('hex');
-        if (shots.has(h)) {
-          hist.items.push({ role: 'user', content: [{ type: 'input_text',
-            text: 'screenshot identical to an earlier one this turn — the screen has not changed' }] });
-          continue;
-        }
-        shots.add(h);
-        hist.items.push(stashShot(b64));
-      }
+      for (const b64 of images) pushShot(hist.items, shots, b64);
     }
     if (!finished && !stopped()) {
       // Out of steps or out of budget mid-task. Say so — silence here reads as
@@ -1133,10 +1158,7 @@ export async function runTurn({
     }
     // Reasoning items are only valid inside the turn that produced them; carrying
     // them forward bloats the payload and some models reject stale ones.
-    hist.items = histCloseOpenCalls(hist.items);
-    histTrim(hist);
-    thread.updated = Date.now();
-    saveThreads();
+    finishTurn(hist, thread);
     const eff = Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
     console.log(`drive turn ${thread.id}: in=${spend.in} cached=${spend.cached}`
       + ` (${spend.in ? Math.round((100 * spend.cached) / spend.in) : 0}%)`
@@ -1149,10 +1171,7 @@ export async function runTurn({
     // real. histCloseOpenCalls synthesizes outputs for any dangling
     // function_call so later requests don't 400. (Rate limits are retried
     // inside the round; landing here means retries ran dry or a real fault.)
-    hist.items = histCloseOpenCalls(hist.items);
-    histTrim(hist);
-    thread.updated = Date.now();
-    saveThreads();
+    finishTurn(hist, thread);
     if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
     return { text: '', computerId: id, threadId: thread.id, error: err?.message || 'provider error' };
   } finally {
@@ -1379,11 +1398,15 @@ const PUSHED = new Set();
 
 async function pushHandoff(cfg, h) {
   if (PUSHED.has(h.id)) return;
+  if (PUSHED.size > 500) { const [old] = PUSHED; PUSHED.delete(old); }
   PUSHED.add(h.id);
   const m = telegram.handoffMessage(h);
   try {
     const sent = await telegram.tgApi(cfg.token, 'sendMessage', { chat_id: cfg.chatId, ...m });
-    if (m.reply_markup.force_reply) CODE_PROMPTS.set(Number(sent.message_id), h.id);
+    if (m.reply_markup.force_reply) {
+      if (CODE_PROMPTS.size > 500) { const [old] = CODE_PROMPTS.keys(); CODE_PROMPTS.delete(old); }
+      CODE_PROMPTS.set(Number(sent.message_id), h.id);
+    }
   } catch (err) {
     PUSHED.delete(h.id);
     console.warn('telegram handoff:', err.message || err);
@@ -1469,20 +1492,29 @@ export function startPhoneTelegram(env = process.env) {
   return true;
 }
 
-// ---------- noVNC proxy (compose network or host-mapped vnc_port) ----------
+// ---------- live view (relayed by cased; only cased touches desktops) ----------
+const LIVE_PASS = ['accept', 'accept-language', 'user-agent', 'if-none-match', 'if-modified-since'];
+const LIVE_WS_PASS = ['connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version',
+  'sec-websocket-protocol', 'sec-websocket-extensions'];
+// Allowlist, not {...req.headers}: the browser's Drive cookie/Authorization are
+// Drive's credentials and must not ride upstream.
+export function liveHeaders(req, ws = false, token = TOKEN) {
+  const out = { host: `${CASE.hostname}:${CASE.port}` };
+  for (const k of ws ? [...LIVE_PASS, ...LIVE_WS_PASS] : LIVE_PASS) if (req.headers[k] != null) out[k] = req.headers[k];
+  if (token) out.authorization = `Bearer ${token}`;
+  return out;
+}
 function vncUpstream(req) {
   if (livePathHasDotDot(req.url)) return null;
   const destPath = liveDestPath(req.url);
-  if (destPath.includes('..')) return null;
   const cid = liveCid(new URL(req.url || '/', 'http://x').pathname) || cachedCid;
-  const t = liveTarget(cid);
-  if (!t) return null;
-  return { ...t, path: destPath, hostHeader: `${t.hostname}:${t.port}` };
+  if (!cid) return null;
+  return { hostname: CASE.hostname, port: CASE.port, path: `/v1/computers/${encodeURIComponent(cid)}/live${destPath}` };
 }
 function vncHttp(req, res) {
   const t = vncUpstream(req);
   if (!t) { res.writeHead(502).end('no computer / vnc'); return; }
-  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: req.method, headers: { ...req.headers, host: t.hostHeader } }, (upRes) => {
+  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: req.method, headers: liveHeaders(req) }, (upRes) => {
     res.writeHead(upRes.statusCode || 502, upRes.headers);
     upRes.pipe(res);
   });
@@ -1492,7 +1524,7 @@ function vncHttp(req, res) {
 function vncWs(req, socket, head) {
   const t = vncUpstream(req);
   if (!t) { socket.destroy(); return; }
-  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: 'GET', headers: { ...req.headers, host: t.hostHeader } });
+  const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: 'GET', headers: liveHeaders(req, true) });
   up.on('upgrade', (upRes, upSocket, upHead) => {
     const lines = ['HTTP/1.1 101 Switching Protocols'];
     for (const [k, v] of Object.entries(upRes.headers)) lines.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
@@ -1518,6 +1550,21 @@ export function pageFile(p) {
 export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://x');
   const p = url.pathname;
+  if (!browserOk(req)) return json(res, 403, { error: 'unexpected Host or Origin' });
+  if (TOKEN && req.method === 'GET' && url.searchParams.has('token') && tokenMatches(req)) {
+    res.writeHead(302, {
+      Location: p === '/' ? '/' : p,
+      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+      'Cache-Control': 'no-store',
+    });
+    return res.end();
+  }
+  if (!tokenMatches(req)) {
+    if (p.startsWith('/api/') || p.startsWith('/live')) {
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    return send(res, 401, 'unauthorized — open with ?token=…');
+  }
   if (p === '/api/health' && req.method === 'GET') {
     try {
       const h = await originHealth();
@@ -1531,20 +1578,6 @@ export const server = http.createServer(async (req, res) => {
     } catch {
       return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0 });
     }
-  }
-  if (TOKEN && url.searchParams.get('token') === TOKEN && req.method === 'GET') {
-    res.writeHead(302, {
-      Location: p === '/' ? '/' : p,
-      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
-      'Cache-Control': 'no-store',
-    });
-    return res.end();
-  }
-  if (!tokenMatches(req)) {
-    if (p.startsWith('/api/') || p.startsWith('/live')) {
-      return json(res, 401, { error: 'unauthorized' });
-    }
-    return send(res, 401, 'unauthorized — open with ?token=…');
   }
   try {
     if (req.method === 'GET' && p === '/api/computers') return computers(res);
@@ -1577,7 +1610,7 @@ export const server = http.createServer(async (req, res) => {
   send(res, 200, fs.readFileSync(abs), mimeFor(abs));
 });
 server.on('upgrade', (req, socket, head) => {
-  if (!tokenMatches(req)) { socket.destroy(); return; }
+  if (!browserOk(req) || !tokenMatches(req)) { socket.destroy(); return; }
   if ((req.url || '').startsWith('/live')) return vncWs(req, socket, head);
   socket.destroy();
 });

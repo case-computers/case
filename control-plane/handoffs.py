@@ -17,6 +17,8 @@ Status: pending → validating → completed|failed; TTL → expired. All status
 writes go through store.transition_handoff (CAS + revision bump). Legacy
 `answered` is treated as completed on read for one release.
 """
+import hmac
+import json
 import os
 
 import assist
@@ -139,6 +141,9 @@ def create_handoff(computer_row, kind, prompt, screenshot=None, login_credential
     assist_url = f"https://{host}/assist/{raw_token}" if host else ""
     if not host:
         log.warning("CASE_PUBLIC_HOST unset — notification carries no assist link")
+    answer_url = ""
+    if kind == "approval" and host:
+        answer_url = f"https://{host}/answer/{hid}/{store.sign('answer:' + hid)}"
     notifier.notify({
         "id": hid,
         "computer_id": computer_row["id"],
@@ -147,6 +152,7 @@ def create_handoff(computer_row, kind, prompt, screenshot=None, login_credential
         "screenshot": screenshot,
         "domain": domain,
         "assist_url": assist_url,
+        "answer_url": answer_url,
         "expires_at": expires_at,
     }, computer_row["name"])
     return handoff_json(row)
@@ -174,6 +180,7 @@ def _attempt_id_of(row):
 
 def expire_stale():
     cutoff = (datetime.now(timezone.utc) - HANDOFF_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+    import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
     for h in store.stale_pending_handoffs(cutoff):
         if store.transition_handoff(h["id"], "expired") is None:
             continue   # another writer (answer/resume) won the race; not ours to expire
@@ -182,7 +189,6 @@ def expire_stale():
         if aid:
             # Attempt owns credential outcome, do not double-write from LOGIN_CTX.
             try:
-                import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
                 auth_attempts.fail_attempt(aid, reason="handoff_expired")
             except Exception as e:
                 log.warning("expire_stale fail_attempt %s: %s", aid, e)
@@ -192,6 +198,13 @@ def expire_stale():
             store.record_credential_result(ctx["computer_id"], ctx["credential"], "failed")
             emit("login_completed", {"computer_id": ctx["computer_id"],
                                      "credential": ctx["credential"], "status": "failed"})
+    # An attempt whose challenge was answered elsewhere (or never raised one) has no
+    # handoff to expire, so it would sit `active` forever and 409 every later login.
+    for a in store.stale_active_auth_attempts(cutoff):
+        try:
+            auth_attempts.fail_attempt(a["id"], reason="stale")
+        except Exception as e:
+            log.warning("expire_stale attempt %s: %s", a["id"], e)
 
 
 # Lists never carry the screenshot. A pending 2FA handoff holds a full-display PNG as
@@ -355,7 +368,10 @@ def submit_handoff_value(hid, value):
         computer = get_computer(row["computer_id"])
         submitted = False
         try:
-            out = auth_submit_challenge(computer, row["kind"], value=value)
+            attempt = store.get_auth_attempt(aid)
+            credential = store.get_credential(row["computer_id"], attempt["credential"])
+            domains = json.loads(credential["domains"]) if credential else []
+            out = auth_submit_challenge(computer, row["kind"], value=value, domains=domains)
             submitted = bool(isinstance(out, dict) and out.get("ok"))
         except Exception as e:
             log.warning("auth_submit_challenge failed: %s", e)
@@ -444,6 +460,17 @@ def answer_handoff(hid, value):
                        "verify_page handoff expects value 'done' (or 'approve')")
     raise ApiError(400, "bad_request",
                    f"handoff continuation {cont!r} cannot be answered this way")
+
+
+def answer_token_ok(hid, token):
+    return hmac.compare_digest(store.sign("answer:" + hid), token or "")
+
+
+def answer_by_token(hid, token, value):
+    """Public ntfy-button door: the token is the only credential, so a bad one is a 404."""
+    if not answer_token_ok(hid, token):
+        raise ApiError(404, "not_found", "no such handoff")
+    return answer_handoff(hid, value)
 
 
 def on_ntfy_answer(hid, value):

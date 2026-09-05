@@ -81,16 +81,6 @@ def _is_ip_literal(host):
         return False
 
 
-def _blocked_ip(host):
-    """True when host is an IP that must never be opened (private/loopback/…)."""
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return bool(ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
-
-
 def validate_assist_open_url(url):
     """Return hostname if `url` is a public HTTPS URL safe for Assist open_url.
 
@@ -112,7 +102,7 @@ def validate_assist_open_url(url):
     host = host.lower().rstrip(".")
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
         raise ApiError(400, "bad_request", "url host not allowed")
-    if _is_ip_literal(host) or _blocked_ip(host):
+    if _is_ip_literal(host):
         raise ApiError(400, "bad_request", "url host not allowed")
     if not HOSTNAME.match(host):
         raise ApiError(400, "bad_request", "url host not allowed")

@@ -24,10 +24,12 @@ def test_vis_rejects_opacity_zero_and_zero_size():
     assert "opacity" in deskd.VIS
     assert "getBoundingClientRect" in deskd.VIS
     assert "visibility" in deskd.VIS
-    # Observe uses its own vis helper; keep the same opacity/rect guards there.
+    # Observe is built from VIS and the shared selectors, not a retyped copy.
     assert "opacity" in deskd.OBSERVE_AUTH_JS
     assert "getBoundingClientRect" in deskd.OBSERVE_AUTH_JS
     assert "visibility" in deskd.OBSERVE_AUTH_JS
+    assert deskd.USER_SEL in deskd.OBSERVE_AUTH_JS
+    assert deskd.CODE_SEL in deskd.OBSERVE_AUTH_JS
 
 
 def test_focus_helpers_select_before_insert():
@@ -277,7 +279,8 @@ class TwoStepNoPasswordTab:
 
 
 def _run_fill_login_form(tab):
-    cred = {"username": "ava", "secret": "s3cret", "name": "x"}
+    cred = {"username": "ava", "secret": "s3cret", "name": "x",
+            "domains": [deskd.urlparse(tab._href).hostname]}
     with mock.patch.object(deskd, "fill") as fill, \
          mock.patch.object(deskd, "press_enter") as press, \
          mock.patch.object(deskd, "settle"):
@@ -320,6 +323,90 @@ def test_fill_login_form_fails_when_identifier_step_never_moved():
     tab = TwoStepNoPasswordTab(text="Sign in to continue")
     reason, _, _ = _run_fill_login_form(tab)
     assert reason == "password field never appeared", reason
+
+
+class OneStepTab:
+    def __init__(self, href):
+        self.href = href
+
+    def js(self, expr):
+        if expr == deskd.HAS_FIELDS:
+            return {"user": True, "pass": True}
+        if expr == "location.href":
+            return self.href
+        return None
+
+    def cmd(self, *a, **k):
+        return {}
+
+
+def test_fill_login_form_allows_https_and_loopback_origins():
+    for href, domain in (("https://site.com/login", "site.com"),
+                         ("http://localhost/login", "localhost"),
+                         ("http://127.0.0.1/login", "127.0.0.1"),
+                         ("http://[::1]/login", "::1")):
+        tab = OneStepTab(href)
+        cred = {"username": "ava", "secret": "s3cret", "domains": [domain]}
+        with mock.patch.object(deskd, "fill") as fill, \
+             mock.patch.object(deskd, "press_enter"), \
+             mock.patch.object(deskd, "settle"):
+            assert deskd.fill_login_form(tab, cred) is None
+        assert fill.call_count == 2
+
+
+def test_fill_login_form_rechecks_foreign_https_origin_before_second_step_password():
+    tab = TwoStepNoPasswordTab(href="https://site.com/login", user_after=False)
+    cred = {"username": "ava", "secret": "s3cret", "domains": ["site.com"]}
+    original_js = tab.js
+
+    def js(expr):
+        if expr == deskd.HAS_FIELDS and tab.submitted:
+            return {"user": False, "pass": True}
+        if expr == "location.href" and tab.submitted:
+            return "https://evil.example/login?token=topsecret"
+        return original_js(expr)
+
+    tab.js = js
+    with mock.patch.object(deskd, "fill") as fill, \
+         mock.patch.object(deskd, "settle"), \
+         mock.patch.object(deskd, "press_enter") as press:
+        press.side_effect = lambda *_a, **_k: setattr(tab, "submitted", True)
+        reason = deskd.fill_login_form(tab, cred)
+    assert reason == "page origin 'evil.example' not in credential domains"
+    fill.assert_called_once_with(tab, deskd.FOCUS_USER, "ava")
+
+
+def test_fill_login_form_rechecks_same_domain_http_before_second_step_password():
+    tab = TwoStepNoPasswordTab(href="https://site.com/login", user_after=False)
+    cred = {"username": "ava", "secret": "s3cret", "domains": ["site.com"]}
+    original_js = tab.js
+
+    def js(expr):
+        if expr == deskd.HAS_FIELDS and tab.submitted:
+            return {"user": False, "pass": True}
+        if expr == "location.href" and tab.submitted:
+            return "http://site.com/login?token=topsecret"
+        return original_js(expr)
+
+    tab.js = js
+    with mock.patch.object(deskd, "fill") as fill, \
+         mock.patch.object(deskd, "settle"), \
+         mock.patch.object(deskd, "press_enter") as press:
+        press.side_effect = lambda *_a, **_k: setattr(tab, "submitted", True)
+        reason = deskd.fill_login_form(tab, cred)
+    assert reason == "page origin scheme 'http' on host 'site.com' is not HTTPS"
+    assert "topsecret" not in reason
+    fill.assert_called_once_with(tab, deskd.FOCUS_USER, "ava")
+
+
+def test_classify_rechecks_origin_before_totp_fill():
+    cred = {"name": "x", "domains": ["site.com"], "totp_seed": "GEZDGNBVGY3TQOJQ"}
+    tab = FakeTab(text="Enter the verification code", href="http://site.com/login")
+    with mock.patch.object(deskd, "fill") as fill:
+        result = deskd.classify(tab, cred)
+    assert result == {"status": "failed",
+                      "reason": "page origin scheme 'http' on host 'site.com' is not HTTPS"}
+    fill.assert_not_called()
 
 
 def test_finalize_auth_observation_caps_page_state_and_signals():
@@ -454,6 +541,210 @@ def test_capture_step_getResponseBody_error_is_visible():
     deskd.capture_step(reply, re.compile("x"), want, pending, buf)
     assert buf[0]["error"] == "No data found for resource" and "body" not in buf[0]
 
+
+# ---- the injection gate and /file scoping, over the real ASGI app ----
+
+import tempfile  # noqa: E402
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+H = {"Authorization": "Bearer test"}
+
+
+def _client():
+    return TestClient(deskd.app, raise_server_exceptions=False)
+
+
+def test_no_bearer_is_401():
+    assert _client().get("/health").status_code == 401
+    assert _client().get("/health", headers=H).status_code == 200
+
+
+def test_injection_gates_screenshot_exec_and_file():
+    deskd.state["injecting"] = True
+    try:
+        c = _client()
+        for r in (c.get("/screenshot", headers=H),
+                  c.post("/exec", headers=H, json={"command": "id"}),
+                  c.get("/file", headers=H, params={"path": "/home/agent/x"})):
+            assert r.status_code == 423
+            assert r.json()["error"]["code"] == "credential_injection"
+    finally:
+        deskd.state["injecting"] = False
+
+
+def test_file_get_rejects_paths_outside_home():
+    c = _client()
+    assert c.get("/file", headers=H, params={"path": "/etc/passwd"}).status_code == 400
+    esc = c.get("/file", headers=H, params={"path": "/home/agent/../../etc/passwd"})
+    assert esc.status_code == 400                          # realpath resolves .. before the check
+    assert esc.json()["error"]["code"] == "bad_path"
+
+
+def test_file_put_get_roundtrip_under_home():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            c = _client()
+            p = f"{home}/sub/note.txt"
+            put = c.put("/file", headers=H, params={"path": p}, content=b"hello")
+            assert put.status_code == 201 and put.json()["bytes"] == 5
+            got = c.get("/file", headers=H, params={"path": p})
+            assert got.status_code == 200 and got.content == b"hello"
+
+
+def test_file_put_rejects_oversized_content_length():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            r = _client().put("/file", headers={**H, "content-length": "99999999"},
+                              params={"path": f"{home}/big"}, content=b"x")
+            assert r.status_code == 413
+            assert not os.path.exists(f"{home}/big")       # rejected before any write
+
+
+def test_file_put_streams_within_limit_without_content_length():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            chunks = iter((b"hello", b" world"))
+            r = _client().put("/file", headers=H, params={"path": f"{home}/chunked"},
+                              content=chunks)
+            assert "content-length" not in r.request.headers
+            assert r.status_code == 201 and r.json()["bytes"] == 11
+            with open(f"{home}/chunked", "rb") as f:
+                assert f.read() == b"hello world"
+
+
+def test_file_put_rejects_oversized_stream_without_content_length():
+    with tempfile.TemporaryDirectory() as td:
+        home = os.path.realpath(td)
+        with mock.patch.object(deskd, "HOME", home):
+            chunks = iter((b"x" * deskd.FILE_MAX, b"y"))
+            r = _client().put("/file", headers=H, params={"path": f"{home}/big"},
+                              content=chunks)
+            assert "content-length" not in r.request.headers
+            assert r.status_code == 413
+            assert not os.path.exists(f"{home}/big")
+
+
+# ---- login clears the typed password before the injection gate drops ----
+
+class RecordingTab:
+    """Records every js() with the gate state at that moment."""
+
+    def __init__(self):
+        self.js_calls = []
+
+    def js(self, expr):
+        self.js_calls.append((expr, deskd.state["injecting"]))
+        if expr == "location.href":
+            return "https://site.com/login"
+        return None
+
+    def cmd(self, *a, **k):
+        return {}
+
+    def close(self):
+        pass
+
+
+def test_login_clears_password_field_while_still_gated():
+    # A failed submit leaves the secret in the DOM; clearing it after injecting
+    # goes False would expose it to /screenshot and /eval in between.
+    tab = RecordingTab()
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "navigate"), \
+         mock.patch.object(deskd, "domain_ok", return_value=True), \
+         mock.patch.object(deskd, "fill_login_form", return_value=None), \
+         mock.patch.object(deskd, "wait_post_submit"), \
+         mock.patch.object(deskd, "classify", return_value={"status": "success"}):
+        out = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
+                           "url": "https://site.com/login"})
+    assert out == {"status": "success"}, out
+    assert (deskd.CLEAR_PASS, True) in tab.js_calls, tab.js_calls
+    assert deskd.state["injecting"] is False
+
+
+def test_login_rejects_http_redirect_before_form_fill():
+    tab = RecordingTab()
+    tab.js = lambda expr: "http://site.com/login" if expr == "location.href" else None
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "navigate"), \
+         mock.patch.object(deskd, "fill_login_form") as fill_form:
+        out = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
+                           "url": "https://site.com/login"})
+    assert out.status_code == 400
+    assert out.body == b'{"error":{"code":"domain_mismatch","message":"page origin scheme \'http\' on host \'site.com\' is not HTTPS"}}'
+    fill_form.assert_not_called()
+
+
+def test_login_resume_rechecks_origin_before_otp_fill():
+    tab = RecordingTab()
+    tab.js = lambda expr: "http://site.com/login" if expr == "location.href" else None
+    deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action") as apply:
+        out = deskd.login_resume({"value": "123456"})
+    assert out == {"status": "failed",
+                   "reason": "page origin scheme 'http' on host 'site.com' is not HTTPS"}
+    apply.assert_not_called()
+
+
+def test_login_resume_rechecks_nonapproval_code_path_origin():
+    tab = RecordingTab()
+    tab.js = lambda expr: "https://evil.example/login?token=topsecret" if expr == "location.href" else None
+    deskd.state["login"] = {"kind": "captcha", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action") as apply:
+        out = deskd.login_resume({"value": "123456"})
+    assert out == {"status": "failed", "reason": "page origin 'evil.example' not in credential domains"}
+    assert "topsecret" not in out["reason"]
+    apply.assert_not_called()
+
+
+class ChallengeTab:
+    def __init__(self, href):
+        self.href = href
+
+    def js(self, expr):
+        if expr == "location.href":
+            return self.href
+        return None
+
+    def close(self):
+        pass
+
+
+def test_auth_submit_challenge_requires_domains_for_code():
+    with mock.patch.object(deskd, "Tab") as tab:
+        out = deskd.auth_submit_challenge({"kind": "otp", "value": "123456"})
+    assert out.status_code == 400
+    assert out.body == b'{"error":{"code":"bad_request","message":"body needs \'domains\' for otp/code"}}'
+    tab.assert_not_called()
+
+
+def test_auth_submit_challenge_allows_https_and_loopback_code_origins():
+    for href, domain in (("https://site.com/challenge", "site.com"),
+                         ("http://localhost/challenge", "localhost"),
+                         ("http://127.0.0.1/challenge", "127.0.0.1"),
+                         ("http://[::1]/challenge", "::1")):
+        with mock.patch.object(deskd, "Tab", lambda: ChallengeTab(href)), \
+             mock.patch.object(deskd, "apply_challenge_action", return_value=None) as apply:
+            out = deskd.auth_submit_challenge(
+                {"kind": "otp", "value": "123456", "domains": [domain]})
+        assert out == {"ok": True}
+        apply.assert_called_once()
+
+
+def test_auth_submit_challenge_rejects_foreign_https_without_query_secret():
+    with mock.patch.object(deskd, "Tab", lambda: ChallengeTab("https://evil.example/code?token=topsecret")), \
+         mock.patch.object(deskd, "apply_challenge_action") as apply:
+        out = deskd.auth_submit_challenge(
+            {"kind": "code", "value": "123456", "domains": ["site.com"]})
+    assert out == {"ok": False, "reason": "page origin 'evil.example' not in credential domains"}
+    assert "topsecret" not in out["reason"]
+    apply.assert_not_called()
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

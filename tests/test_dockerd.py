@@ -27,6 +27,14 @@ def test_host_mode_dials_loopback_and_publishes_ports():
     assert kw["name"] == "case-c_ab"
 
 
+def test_container_limits_cover_swap_and_pids():
+    # mem_limit alone lets a desktop swap past its budget, and a fork bomb in the
+    # browser takes the host's pid table with it.
+    kw = dockerd.container_run_kwargs("c_ab", 1, 2048, "vol", "tok")
+    assert kw["pids_limit"] == 512
+    assert kw["memswap_limit"] == kw["mem_limit"] == "2048m"
+
+
 def test_compose_mode_uses_container_dns_and_no_host_ports():
     _net("case")
     try:
@@ -143,6 +151,7 @@ def test_create_clears_a_name_stuck_in_removal_and_retries_once():
 
 if __name__ == "__main__":
     test_host_mode_dials_loopback_and_publishes_ports()
+    test_container_limits_cover_swap_and_pids()
     test_compose_mode_uses_container_dns_and_no_host_ports()
     test_deskclient_accepts_sqlite_row()
     test_deskclient_url_follows_the_network()

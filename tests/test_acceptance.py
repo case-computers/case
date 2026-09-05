@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: MIT
-"""Acceptance tests A1–A10. Run order matters — pytest runs top-down.
+"""Acceptance tests A1-A10 against a temporary cased process.
 
-Requires: cased running on 127.0.0.1:8787 (logs at ~/.case/cased.log), image built.
-A7 is manual (phone). A8 is gated behind CASE_A8=1 (restarts the Docker VM).
-A9 runs via Claude Code separately. Set CASE_KEEP=1 to keep the test computer around
-(A1 reaps any previous accept-1 first, so at most one ever survives).
+The suite starts its own loopback API and temporary vault. A7 is manual. A8 is
+gated because it restarts the Docker VM. CASE_KEEP=1 retains this run's fixture.
 """
 import base64
 import contextlib
@@ -14,15 +12,25 @@ import hmac
 import json
 import os
 import secrets
+import shutil
+import socket
 import struct
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 
 import pytest
 import requests
 
-BASE = "http://127.0.0.1:8787/v1"
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE = None
+ROOT = None
+CASE_HOME = None
+SCRATCH_DIR = None
+CASE_TOKEN = None
+BOX = f"acceptance-fixture-{secrets.token_hex(8)}"
 SITE_USER = "agent@example.com"
 SITE_PASS = "s3cr3t-" + secrets.token_hex(8)          # unique per run so log-grep is meaningful
 # Durable auth requires a positive proof_spec for status=success (else unverified).
@@ -30,41 +38,163 @@ SITE_PROOF = {
     "expression": "!!document.body && /You are signed in/.test(document.body.innerText)",
 }
 TOTP_SEED = base64.b32encode(secrets.token_bytes(10)).decode()
-CASE_HOME = os.environ.get("CASE_HOME", os.path.expanduser("~/.case"))
-
 CAPTURED = []          # every JSON/text API response body, for the A5 vault grep
 _computer = {}
+_created_ids = set()
+
+
+def free_loopback_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def child_env(parent, case_home, port, token, image):
+    """Build a child environment that cannot use a caller's Case settings."""
+    env = dict(parent)
+    for key in list(env):
+        upper = key.upper()
+        if upper.startswith((
+            "CASE_", "DESK_", "ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_",
+            "COHERE_", "MISTRAL_", "XAI_", "DEEPSEEK_", "GROQ_", "TOGETHER_",
+            "FIREWORKS_", "PERPLEXITY_", "DASHSCOPE_", "AWS_", "AZURE_", "NTFY_",
+        )):
+            env.pop(key)
+    env.update({
+        "CASE_HOME": case_home,
+        "CASE_BIND": "127.0.0.1",
+        "CASE_PORT": str(port),
+        "CASE_TOKEN": token,
+        "CASE_IMAGE": image,
+    })
+    return env
+
+
+def cleanup_owned(api_call, ids, keep_id=None):
+    """Delete every owned ID and return any failures."""
+    failures = []
+    for computer_id in ids:
+        if computer_id == keep_id:
+            continue
+        try:
+            response = api_call("DELETE", f"/computers/{computer_id}")
+            if response.status_code not in (204, 404):
+                failures.append(f"{computer_id}: {response.status_code} {response.text}")
+        except Exception as error:
+            failures.append(f"{computer_id}: {error}")
+    return failures
+
+
+def stop_owned_process(proc):
+    """Stop the cased process started by this fixture."""
+    failures = []
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+    except Exception as error:
+        failures.append(str(error))
+    return failures
+
+
+def retain_scratch(keep_id, setup_failed, test_failed, cleanup_failures, stop_failures):
+    """Keep logs when the fixture or its cleanup failed."""
+    return bool(keep_id or setup_failed or test_failed or cleanup_failures or stop_failures)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def acceptance_server(request):
+    """Run cased with a fresh local vault for this module."""
+    global BASE, ROOT, CASE_HOME, SCRATCH_DIR, CASE_TOKEN
+    failures_before = request.session.testsfailed
+    setup_failed = False
+    SCRATCH_DIR = tempfile.mkdtemp(prefix="case-acceptance-")
+    CASE_HOME = os.path.join(SCRATCH_DIR, "vault")
+    os.makedirs(CASE_HOME)
+    CASE_TOKEN = secrets.token_urlsafe(32)
+    port = free_loopback_port()
+    ROOT = f"http://127.0.0.1:{port}"
+    BASE = ROOT + "/v1"
+    image = os.environ.get("CASE_ACCEPTANCE_IMAGE", "case-desk:0.1")
+    env = child_env(os.environ, CASE_HOME, port, CASE_TOKEN, image)
+    log_path = os.path.join(CASE_HOME, "cased.log")
+    with open(log_path, "w") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(ROOT_DIR, "control-plane", "cased.py")],
+            cwd=ROOT_DIR, env=env, stdout=log_file, stderr=subprocess.STDOUT,
+        )
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"owned cased exited early; see {log_path}")
+            try:
+                if requests.get(ROOT + "/health", timeout=1).status_code == 200:
+                    break
+            except requests.RequestException:
+                pass
+            time.sleep(0.2)
+        else:
+            raise AssertionError(f"owned cased did not become healthy; see {log_path}")
+        assert requests.get(BASE + "/computers", timeout=2).status_code == 401
+        response = api("GET", "/computers")
+        assert response.status_code == 200, response.text
+        assert response.json()["computers"] == [], "temporary vault was not empty"
+        assert api("GET", "/handoffs").json()["handoffs"] == []
+        yield
+    except BaseException:
+        setup_failed = True
+        raise
+    finally:
+        keep_id = _computer.get("id") if os.environ.get("CASE_KEEP") == "1" else None
+        cleanup_failures = cleanup_owned(api, tuple(_created_ids), keep_id)
+        stop_failures = stop_owned_process(proc)
+        test_failed = request.session.testsfailed > failures_before
+        retain = retain_scratch(keep_id, setup_failed, test_failed, cleanup_failures, stop_failures)
+        if keep_id:
+            print(f"retained acceptance computer {keep_id} in {SCRATCH_DIR}")
+        elif retain:
+            print(f"acceptance scratch retained at {SCRATCH_DIR}")
+        else:
+            shutil.rmtree(SCRATCH_DIR, ignore_errors=True)
+        BASE = ROOT = CASE_HOME = SCRATCH_DIR = CASE_TOKEN = None
+        _computer.clear()
+        _created_ids.clear()
+        CAPTURED.clear()
+        if cleanup_failures or stop_failures:
+            raise AssertionError("acceptance teardown failed: " + "; ".join(
+                cleanup_failures + stop_failures))
 
 
 def api(method, path, timeout=180, **kw):
-    r = requests.request(method, BASE + path, timeout=timeout, **kw)
-    if "json" in r.headers.get("content-type", "") or "text" in r.headers.get("content-type", ""):
+    headers = dict(kw.pop("headers", {}))
+    headers["Authorization"] = f"Bearer {CASE_TOKEN}"
+    r = requests.request(method, BASE + path, timeout=timeout, headers=headers, **kw)
+    if not kw.get("stream") and any(t in r.headers.get("content-type", "") for t in ("json", "text")):
         CAPTURED.append(r.text)
     return r
 
 
 def cid():
-    if not _computer:  # standalone run (e.g. CASE_A8=1): reuse the kept accept-1
-        for c in api("GET", "/computers").json()["computers"]:
-            if c["name"] == "accept-1":
-                _computer.update(c)
-    assert _computer, "A1 must run first (or a kept accept-1 must exist)"
+    assert _computer, "A1 must run first"
     return _computer["id"]
+
+
+def create_computer(name):
+    r = api("POST", "/computers", json={"name": name})
+    assert r.status_code == 201, r.text
+    computer = r.json()
+    _created_ids.add(computer["id"])
+    return computer
 
 
 @contextlib.contextmanager
 def spare_slot():
-    """Free the one desktop slot so a test can create a second computer.
-
-    A box behind a reverse proxy runs CASE_MAX_RUNNING=1 *and* pins the noVNC host
-    port (CASE_VNC_PORT=6080, so the /desk door has a fixed upstream). Together those
-    mean a second *running* computer cannot exist there at all: create fails with
-    "Bind for 127.0.0.1:6080 failed: port is already allocated". A Mac has the headroom
-    and never notices, which is why these tests passed there and only there.
-
-    Waking accept-1 again is not optional — every later test calls cid() and expects a
-    live desktop behind it.
-    """
+    """Sleep the fixture while a test creates another computer."""
     api("POST", f"/computers/{cid()}/sleep")
     try:
         yield
@@ -100,7 +230,7 @@ def totp(seed, at):
 def save_shot(name):
     r = api("GET", f"/computers/{cid()}/screenshot")
     if r.status_code == 200:
-        out = os.path.join(os.path.dirname(__file__), "shots")
+        out = os.path.join(SCRATCH_DIR, "shots")
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, name), "wb") as f:
             f.write(r.content)
@@ -109,26 +239,9 @@ def save_shot(name):
 
 # ---------- A1 boot ----------
 
-def reap_stale():
-    """Delete leftover accept-1 boxes before minting a fresh one.
-
-    CASE_KEEP=1 (the documented way to run this suite) skips test_zz_cleanup, so
-    without this every run left another accept-1 behind — they pile up in the DB
-    and in Drive, and each one holds five test credentials. Reaping here rather
-    than at teardown keeps CASE_KEEP's whole point (one box survives to poke at)
-    while capping the count at one. Only ever touches the name this file creates.
-    """
-    for c in api("GET", "/computers").json()["computers"]:
-        if c["name"] == "accept-1":
-            api("DELETE", f"/computers/{c['id']}", json={"name": c["name"]})
-
-
 def test_a1_boot():
-    reap_stale()
     t0 = time.time()
-    r = api("POST", "/computers", json={"name": "accept-1"})
-    assert r.status_code == 201, r.text
-    c = r.json()
+    c = create_computer(BOX)
     assert c["state"] == "running"
     assert time.time() - t0 <= 60
     _computer.update(c)
@@ -136,7 +249,10 @@ def test_a1_boot():
     shot = save_shot("a1_desktop.png")
     assert shot.status_code == 200
     assert png_dims(shot.content) == (1280, 800)
-    assert len(shot.content) > 30_000, "screenshot suspiciously small — likely a black screen"
+    # A painted xfce desktop measures 22k-25k here; black is 3k, a blank X root 5k,
+    # near-black with noise 9k. 30k sat above every real screenshot on arm64, so it
+    # could never pass. 15k keeps the black-screen catch with margin either side.
+    assert len(shot.content) > 15_000, "screenshot suspiciously small, likely a black screen"
 
 
 # ---------- A2 exec ----------
@@ -188,11 +304,11 @@ def start_site():
     r = api("PUT", f"/computers/{cid()}/files", params={"path": "/home/agent/site_server.py"}, data=src)
     assert r.status_code == 201
     # separate exec: pkill -f must not share a command line with the plain string it hunts.
-    # Wait until the old listener is gone — a 1s sleep alone races on cx23 under load.
+    # Wait until the old listener is gone. A 1s sleep races on cx23 under load.
     exec_("pkill -f '[s]ite_server' || true; "
           "for i in 1 2 3 4 5 6 7 8; do pgrep -f '[s]ite_server' >/dev/null || break; sleep 1; done; "
           "true")
-    # Bind is 127.0.0.1 (not localhost) — curl the same. Retry ready-check; unbuffered
+    # Bind is 127.0.0.1, not localhost. Curl the same. Retry ready-check; unbuffered
     # so a bind failure lands in /tmp/site.log instead of a silent empty file.
     out = exec_(
         f"SITE_USER='{SITE_USER}' SITE_PASS='{SITE_PASS}' PYTHONUNBUFFERED=1 "
@@ -227,7 +343,7 @@ def test_a5_vault_hygiene():
 
     def hammer():
         while not stop.is_set():
-            r = requests.get(f"{BASE}/computers/{cid()}/screenshot", timeout=10)
+            r = api("GET", f"/computers/{cid()}/screenshot", timeout=10)
             if r.status_code == 423:
                 hits["n423"] += 1
             time.sleep(0.1)
@@ -270,11 +386,8 @@ def test_a5_vault_hygiene():
 
 # ---------- human doors (fill + desk) ----------
 
-ROOT = BASE.rsplit("/v1", 1)[0]          # /fill lives outside /v1 — straight at cased
-
-
 def test_fill_link():
-    """A minted fill link writes a credential through the browser-form door —
+    """A minted fill link writes a credential through the browser-form door.
     single-use, never through MCP, never plaintext in the audit log (A5 family)."""
     r = api("POST", f"/computers/{cid()}/links", json={"kind": "fill"})
     assert r.status_code == 201, r.text
@@ -283,7 +396,7 @@ def test_fill_link():
 
     assert "name=secret type=password" in requests.get(f"{ROOT}/fill/{tok}", timeout=10).text
 
-    # a pasted URL is what humans actually type — it must land as a bare host, or the
+    # A pasted URL must land as a bare host, or the
     # login never matches and the credential name (with a /) cannot even be deleted
     r = requests.post(f"{ROOT}/fill/{tok}", timeout=10,
                       data={"domains": "https://Fill-Test.example.com/inbox",
@@ -302,7 +415,7 @@ def test_fill_link():
                       data={"domains": "x.com", "username": "u", "secret": "p"})
     assert r.status_code == 410, r.text
 
-    # neither the password (body) nor the token (path — it is a live capability)
+    # Neither the password (body) nor the token (path, a live capability)
     # may reach the audit log
     blob = "".join(open(p, errors="replace").read()
                    for p in glob.glob(os.path.join(CASE_HOME, "audit", "*.jsonl")))
@@ -316,14 +429,12 @@ def test_fill_link():
 
 def test_fill_form_escapes_an_agent_chosen_name():
     """The computer name comes from the agent (computer_create). The credential page
-    must never let it become script — that would let the agent read the password the
+    must never let it become script. That would let the agent read the password the
     human types, on the one page whose whole promise is that it cannot."""
-    # This only needs the name to reach the DB and come back out through the form —
+    # This only needs the name to reach the DB and come back out through the form.
     # never two live desktops.
     with spare_slot():
-        r = api("POST", "/computers", json={"name": "</h1><script>steal()</script>"})
-        assert r.status_code == 201, r.text
-        evil = r.json()["id"]
+        evil = create_computer("</h1><script>steal()</script>")["id"]
         try:
             tok = api("POST", f"/computers/{evil}/links", json={"kind": "fill"}).json()["token"]
             page = requests.get(f"{ROOT}/fill/{tok}", timeout=10).text
@@ -340,31 +451,29 @@ def test_desk_check():
 
     # 302, not 200: forward_auth hands a non-2xx auth response back to the browser,
     # which is the only way the Set-Cookie reaches a human. Token leaves the URL.
-    r = requests.get(f"{BASE}/desk/check", timeout=10, allow_redirects=False,
-                     headers={"X-Forwarded-Uri": f"/desk/vnc.html?token={tok}&autoconnect=1"})
+    r = api("GET", "/desk/check", timeout=10, allow_redirects=False,
+            headers={"X-Forwarded-Uri": f"/desk/vnc.html?token={tok}&autoconnect=1"})
     assert r.status_code == 302 and f"case_desk={tok}" in r.headers.get("set-cookie", ""), r.headers
     assert r.headers["Location"] == "/desk/vnc.html?autoconnect=1", r.headers
 
-    r = requests.get(f"{BASE}/desk/check", timeout=10, headers={"Cookie": f"case_desk={tok}"})
+    r = api("GET", "/desk/check", timeout=10, headers={"Cookie": f"case_desk={tok}"})
     assert r.status_code == 200 and "set-cookie" not in {k.lower() for k in r.headers}
 
-    r = requests.get(f"{BASE}/desk/check", timeout=10,
-                     headers={"X-Forwarded-Uri": "/desk/vnc.html?token=nope"})
+    r = api("GET", "/desk/check", timeout=10,
+            headers={"X-Forwarded-Uri": "/desk/vnc.html?token=nope"})
     assert r.status_code == 401
 
     # a token is not enough: it must name the computer that is actually behind the
     # door, or the human meets whichever desktop happens to be awake
     # desk-bind only ever has to exist and be asleep, so it never needs the slot at the
-    # same time as accept-1 — but creating it does, because create starts the container.
+    # same time as the fixture, but creating it does because create starts the container.
     with spare_slot():
-        r = api("POST", "/computers", json={"name": "desk-bind"})
-        assert r.status_code == 201, r.text
-        other = r.json()["id"]
+        other = create_computer("desk-bind")["id"]
         try:
             api("POST", f"/computers/{other}/sleep")
             t2 = api("POST", f"/computers/{other}/links", json={"kind": "vnc"}).json()["token"]
-            r = requests.get(f"{BASE}/desk/check", timeout=10, allow_redirects=False,
-                             headers={"X-Forwarded-Uri": f"/desk/vnc.html?token={t2}"})
+            r = api("GET", "/desk/check", timeout=10, allow_redirects=False,
+                    headers={"X-Forwarded-Uri": f"/desk/vnc.html?token={t2}"})
             assert r.status_code == 409 and "asleep" in r.text, (r.status_code, r.text[:200])
         finally:
             api("DELETE", f"/computers/{other}")
@@ -404,8 +513,8 @@ def test_eval():
 
     def hammer():
         while not stop.is_set():
-            rr = requests.post(f"{BASE}/computers/{cid()}/eval",
-                               json={"expression": "1"}, timeout=10)
+            rr = api("POST", f"/computers/{cid()}/eval",
+                      json={"expression": "1"}, timeout=10)
             if rr.status_code == 423:
                 hits["n423"] += 1
             time.sleep(0.05)
@@ -472,14 +581,14 @@ def test_a6_totp():
     assert codes[-1] in valid, f"entered code {codes[-1]} not a valid TOTP for the seed"
 
 
-# ---------- A7 handoff loop — API half (phone half is manual) ----------
+# ---------- A7 handoff loop, API half (phone half is manual) ----------
 
 def test_a7_handoff_api_loop():
     events = []
     stop = threading.Event()
 
     def listen():
-        with requests.get(f"{BASE}/events", stream=True, timeout=(5, 60)) as r:
+        with api("GET", "/events", stream=True, timeout=(5, 60)) as r:
             for line in r.iter_lines():
                 if stop.is_set():
                     return
@@ -542,18 +651,18 @@ def test_a10_fleet():
     ids = [cid()]
     try:
         for i in range(2, 7):
-            r = api("POST", "/computers", json={"name": f"fleet-{i}"})
-            assert r.status_code == 201, f"fleet-{i}: {r.text}"
-            ids.append(r.json()["id"])
+            ids.append(create_computer(f"fleet-{i}")["id"])
         for i in ids:
             out = api("POST", f"/computers/{i}/exec", json={"command": "echo hi"}).json()
             assert out["stdout"].strip() == "hi"
         for i in ids:
             r = api("POST", f"/computers/{i}/sleep")
             assert r.json()["state"] == "asleep"
-        ps = subprocess.run(["docker", "ps", "-q", "--filter", "label=managed-by=cased"],
-                            capture_output=True, text=True)
-        assert ps.stdout.strip() == "", "containers still running after fleet sleep"
+        for computer_id in ids:
+            ps = subprocess.run(["docker", "inspect", "--format", "{{.State.Running}}",
+                                 f"case-{computer_id}"], capture_output=True, text=True)
+            assert ps.returncode == 0 and ps.stdout.strip() == "false", \
+                f"fixture container {computer_id} still running: {ps.stderr}"
     finally:
         for i in ids[1:]:
             api("DELETE", f"/computers/{i}")

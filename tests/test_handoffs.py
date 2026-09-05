@@ -37,6 +37,7 @@ def _mk(*a, **kw):
     the returned shape, not on persistence, and must not leave state for the next run."""
     h = handoffs.create_handoff(*a, **kw)
     store.delete_handoff(h["id"])
+    store.q("DELETE FROM assist_tokens")
     handoffs.LOGIN_CTX.pop(h["id"], None)
     return h
 
@@ -47,6 +48,39 @@ def _persist(hid, kind, prompt, login_credential=None, domain=None, **kw):
     if login_credential:
         handoffs.LOGIN_CTX[hid] = {"computer_id": "c_1", "credential": login_credential}
     return store.get_handoff(hid)
+
+
+def test_only_approvals_carry_a_signed_answer_url():
+    _cleanup()
+    seen = []
+    handoffs.notifier = type("N", (), {"notify": lambda self, h, name: seen.append(h)})()
+    try:
+        with mock.patch.dict(os.environ, {"CASE_PUBLIC_HOST": "case.example.com"}):
+            _mk(ROW, "approval", "ok?")
+            _mk(ROW, "question", "who?")
+        hid = seen[0]["id"]
+        assert seen[0]["answer_url"] == f"https://case.example.com/answer/{hid}/{store.sign('answer:' + hid)}"
+        assert seen[1]["answer_url"] == ""
+        with mock.patch.dict(os.environ, {"CASE_PUBLIC_HOST": ""}):
+            _mk(ROW, "approval", "ok?")
+        assert seen[2]["answer_url"] == ""
+    finally:
+        handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
+        _cleanup()
+
+
+def test_expire_stale_fails_abandoned_auth_attempts():
+    import auth_attempts
+    _cleanup()
+    store.q("DELETE FROM auth_attempts WHERE computer_id='c_stale'")
+    try:
+        a = auth_attempts.start_attempt("c_stale", "github", "https://example.com/login")
+        with mock.patch.object(store, "stale_active_auth_attempts",
+                               return_value=[{"id": a["id"]}]):
+            handoffs.expire_stale()
+        assert auth_attempts.get_attempt(a["id"])["status"] == "failed"
+    finally:
+        store.q("DELETE FROM auth_attempts WHERE computer_id='c_stale'")
 
 
 def test_rebuild_login_ctx_recovers_pending_login_handoff():
