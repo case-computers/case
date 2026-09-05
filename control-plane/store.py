@@ -171,10 +171,13 @@ class Store:
             return cur
 
     def one(self, sql, args=()):
-        return self.q(sql, args).fetchone()
+        # A shared connection needs the lock until the cursor has been read.
+        with self.lock:
+            return self.db.execute(sql, args).fetchone()
 
     def all(self, sql, args=()):
-        return self.q(sql, args).fetchall()
+        with self.lock:
+            return self.db.execute(sql, args).fetchall()
 
     # ---- vault ----
     def enc(self, s):
@@ -450,8 +453,8 @@ class Store:
 
     def stale_active_auth_attempts(self, cutoff):
         qs = ",".join("?" * len(self.AUTH_ATTEMPT_ACTIVE))
-        return self.q(f"SELECT * FROM auth_attempts WHERE status IN ({qs}) AND updated_at < ?",
-                      (*self.AUTH_ATTEMPT_ACTIVE, cutoff)).fetchall()
+        return self.all(f"SELECT * FROM auth_attempts WHERE status IN ({qs}) AND updated_at < ?",
+                        (*self.AUTH_ATTEMPT_ACTIVE, cutoff))
 
     def get_auth_attempt_by_idempotency(self, computer_id, idempotency_key):
         if not idempotency_key:
