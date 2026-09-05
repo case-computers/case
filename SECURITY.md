@@ -16,9 +16,15 @@ Case holds logins. These are promises, with code you can read.
   that container's loopback. An agent that goes looking can reach what the
   browser holds. The 423 closes the paths Case itself offers; it is not a
   sandbox boundary.
-- **Login only fires** when the page host matches the credential's `domains`.
+- **Login checks the live page before inserting credentials.** The host must
+  match the credential's `domains`, and the scheme must be HTTPS. HTTP is allowed
+  only on `localhost`, `127.0.0.1`, and `::1`. Password and verification-code
+  entry repeat that check after redirects and between login steps.
 - **MCP has no credential-write tool.** Secrets enter via the Drive UI, `/fill`,
   or `bin/case cred add`.
+- **File API uploads are capped at 8 MiB.** cased and deskd count bytes as the
+  body arrives, including requests without Content-Length. File reads enforce
+  the same limit.
 - **`computer_upload` only assigns files already on the computer.** The path
   must be under `/home/agent/`, at most 5MB, and the snapshot ref must be
   `input[type=file]`. Password/OTP-like inputs are refused. Bytes travel
@@ -33,6 +39,9 @@ Case holds logins. These are promises, with code you can read.
   bearer-only.
 - **cased binds loopback by default.** Compose publishes `127.0.0.1:8787` and
   `127.0.0.1:4174`. Set `CASE_TOKEN` before exposing those ports.
+- **MCP HTTP has no built-in bearer check.** Compose publishes port 8788 on
+  loopback. Its `CASE_TOKEN` authenticates calls to cased, not requests from MCP
+  clients. Keep that port local or put an authenticating reverse proxy in front.
 - **Desktops sit on their own Docker network (`case-desks`).** Compose joins
   only cased to both networks, so Drive and the MCP server have no route to a
   desktop. Desktops share `case-desks` with each other, so a desktop can still
@@ -44,7 +53,8 @@ Case holds logins. These are promises, with code you can read.
   websockify runs under basic auth `agent:$DESK_TOKEN` (`image/start.sh`).
   Drive's `/live/<id>/…` is a proxy to cased `/v1/computers/<id>/live/…`, and
   cased adds that header; the WebSocket upgrade checks `CASE_TOKEN` itself,
-  because Starlette's HTTP middleware never sees a websocket scope. Host mode
+  because Starlette's HTTP middleware never sees a websocket scope. Without
+  `CASE_TOKEN`, that upgrade checks Host and Origin instead. Host mode
   (`bin/case up`) sets no network, so websockify is open there on the desktop's
   loopback-published port.
 - **`/fill`, `/assist` and `/answer` are doors opened by a token in the URL.**
@@ -60,7 +70,8 @@ Case holds logins. These are promises, with code you can read.
 - **ntfy handoff notifications carry a full-desktop PNG.** When the computer is
   awake, the screenshot rides along as the message attachment. Everyone
   subscribed to the topic sees whatever was on screen, which is the argument for
-  a random topic name.
+  a random topic name. Signed approval buttons require `CASE_PUBLIC_HOST` and
+  an HTTPS reverse proxy; they are omitted without it.
 - **DeathByCaptcha gets scheme, host and path only.** The page URL is stripped
   of query and fragment before the solve request leaves
   (`control-plane/login_flow.py`), so the session tokens and continuation URLs a
@@ -104,7 +115,8 @@ storage.
 
 (d) **Desktops keep passwordless sudo by design.** The container is the agent's
 sandbox; `no-new-privileges` is deliberately not set because passwordless sudo
-requires setuid. Do not run untrusted code inside a desktop you also use for
+requires setuid. Chromium also starts with `--no-sandbox`; the container is its
+isolation boundary. Do not run untrusted code inside a desktop you also use for
 personal browsing.
 
 (e) **ntfy topics and Telegram bot tokens are bearer secrets.** Anyone who knows
