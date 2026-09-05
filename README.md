@@ -22,8 +22,8 @@ The first build may take a few minutes. Case runs in the background once it star
 Open the [computers page](http://127.0.0.1:4174/deploy), click **+ New computer**,
 enter a name, and press Enter. Wait for the computer to show **AWAKE**.
 
-This setup is for local use. For remote access, follow the
-[server setup guide](docs/setup.md#on-a-server).
+This setup is for local use. Do not publish 4174/8787/8788 off loopback
+without `CASE_TOKEN` and your own HTTPS reverse proxy. See [SECURITY.md](SECURITY.md).
 
 ## Run your first task
 
@@ -51,8 +51,11 @@ claude mcp add --transport http case http://127.0.0.1:8788/mcp
 
 Then ask the agent to list your Case computers and run a task on the one you
 created. This uses your agent's model connection; you do not need to add a key
-in Drive. See [MCP configuration](docs/setup.md#mcp-configuration) for Cursor
-and other clients.
+in Drive. Cursor:
+
+```json
+{ "mcpServers": { "case": { "type": "http", "url": "http://127.0.0.1:8788/mcp" } } }
+```
 
 ## Stop and start again
 
@@ -87,16 +90,9 @@ to the computer you want to use.
 
 ## Configuration and documentation
 
-The default settings are enough to try Case locally. Optional settings are
-listed in [.env.example](.env.example).
-
-- [Setup and configuration](docs/setup.md): memory limits, server hosting,
-  manual installation, MCP clients, and troubleshooting.
-- [Phone chat](docs/phone-chat.md): Telegram and ntfy setup, replies, and approvals.
-- [Architecture and storage](docs/architecture.md): components, networking,
-  files, and browser profiles.
-- [Security](SECURITY.md): credentials, authentication, and self-hosting limits.
-- [Contributing and tests](CONTRIBUTING.md): development setup and test commands.
+The default settings are enough to try Case locally. Optional settings,
+including phone chat, are listed in [.env.example](.env.example).
+See [SECURITY.md](SECURITY.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This repository is the self-hosted computer. The hosted fleet, including DNS,
 HTTPS, and managed images, is a separate product.

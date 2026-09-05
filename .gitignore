@@ -23,6 +23,9 @@ __pycache__/
 # Local git worktrees
 .worktrees/
 
+# Working notes — not part of the published repo
+docs/
+
 # Agent tooling state
 .claude/
 
