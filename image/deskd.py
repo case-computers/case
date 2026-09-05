@@ -231,7 +231,13 @@ async def file_put(request: Request, path: str):
         return err(400, "bad_path", f"path must be under {HOME}/")
     if int(request.headers.get("content-length") or 0) > FILE_MAX:
         return err(413, "too_large", f"file over {FILE_MAX} bytes")
-    data = await request.body()
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > FILE_MAX:
+            return err(413, "too_large", f"file over {FILE_MAX} bytes")
+        data.extend(chunk)
+    if (r := injecting()):
+        return r
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "wb") as f:
@@ -559,8 +565,24 @@ def domain_ok(host, domains):
     return any(host == d.lower() or host.endswith("." + d.lower()) for d in domains)
 
 
+def credential_origin_error(tab, cred):
+    href = tab.js("location.href") or ""
+    parsed = urlparse(href)
+    host = parsed.hostname
+    if not domain_ok(host, cred.get("domains") or []):
+        return f"page origin {host!r} not in credential domains"
+    if parsed.scheme == "https":
+        return None
+    if parsed.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
+        return None
+    return f"page origin scheme {parsed.scheme!r} on host {host!r} is not HTTPS"
+
+
 def challenge(cred, kind, prompt):
-    state["login"] = {"kind": kind, "cred_name": cred["name"], "at": time.time()}
+    state["login"] = {
+        "kind": kind, "cred_name": cred["name"],
+        "domains": cred.get("domains") or [], "at": time.time(),
+    }
     try:
         shot = base64.b64encode(grab()).decode()
     except Exception:
@@ -590,6 +612,8 @@ def classify(tab, cred):
         return challenge(cred, "captcha", f"{host}: {snippet(blob, RE_CAPTCHA)}")
     if RE_OTP.search(blob):
         if cred.get("totp_seed"):
+            if reason := credential_origin_error(tab, cred):
+                return {"status": "failed", "reason": reason}
             fill(tab, FOCUS_CODE, totp(cred["totp_seed"]))
             press_enter(tab)
             settle(tab)
@@ -629,14 +653,20 @@ def fill_login_form(tab, cred):
     if not fields.get("user") and not fields.get("pass"):
         return "no login fields found"
     if fields.get("user"):
+        if reason := credential_origin_error(tab, cred):
+            return reason
         fill(tab, FOCUS_USER, cred["username"])
     if fields.get("pass"):
+        if reason := credential_origin_error(tab, cred):
+            return reason
         fill(tab, FOCUS_PASS, cred["secret"])
         press_enter(tab)
     else:  # two-step (username first)
         press_enter(tab)
         settle(tab)
         if (tab.js(HAS_FIELDS) or {}).get("pass"):
+            if reason := credential_origin_error(tab, cred):
+                return reason
             fill(tab, FOCUS_PASS, cred["secret"])
             press_enter(tab)
         elif not advanced_past_identifier(tab):
@@ -678,10 +708,9 @@ def login(b: dict = Body(...)):
         tab = Tab()
         try:
             navigate(tab, url)
-            host = urlparse(tab.js("location.href") or url).hostname
-            if not domain_ok(host, cred.get("domains") or []):
+            if reason := credential_origin_error(tab, cred):
                 return err(400, "domain_mismatch",
-                           f"page origin {host!r} not in credential domains")
+                           reason)
             reason = fill_login_form(tab, cred)
             if reason:
                 return {"status": "failed", "reason": reason}
@@ -712,7 +741,11 @@ def login_resume(b: dict = Body(...)):
     try:
         tab = Tab()
         try:
-            if ctx["kind"] == "approval" or value.lower() in ("approve", "deny"):
+            is_approval = ctx["kind"] == "approval" or value.lower() in ("approve", "deny")
+            if not is_approval:
+                if reason := credential_origin_error(tab, {"domains": ctx.get("domains") or []}):
+                    return {"status": "failed", "reason": reason}
+            if is_approval:
                 reason = apply_challenge_action(tab, "approval", value)
                 if reason:
                     return {"status": "failed", "reason": reason}
@@ -766,11 +799,17 @@ def auth_submit_challenge(b: dict = Body(...)):
         return err(400, "bad_request", "body needs 'kind'")
     kind = b["kind"]
     value = b.get("value")
+    if str(kind).lower() in ("otp", "code") and (
+            not isinstance(b.get("domains"), list) or not b["domains"]):
+        return err(400, "bad_request", "body needs 'domains' for otp/code")
     state["in_login"] = True
     state["injecting"] = True
     try:
         tab = Tab()
         try:
+            if str(kind).lower() in ("otp", "code"):
+                if reason := credential_origin_error(tab, {"domains": b["domains"]}):
+                    return {"ok": False, "reason": reason}
             reason = apply_challenge_action(tab, kind, value)
             if reason == "missing challenge value":
                 return err(400, "bad_request", "body needs 'value' for otp/code")

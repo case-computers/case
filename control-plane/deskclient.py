@@ -224,11 +224,13 @@ def observe_auth(row):
     return desk_json(row, "POST", "/auth/observe", timeout=35)
 
 
-def auth_submit_challenge(row, kind, value=None):
+def auth_submit_challenge(row, kind, value=None, domains=None):
     """POST /auth/submit_challenge, otp/code fill+enter, or approval settle."""
     body = {"kind": kind}
     if value is not None:
         body["value"] = value
+    if domains is not None:
+        body["domains"] = domains
     return desk_json(row, "POST", "/auth/submit_challenge", json=body, timeout=90)
 
 

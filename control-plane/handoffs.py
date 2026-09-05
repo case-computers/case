@@ -18,6 +18,7 @@ writes go through store.transition_handoff (CAS + revision bump). Legacy
 `answered` is treated as completed on read for one release.
 """
 import hmac
+import json
 import os
 
 import assist
@@ -367,7 +368,10 @@ def submit_handoff_value(hid, value):
         computer = get_computer(row["computer_id"])
         submitted = False
         try:
-            out = auth_submit_challenge(computer, row["kind"], value=value)
+            attempt = store.get_auth_attempt(aid)
+            credential = store.get_credential(row["computer_id"], attempt["credential"])
+            domains = json.loads(credential["domains"]) if credential else []
+            out = auth_submit_challenge(computer, row["kind"], value=value, domains=domains)
             submitted = bool(isinstance(out, dict) and out.get("ok"))
         except Exception as e:
             log.warning("auth_submit_challenge failed: %s", e)

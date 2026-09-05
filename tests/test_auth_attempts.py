@@ -314,6 +314,35 @@ def test_challenge_completion_does_not_record_success_until_prove():
     adv.assert_called_once_with(a["id"])
 
 
+def test_totp_submit_carries_credential_domains():
+    _cleanup()
+    store.upsert_credential("c_1", "cred", "u", "secret", "JBSWY3DPEHPK3PXP",
+                            None, ["example.com"])
+    a = auth_attempts.start_attempt("c_1", "cred", "https://example.com/login")
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.auth_submit_challenge", return_value={"ok": False}) as submit, \
+         mock.patch("deskclient.screenshot_b64", return_value=None):
+        auth_attempts.advance_attempt(a["id"], observation=_obs(
+            challenge_signals=["otp"], visible_fields={"code": True}))
+    assert submit.call_count == 1
+    assert submit.call_args.kwargs["domains"] == ["example.com"]
+    assert len(submit.call_args.kwargs["value"]) == 6
+
+
+def test_handoff_submit_carries_credential_domains():
+    _cleanup()
+    store.upsert_credential("c_1", "cred", "u", "secret", None, None, ["example.com"])
+    a = auth_attempts.start_attempt("c_1", "cred", "https://example.com/login")
+    store.insert_handoff("h_domains", "c_1", "otp", "enter code", None, "cred",
+                         continuation="submit_value", attempt_id=a["id"])
+    with mock.patch.object(handoffs, "get_computer", return_value=COMP), \
+         mock.patch.object(handoffs, "auth_submit_challenge", return_value={"ok": False}) as submit:
+        row = handoffs.submit_handoff_value("h_domains", "123456")
+    submit.assert_called_once_with(COMP, "otp", value="123456", domains=["example.com"])
+    assert row["status"] == "pending"
+    assert store.get_handoff("h_domains")["answer"] is None
+
+
 def test_bad_code_stays_pending_same_challenge():
     _cleanup()
     a = auth_attempts.start_attempt(

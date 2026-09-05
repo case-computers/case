@@ -5,6 +5,7 @@ import glob
 import os
 import shutil
 import sys
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
 # assignment, NOT setdefault: this suite writes audit files and wipes the audit
@@ -78,12 +79,26 @@ def test_unauthorized_calls_leave_no_audit_line():
 
 
 def test_oversized_upload_is_refused_before_the_desktop_wakes():
-    # The body is buffered whole, so the cap has to fire on Content-Length —
-    # nothing is mocked here because nothing downstream is reached.
+    # A declared oversize body is rejected before the desktop is touched.
     os.environ.pop("CASE_TOKEN", None)
     r = _client().put("/v1/computers/c_x/files?path=/x", content=b"",
                       headers={"Content-Length": "9999999"})
     assert r.status_code == 413, r.text
+
+
+def test_streamed_upload_counts_bytes_without_content_length():
+    os.environ.pop("CASE_TOKEN", None)
+    with mock.patch.object(cased, "_file_put", return_value={"bytes": cased.FILE_MAX}) as put:
+        content = iter([b"x" * (1024 * 1024)] * 9)
+        r = _client().put("/v1/computers/c_x/files?path=/home/agent/x", content=content)
+        assert "content-length" not in r.request.headers
+        assert r.status_code == 413, r.text
+        put.assert_not_called()
+
+        content = iter([b"x" * (1024 * 1024)] * 8)
+        r = _client().put("/v1/computers/c_x/files?path=/home/agent/x", content=content)
+        assert r.status_code == 201, r.text
+        assert len(put.call_args.args[2]) == cased.FILE_MAX
 
 
 def test_login_url_must_be_https():
@@ -112,7 +127,7 @@ def test_live_relay_needs_the_bearer_on_both_halves():
         c = _client()
         assert c.get("/v1/computers/c_x/live/vnc.html").status_code == 401
         try:
-            with c.websocket_connect("/v1/computers/c_x/live/websockify"):
+            with c.websocket_connect("ws://127.0.0.1/v1/computers/c_x/live/websockify"):
                 assert False, "socket accepted without a bearer"
         except WebSocketDisconnect as e:
             assert e.code == 1008, e.code
@@ -129,6 +144,54 @@ def test_live_upstream_dials_the_desk_with_websockify_basic_auth():
     assert cased.live_path_ok("vnc.html")
     assert not cased.live_path_ok("../../etc/passwd")
     assert not cased.live_path_ok("%2e%2e/x")
+
+
+def test_live_socket_rejects_foreign_browsers_before_dialing():
+    from starlette.websockets import WebSocketDisconnect
+    os.environ.pop("CASE_TOKEN", None)
+    for headers in ({"Host": "evil.example"}, {"Origin": "https://evil.example"},
+                    {"Origin": "null"}):
+        with mock.patch.object(cased.lifecycle, "ensure_running") as ensure:
+            try:
+                with _client().websocket_connect("ws://127.0.0.1/v1/computers/c_x/live/websockify",
+                                                 headers=headers):
+                    assert False, "foreign browser accepted"
+            except WebSocketDisconnect as e:
+                assert e.code == 1008, e.code
+            ensure.assert_not_called()
+
+
+def test_live_socket_relays_for_allowed_browsers_and_bearers():
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    class Upstream:
+        subprotocol = None
+
+        def __init__(self):
+            self.closed = asyncio.Event()
+
+        async def close(self):
+            self.closed.set()
+
+        async def __aiter__(self):
+            yield b"RFB 003.008\n"
+            await self.closed.wait()
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield Upstream()
+
+    row = {"id": "c_x", "vnc_port": 32771, "desk_token": "test"}
+    cases = [("", {}), ("", {"Origin": "http://localhost:4174"}),
+             ("share-me", {"Authorization": "Bearer share-me", "Origin": "https://client.example"})]
+    for token, headers in cases:
+        with mock.patch.dict(os.environ, {"CASE_TOKEN": token, "CASE_DOCKER_NETWORK": ""}), \
+             mock.patch.object(cased.lifecycle, "ensure_running", return_value=row), \
+             mock.patch.object(cased, "ws_connect", side_effect=connect):
+            with _client().websocket_connect("ws://127.0.0.1/v1/computers/c_x/live/websockify",
+                                             headers=headers) as ws:
+                assert ws.receive_bytes() == b"RFB 003.008\n"
 
 
 if __name__ == "__main__":

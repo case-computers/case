@@ -662,7 +662,8 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
         if material and material.get("totp_seed"):
             try:
                 code = _totp(material["totp_seed"])
-                out = auth_submit_challenge(computer, "otp", value=code)
+                out = auth_submit_challenge(computer, "otp", value=code,
+                                            domains=material.get("domains") or [])
                 if isinstance(out, dict) and out.get("ok"):
                     return advance_attempt(attempt_id, observation=None, _depth=_depth + 1)
             except Exception:

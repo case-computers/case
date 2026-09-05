@@ -483,15 +483,19 @@ def tabs_(cid: str, body: dict = Body(default={}), wake: bool = False):
                            target_id=body.get("target_id"), url=body.get("url"))
 
 
-FILE_MAX = 8 * 1024 * 1024   # the body is buffered whole, so this is cased's RSS too
+FILE_MAX = 8 * 1024 * 1024
 
 
 @app.put("/v1/computers/{cid}/files", status_code=201)
 async def file_put(cid: str, path: str, request: Request, wake: bool = False):
     if int(request.headers.get("content-length") or 0) > FILE_MAX:
         raise ApiError(413, "too_large", "file over 8MB")
-    data = await request.body()
-    return await asyncio.to_thread(_file_put, cid, path, data, wake)
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > FILE_MAX:
+            raise ApiError(413, "too_large", "file over 8MB")
+        data.extend(chunk)
+    return await asyncio.to_thread(_file_put, cid, path, bytes(data), wake)
 
 
 def _file_put(cid, path, data, wake):
@@ -867,8 +871,8 @@ def live_http(cid: str, path: str, request: Request):
 
 @app.websocket("/v1/computers/{cid}/live/websockify")
 async def live_ws(ws: WebSocket, cid: str):
-    # token_guard is HTTP-only middleware; this is the only bearer check on the socket.
-    if not bearer_ok(ws.headers.get("authorization")):
+    # HTTP middleware does not see WebSocket handshakes.
+    if not bearer_ok(ws.headers.get("authorization")) or (not case_token() and not browser_ok(ws)):
         await ws.close(code=1008)
         return
     try:
