@@ -44,6 +44,7 @@ RUN curl -fsSL -o /tmp/novnc.tgz "https://github.com/novnc/noVNC/archive/refs/ta
 # Transitives pinned alongside the four direct deps: the image is the computer,
 # and a rebuild months from now must produce the deskd that was tested.
 RUN python3 -m venv /opt/deskd \
+    && /opt/deskd/bin/pip install --no-cache-dir --upgrade pip==26.2 setuptools==83.0.0 \
     && /opt/deskd/bin/pip install --no-cache-dir \
        fastapi==0.141.1 uvicorn==0.52.4 websocket-client==1.9.2 requests==2.34.2 \
        anyio==4.15.0 certifi==2026.7.22 charset-normalizer==3.5.1 click==8.5.0 \
