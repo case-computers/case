@@ -72,8 +72,8 @@ class Ntfy:
             if h.get("answer_url"):
                 a = h["answer_url"]
                 headers["X-Actions"] = (
-                    f"http, Approve, {a}, method=POST, body={{\"value\":\"approve\"}}; "
-                    f"http, Deny, {a}, method=POST, body={{\"value\":\"deny\"}}")
+                    f"http, Approve, {a}, method=POST, headers.Content-Type=application/json, body={{\"value\":\"approve\"}}; "
+                    f"http, Deny, {a}, method=POST, headers.Content-Type=application/json, body={{\"value\":\"deny\"}}")
             body = b""
             if h.get("screenshot"):
                 headers["X-Filename"] = "screen.png"

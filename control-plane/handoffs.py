@@ -25,7 +25,7 @@ import assist
 import captcha
 from datetime import datetime, timezone
 
-from config import API_BASE, HANDOFF_TTL, log
+from config import HANDOFF_TTL, log
 from deskclient import auth_submit_challenge, desk_json, eval_js, screenshot_b64
 from errors import ApiError
 from events import emit
@@ -142,8 +142,8 @@ def create_handoff(computer_row, kind, prompt, screenshot=None, login_credential
     if not host:
         log.warning("CASE_PUBLIC_HOST unset — notification carries no assist link")
     answer_url = ""
-    if kind == "approval":
-        answer_url = f"{API_BASE.removesuffix('/v1')}/answer/{hid}/{store.sign('answer:' + hid)}"
+    if kind == "approval" and host:
+        answer_url = f"https://{host}/answer/{hid}/{store.sign('answer:' + hid)}"
     notifier.notify({
         "id": hid,
         "computer_id": computer_row["id"],

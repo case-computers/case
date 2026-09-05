@@ -55,10 +55,15 @@ def test_only_approvals_carry_a_signed_answer_url():
     seen = []
     handoffs.notifier = type("N", (), {"notify": lambda self, h, name: seen.append(h)})()
     try:
-        _mk(ROW, "approval", "ok?")
-        _mk(ROW, "question", "who?")
-        assert seen[0]["answer_url"].endswith(f"/answer/{seen[0]['id']}/{store.sign('answer:' + seen[0]['id'])}")
+        with mock.patch.dict(os.environ, {"CASE_PUBLIC_HOST": "case.example.com"}):
+            _mk(ROW, "approval", "ok?")
+            _mk(ROW, "question", "who?")
+        hid = seen[0]["id"]
+        assert seen[0]["answer_url"] == f"https://case.example.com/answer/{hid}/{store.sign('answer:' + hid)}"
         assert seen[1]["answer_url"] == ""
+        with mock.patch.dict(os.environ, {"CASE_PUBLIC_HOST": ""}):
+            _mk(ROW, "approval", "ok?")
+        assert seen[2]["answer_url"] == ""
     finally:
         handoffs.notifier = type("N", (), {"notify": lambda self, h, name: None})()
         _cleanup()

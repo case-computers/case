@@ -131,8 +131,9 @@ def test_assist_url_becomes_the_click_action():
 
 def test_approval_buttons_use_the_signed_answer_url():
     h = _post_once({"id": "h_1", "kind": "approval", "prompt": "ok?", "screenshot": None,
-                    "answer_url": "http://127.0.0.1:8787/answer/h_1/sig"})
-    assert h["X-Actions"].count("http://127.0.0.1:8787/answer/h_1/sig") == 2
+                    "answer_url": "https://case.example.com/answer/h_1/sig"})
+    assert h["X-Actions"].count("https://case.example.com/answer/h_1/sig") == 2
+    assert h["X-Actions"].count("headers.Content-Type=application/json") == 2
     assert "approve" in h["X-Actions"] and "deny" in h["X-Actions"]
 
 
