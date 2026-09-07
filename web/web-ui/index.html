@@ -471,6 +471,34 @@ body.acting .deskwrap::before{
 .modal-card input:focus{border-color:var(--accent)}
 .modal-actions{display:flex;gap:8px;margin-top:12px;justify-content:flex-end}
 .modal-head{display:flex;align-items:stretch;gap:8px;margin-bottom:14px}
+.mbar{display:none;align-items:center;gap:10px;padding:9px 12px;background:var(--field);border-bottom:1px solid var(--soft)}
+.mbar #schedBtnM{margin-left:auto}
+.mbar #keyBtnM{margin-left:6px}
+.sched-card{width:min(520px,100%)}
+.sched-card h3{margin:0}
+.sched-list{margin:0 0 16px;max-height:40vh;overflow:auto}
+.sched-row{
+  display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:start;
+  padding:10px 0;border-bottom:1px solid var(--soft);
+}
+.sched-row .sn{font-size:13px;font-weight:600}
+.sched-row .sm{font-size:11px;color:var(--faint);margin-top:2px}
+.sched-row .sp{font-size:12px;color:var(--mut);margin-top:4px;white-space:pre-wrap}
+.sched-empty{padding:12px 0;font-size:13px;color:var(--faint)}
+.sched-card label{display:block;font-size:11px;color:var(--faint);margin:10px 0 4px}
+.sched-card textarea,.sched-card input[type=text],.sched-card input[type=time],.sched-card input[type=number]{
+  width:100%;border:1px solid var(--soft);background:var(--field);padding:8px 10px;
+  font-family:var(--sans);font-size:13px;outline:none;
+}
+.sched-card textarea:focus,.sched-card input:focus{border-color:var(--accent);background:var(--paper)}
+.sched-when{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px;font-size:13px}
+.sched-when label{margin:0;color:var(--ink);font-size:13px}
+.sched-when input[type=time],.sched-when input[type=number]{width:auto;max-width:8rem}
+.sched-when select{border:1px solid var(--soft);background:var(--field);padding:7px 8px;font-size:12px;max-width:16rem}
+.sched-when.interval #schedTz,.sched-when.interval #schedDaily{opacity:.4;pointer-events:none}
+.sched-err{font-size:12px;color:var(--warn);min-height:14px;margin-top:8px}
+#schedFuel{font-size:12px;color:var(--warn);margin:0 0 10px}
+#schedFuel[hidden]{display:none}
 .key-tabs{display:flex;flex:1;border:1px solid var(--ink);min-width:0}
 .key-tab{
   flex:1;border:0;background:transparent;padding:8px;
@@ -489,6 +517,7 @@ body.acting .deskwrap::before{
 @media(max-width:900px){
   body{grid-template-columns:1fr}
   .side,#sideSplit{display:none}
+  .mbar{display:flex}
   .stage{flex-direction:column}
   #railSplit{flex-basis:8px;cursor:row-resize}
   #railSplit::before{inset:3px 0}
@@ -508,12 +537,14 @@ body.acting .deskwrap::before{
   <div class="sec secrow"><a id="compName" href="/deploy" title="Switch computer in deploy">no computer</a><button type="button" class="secplus" id="newAgent" aria-label="New thread" title="New thread">+</button></div>
   <div id="navlist"></div>
   <div class="foot">
+    <button type="button" class="btn" id="schedBtn">SCHEDULES</button>
     <button type="button" class="btn" id="keyBtn">KEY</button>
   </div>
 </aside>
 <div class="split" id="sideSplit" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
 
 <div class="main">
+  <div class="mbar"><button type="button" class="btn" id="schedBtnM">SCHEDULES</button><button type="button" class="btn" id="keyBtnM">KEY</button></div>
   <div class="stage">
     <section class="work">
       <div class="log" id="log">
@@ -634,6 +665,35 @@ body.acting .deskwrap::before{
       <button type="submit" class="btn solid">SAVE</button>
     </div>
   </form>
+</div>
+
+<div class="modal" id="schedModal" role="dialog" aria-modal="true" aria-labelledby="schedTitle">
+  <div class="modal-card sched-card">
+    <div class="modal-head">
+      <h3 id="schedTitle">SCHEDULES</h3>
+      <button type="button" class="key-x" id="schedClose" aria-label="Close">×</button>
+    </div>
+    <p>A prompt that runs on this computer at a time you pick. Uses CASE_DRIVE_API_KEY from .env, not the tab KEY.</p>
+    <p id="schedFuel" hidden>Schedules run on the box key — set CASE_DRIVE_API_KEY in .env (or CASE_BRAIN_CMD for another harness).</p>
+    <div class="sched-list" id="schedList"><div class="sched-empty">LOADING</div></div>
+    <form id="schedForm" autocomplete="off">
+      <label for="schedName">Name</label>
+      <input id="schedName" type="text" maxlength="80" placeholder="morning sweep">
+      <label for="schedPrompt">Prompt</label>
+      <textarea id="schedPrompt" rows="3" required placeholder="open example.com and write the page title to /home/agent/reports/test.md"></textarea>
+      <div class="sched-when">
+        <label><input type="radio" name="schedKind" value="daily" checked> Daily</label>
+        <input id="schedDaily" type="time" value="09:00">
+        <select id="schedTz" aria-label="Timezone"></select>
+        <label><input type="radio" name="schedKind" value="interval"> Every</label>
+        <input id="schedHours" type="number" min="1" max="168" value="1"> hours
+      </div>
+      <div class="sched-err" id="schedErr"></div>
+      <div class="modal-actions">
+        <button type="submit" class="btn solid" id="schedSave">SAVE</button>
+      </div>
+    </form>
+  </div>
 </div>
 
 <script>
@@ -776,6 +836,8 @@ function paint(){
   $('navlist').innerHTML=navHtml();
   $('keyBtn').textContent=currentKey()?'KEY ON':'KEY';
   $('keyBtn').classList.toggle('on',!!currentKey());
+  $('keyBtnM').textContent=$('keyBtn').textContent;
+  $('keyBtnM').classList.toggle('on',!!currentKey());
   $('q').placeholder='tell '+String(comp&&comp.name||'the box').toLowerCase()+' what to do';
   const awake=comp&&comp.state==='awake';
   $('liveLabel').textContent=awake?'LIVE':'ASLEEP';
@@ -1165,6 +1227,7 @@ function openKey(){
   setTimeout(()=>$('keyin').focus(),0);
 }
 $('keyBtn').addEventListener('click',openKey);
+$('keyBtnM').addEventListener('click',openKey);
 $('keyTabOpenai').addEventListener('click',()=>{setProvider('openai');paintKeyTabs();paintCfg();});
 $('keyTabAnthropic').addEventListener('click',()=>{setProvider('anthropic');paintKeyTabs();paintCfg();});
 $('keyForm').addEventListener('submit',e=>{
@@ -1186,7 +1249,118 @@ $('keyClear').addEventListener('click',()=>{
 });
 $('keyModal').addEventListener('click',e=>{if(e.target===$('keyModal'))closeKey();});
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){closeKey();$('cfgPop').hidden=true;}
+  if(e.key==='Escape'){closeKey();closeSched();$('cfgPop').hidden=true;}
+});
+
+/* ---------- schedules ---------- */
+function closeSched(){$('schedModal').classList.remove('on');}
+const apiErr=j=>(j&&j.error&&(typeof j.error==='string'?j.error:j.error.message))||'';
+function fmtNext(iso){
+  if(!iso)return 'no next run';
+  const d=new Date(iso);
+  if(Number.isNaN(d.getTime()))return iso;
+  return d.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+function paintSchedList(rows){
+  const box=$('schedList');
+  if(!Array.isArray(rows)||!rows.length){
+    box.innerHTML='<div class="sched-empty">No schedules yet.</div>';
+    return;
+  }
+  box.innerHTML=rows.map(s=>{
+    const when=s.kind==='interval'?'every '+(Number(s.spec)/3600)+'h':'daily '+(s.spec||'')+(s.tz?' '+s.tz:'');
+    const last=s.last_status?('last '+s.last_status):'never run';
+    return '<div class="sched-row" data-id="'+esc(s.id)+'">'
+      +'<div><div class="sn">'+esc(s.name||s.id)+'</div>'
+      +'<div class="sm">'+esc(when)+' · '+esc(fmtNext(s.next_run_at))+' · '+esc(last)+'</div>'
+      +'<div class="sp">'+esc(s.prompt||'')+'</div></div>'
+      +'<button type="button" class="btn sched-run">RUN</button>'
+      +'<button type="button" class="btn sched-del">DELETE</button></div>';
+  }).join('');
+}
+async function loadSchedules(){
+  $('schedErr').textContent='';
+  try{
+    const r=await fetch('/api/schedules');
+    const j=await r.json().catch(()=>[]);
+    if(!r.ok){$('schedList').innerHTML='<div class="sched-empty">'+(apiErr(j)||'could not load')+'</div>';return;}
+    paintSchedList(Array.isArray(j)?j:[]);
+  }catch{$('schedList').innerHTML='<div class="sched-empty">cased unreachable</div>';}
+}
+function paintSchedFuel(ok){$('schedFuel').hidden=!!ok;}
+async function openSched(){
+  $('schedModal').classList.add('on');
+  paintSchedFuel(true);
+  loadSchedules();
+  try{
+    const r=await fetch('/api/health');
+    const j=await r.json().catch(()=>({}));
+    paintSchedFuel(!!j.brain_key);
+  }catch{paintSchedFuel(false);}
+}
+$('schedBtn').addEventListener('click',openSched);
+$('schedBtnM').addEventListener('click',openSched);
+$('schedClose').addEventListener('click',closeSched);
+$('schedModal').addEventListener('click',e=>{if(e.target===$('schedModal'))closeSched();});
+$('schedList').addEventListener('click',async e=>{
+  const row=e.target.closest('.sched-row');
+  if(!row)return;
+  const id=row.dataset.id;
+  if(e.target.classList.contains('sched-run')){
+    try{
+      const r=await fetch('/api/schedules/run',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})});
+      const j=await r.json().catch(()=>({}));
+      $('schedErr').textContent=r.ok?'started':(apiErr(j)||'run failed');
+    }catch{$('schedErr').textContent='cased unreachable';}
+    return;
+  }
+  if(e.target.classList.contains('sched-del')){
+    try{
+      const r=await fetch('/api/schedules?id='+encodeURIComponent(id),{method:'DELETE'});
+      if(!r.ok){const j=await r.json().catch(()=>({}));$('schedErr').textContent=apiErr(j)||'delete failed';return;}
+      loadSchedules();
+    }catch{$('schedErr').textContent='cased unreachable';}
+  }
+});
+function browserTz(){
+  try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}
+  catch{return 'UTC';}
+}
+function fillSchedTz(){
+  const sel=$('schedTz');
+  const mine=browserTz();
+  let names=[];
+  try{names=Intl.supportedValuesOf('timeZone').slice();}catch{names=['UTC'];}
+  if(!names.includes(mine))names=[mine].concat(names);
+  sel.innerHTML=names.map(z=>'<option value="'+esc(z)+'">'+esc(z)+'</option>').join('');
+  sel.value=mine;
+}
+function paintSchedKind(){
+  const kind=document.querySelector('input[name=schedKind]:checked').value;
+  $('schedForm').querySelector('.sched-when').classList.toggle('interval',kind==='interval');
+}
+fillSchedTz();
+document.querySelectorAll('input[name=schedKind]').forEach(el=>el.addEventListener('change',paintSchedKind));
+paintSchedKind();
+$('schedForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const prompt=$('schedPrompt').value.trim();
+  if(!prompt)return;
+  const kind=document.querySelector('input[name=schedKind]:checked').value;
+  const spec=kind==='daily'?($('schedDaily').value||'09:00'):String(Math.max(1,Number($('schedHours').value)||1)*3600);
+  const body={prompt,kind,spec,jitter_s:300};
+  if(kind==='daily')body.tz=$('schedTz').value||browserTz();
+  const name=$('schedName').value.trim();
+  if(name)body.name=name;
+  $('schedErr').textContent='';
+  try{
+    const r=await fetch('/api/schedules',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){$('schedErr').textContent=apiErr(j)||'save failed';return;}
+    $('schedPrompt').value='';
+    $('schedName').value='';
+    loadSchedules();
+  }catch{$('schedErr').textContent='cased unreachable';}
 });
 
 /* ---------- chat ---------- */

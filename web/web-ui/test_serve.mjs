@@ -20,6 +20,13 @@ assert.match(html, /ANTHROPIC KEY/);
 assert.match(html, /claude-sonnet-4-6/);
 assert.match(html, /id="attachStart"/);
 assert.match(html, /id="attachPick"/);
+assert.match(html, /id="schedModal"/);
+assert.match(html, /id="schedTz"/);
+assert.match(html, /id="schedBtn"/);
+assert.match(html, /id="schedBtnM"/);
+assert.match(html, /Intl\.supportedValuesOf/);
+assert.match(html, /brain_key/);
+assert.match(fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8'), /schedulesRoute/);
 
 // threadTurns: reopening a thread shows text + tool calls; outputs and reasoning stay server-side
 const view = threadTurns([

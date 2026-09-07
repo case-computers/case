@@ -26,6 +26,7 @@ const status = await new Promise((r) => http.get({ host: '127.0.0.1', port: serv
   headers: { authorization: 'Bearer tok', host: 'evil.example' } }, (res) => { res.resume(); r(res.statusCode); }));
 assert.equal(status, 403);
 
+assert.equal((await get('/api/schedules')).status, 401);
 assert.equal((await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' })).status, 401);
 assert.equal((await post('/api/brain', {}, { authorization: 'Bearer tok' })).status, 400);
 assert.equal((await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, { authorization: 'Bearer tok' })).status, 503);

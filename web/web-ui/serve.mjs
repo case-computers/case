@@ -1290,6 +1290,47 @@ export async function runTurn({
 // Mutable so HTTP tests can stub the provider loop without a live key.
 export const driveLoop = { turn: runTurn };
 
+export async function schedulesRoute(req, res, url) {
+  const id = await cid();
+  if (!id) return json(res, 409, { error: 'no computer' });
+  const sid = String(url.searchParams.get('id') || '').trim();
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/schedules') {
+      const r = await api('GET', `/computers/${encodeURIComponent(id)}/schedules`);
+      return json(res, r.status >= 400 ? r.status : 200, r.json || []);
+    }
+    if (req.method === 'POST' && url.pathname === '/api/schedules') {
+      const buf = await readBody(req, res);
+      if (!buf) return;
+      let body;
+      try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+      catch { return json(res, 400, { error: 'bad json' }); }
+      const r = await api('POST', `/computers/${encodeURIComponent(id)}/schedules`, { body, timeoutMs: 15000 });
+      return json(res, r.status >= 400 ? r.status : 201, r.json || {});
+    }
+    if (req.method === 'DELETE' && url.pathname === '/api/schedules') {
+      if (!sid) return json(res, 400, { error: 'id required' });
+      const r = await api('DELETE', `/schedules/${encodeURIComponent(sid)}`);
+      if (r.status >= 400) return json(res, r.status, r.json || { error: r.raw || 'delete failed' });
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/schedules/run') {
+      const buf = await readBody(req, res);
+      if (!buf) return;
+      let body = {};
+      try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+      catch { return json(res, 400, { error: 'bad json' }); }
+      const runId = String(body.id || sid || '').trim();
+      if (!runId) return json(res, 400, { error: 'id required' });
+      const r = await api('POST', `/schedules/${encodeURIComponent(runId)}/run`);
+      return json(res, r.status >= 400 ? r.status : 202, r.json || {});
+    }
+    return json(res, 405, { error: 'method' });
+  } catch (err) {
+    return json(res, 502, { error: err.message || 'cased unreachable' });
+  }
+}
+
 export async function brainRoute(req, res) {
   const buf = await readBody(req, res);
   if (!buf) return;
@@ -1737,6 +1778,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/threads') return threadsRoute(req, res, url);
     if (req.method === 'GET' && p === '/api/file') return fsFile(res, url);
     if (req.method === 'POST' && p === '/api/brain') return brainRoute(req, res);
+    if (p === '/api/schedules' || p === '/api/schedules/run') return schedulesRoute(req, res, url);
     if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
     if (req.method === 'POST' && p === '/api/chat/steer') return steer(req, res);
     if (req.method === 'POST' && p === '/api/attach') return attach(req, res);
