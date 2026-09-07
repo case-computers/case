@@ -83,6 +83,17 @@ def test_daily_skips_spring_forward_gap():
     assert nxt == "2026-03-09T06:30:00Z", nxt
 
 
+def test_daily_jitter_does_not_land_in_spring_forward_gap():
+    # 01:45 + 45m = 02:30, which does not exist on 2026-03-08 in New York.
+    # Skip to the next day, keep the same jitter: 2026-03-09 02:30 EDT = 06:30Z.
+    from zoneinfo import ZoneInfo
+    import unittest.mock as mock
+    now = datetime(2026, 3, 8, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+    with mock.patch("scheduler.random.randint", return_value=2700):
+        nxt = compute_next("daily", "01:45", 2700, "America/New_York", now=now)
+    assert nxt == "2026-03-09T06:30:00Z", nxt
+
+
 def test_daily_box_local_skips_spring_forward_gap():
     import time
     old = os.environ.get("TZ")

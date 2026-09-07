@@ -34,6 +34,12 @@ SCHED_RUNNING = set()   # in-memory guard, fine while one cased process runs
 _LOCK = threading.Lock()   # guards the check-then-add on SCHED_RUNNING (sweeper vs run-now)
 
 
+def _wall_exists(t, hh, mm):
+    """False when t is a spring-forward gap (that clock time never happened)."""
+    back = t.astimezone(timezone.utc).astimezone(t.tzinfo)
+    return (back.hour, back.minute) == (hh, mm)
+
+
 def compute_next(kind, spec, jitter_s, tz=None, *, now=None):
     """Next fire time as UTC ISO. Lexicographic order == chronological (zero-padded, Z).
     Daily HH:MM is wall clock in tz (IANA). Empty tz = box local (MCP / old callers).
@@ -62,10 +68,13 @@ def compute_next(kind, spec, jitter_s, tz=None, *, now=None):
         # Spring-forward gap: this HH:MM never happened that day. replace()
         # still builds the invalid wall time and astimezone() shifts it (02:30
         # → 03:30). Skip to the next day that actually has that clock time.
-        back = t.astimezone(timezone.utc).astimezone(t.tzinfo)
-        if (back.hour, back.minute) != (hh, mm):
+        # Re-check after jitter: 01:45 + 45m can land in the same hole.
+        if not _wall_exists(t, hh, mm):
             t += timedelta(days=1)
-        nxt = (t + timedelta(seconds=j)).astimezone(timezone.utc)
+        fired = t + timedelta(seconds=j)
+        if not _wall_exists(fired, fired.hour, fired.minute):
+            fired = t + timedelta(days=1) + timedelta(seconds=j)
+        nxt = fired.astimezone(timezone.utc)
     else:
         raise ApiError(400, "bad_kind", "kind must be 'interval' or 'daily'")
     return nxt.strftime("%Y-%m-%dT%H:%M:%SZ")
