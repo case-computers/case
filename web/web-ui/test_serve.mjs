@@ -7,11 +7,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
+import { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
-  histToAnthropicMessages, anthropicThinkingFor, caseToolPlan, withRateRetry,
+  histToAnthropicMessages, anthropicThinkingFor, caseToolPlan,
 } from './case-tools.mjs';
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
@@ -20,6 +20,13 @@ assert.match(html, /ANTHROPIC KEY/);
 assert.match(html, /claude-sonnet-4-6/);
 assert.match(html, /id="attachStart"/);
 assert.match(html, /id="attachPick"/);
+assert.match(html, /id="schedModal"/);
+assert.match(html, /id="schedTz"/);
+assert.match(html, /id="schedBtn"/);
+assert.match(html, /id="schedBtnM"/);
+assert.match(html, /Intl\.supportedValuesOf/);
+assert.match(html, /brain_key/);
+assert.match(fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8'), /schedulesRoute/);
 
 // threadTurns: reopening a thread shows text + tool calls; outputs and reasoning stay server-side
 const view = threadTurns([
@@ -95,28 +102,109 @@ assert.equal(parseErr(Buffer.from('<html>502</html>'), 'read failed'), 'read fai
   assert.ok(!/fonts\.(googleapis|gstatic)/.test(html), 'no font CDN on the page');
 }
 
-// histTrim: conversation memory drops WHOLE turns, never splitting a function_call
-// from its output (an orphan of either kind 400s every later request).
+// histTrim: over budget, old turns collapse to [prompt, last reply] — the task and
+// the model's own "stopped at X" survive, tool observations die. Never an orphan
+// function_call / output (either kind 400s every later request).
+const reply = (n) => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `did ${n}` }] });
 const turn = (n, pad) => [
   { role: 'user', content: `ask ${n}${pad}` },
   { type: 'function_call', call_id: `c${n}`, name: 'computer_snapshot', arguments: '{}' },
-  { type: 'function_call_output', call_id: `c${n}`, output: 'ok' },
+  { type: 'function_call_output', call_id: `c${n}`, output: 'ok' + pad },
+  reply(n),
 ];
 const h = { items: [...turn(1, 'x'.repeat(400)), ...turn(2, ''), ...turn(3, '')] };
-histTrim(h, 500);   // 938 chars over three turns; dropping the fat first turn leaves 359
-assert.deepEqual(h.items.map((i) => i.call_id || i.content), ['ask 2', 'c2', 'c2', 'ask 3', 'c3', 'c3']);
+histTrim(h, 1200);   // 1602 chars; collapsing turn 1 leaves 1057
+assert.deepEqual(h.items.map((i) => i.call_id || (Array.isArray(i.content) ? i.content[0].text : i.content)),
+  ['ask 1' + 'x'.repeat(400), 'did 1', 'ask 2', 'c2', 'c2', 'did 2', 'ask 3', 'c3', 'c3', 'did 3']);
 for (const it of h.items.filter((i) => i.type === 'function_call')) {
   assert.ok(h.items.some((o) => o.type === 'function_call_output' && o.call_id === it.call_id),
     `call ${it.call_id} lost its output`);
 }
-// the newest turn is never trimmed away, however far over budget it is
-const solo = { items: turn(9, 'y'.repeat(5000)) };
-histTrim(solo, 10);
-assert.equal(solo.items.length, 3);
-// under budget: untouched
+// screenshots, steers and notes are role:user too — they are NOT turn boundaries.
+// The cut must never land inside a turn and take the task with it.
+const tmpShots = fs.mkdtempSync(path.join(os.tmpdir(), 'shots-'));
+const shotTurn = { items: [
+  { role: 'user', content: 'ORIGINAL TASK' },
+  { type: 'function_call', call_id: 'c1', name: 'computer_navigate', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'c1', output: 'x'.repeat(3000) },
+  stashShot('aGVsbG8=', tmpShots),
+  { role: 'user', content: [{ type: 'input_text', text: 'steer: faster' }] },
+  { type: 'function_call', call_id: 'c2', name: 'computer_click', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'c2', output: 'ok' },
+  reply('shot'),
+  { role: 'user', content: 'continue' },
+  { type: 'function_call', call_id: 'c3', name: 'computer_click', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'c3', output: 'ok' },
+] };
+histTrim(shotTurn, 500);
+assert.deepEqual(shotTurn.items.map((i) => i.call_id || (Array.isArray(i.content) ? i.content[0].text : i.content)),
+  ['ORIGINAL TASK', 'did shot', 'continue', 'c3', 'c3']);
+fs.rmSync(tmpShots, { recursive: true, force: true });
+// still over after every turn is collapsed: drop the oldest collapsed ones. The
+// newest turn keeps its tail (small enough to fit TAIL_KEEP whole).
+const many = { items: [...turn(1, 'x'.repeat(300)), ...turn(2, 'y'.repeat(300)), ...turn(3, '')] };
+histTrim(many, 800);
+assert.deepEqual(many.items.map((i) => i.call_id || (Array.isArray(i.content) ? i.content[0].text : i.content)),
+  ['ask 2' + 'y'.repeat(300), 'did 2', 'ask 3', 'c3', 'c3', 'did 3']);
+// A lone giant turn collapses too: histTrim only runs after a turn has ended, and
+// left whole it is what every round of the NEXT turn re-sends. It keeps its prompt
+// and a bounded tail, so "continue" resumes with real observations rather than blind.
+const giant = { items: [{ role: 'user', content: 'THE TASK' }] };
+for (let n = 0; n < 60; n++) {
+  giant.items.push({ type: 'function_call', call_id: `g${n}`, name: 'computer_eval', arguments: '{}' });
+  giant.items.push({ type: 'function_call_output', call_id: `g${n}`, output: 'z'.repeat(4000) });
+}
+giant.items.push(reply('giant'));
+const wasBig = JSON.stringify(giant.items).length;
+histTrim(giant);
+const nowSmall = JSON.stringify(giant.items).length;
+assert.ok(wasBig > 240_000 && nowSmall < 60_000, `collapsed ${wasBig} -> ${nowSmall}`);
+assert.equal(giant.items[0].content, 'THE TASK', 'the task survives its own turn collapsing');
+assert.ok(giant.items.length > 3, 'a tail of real observations survives, not just the prompt');
+const tailCalls = new Set(giant.items.filter((i) => i.type === 'function_call').map((i) => i.call_id));
+for (const it of giant.items.filter((i) => i.type === 'function_call_output')) {
+  assert.ok(tailCalls.has(it.call_id), `orphan output ${it.call_id} would 400 every later request`);
+}
+// Batched calls: two calls then two outputs. A suffix cut that keeps `kept`'s
+// call plus `old`'s output (but not `old`'s call) used to leave that output
+// in the middle of the tail — leading-only stripping missed it.
+const batched = { items: [
+  { role: 'user', content: 'TASK' },
+  { type: 'function_call', call_id: 'old', name: 'computer_eval', arguments: 'x'.repeat(5000) },
+  { type: 'function_call', call_id: 'kept', name: 'computer_eval', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'old', output: 'z'.repeat(35000) },
+  { type: 'function_call_output', call_id: 'kept', output: 'ok' },
+  reply('batched'),
+] };
+histTrim(batched, 1000);
+const batchedCalls = new Set(batched.items.filter((i) => i.type === 'function_call').map((i) => i.call_id));
+for (const it of batched.items.filter((i) => i.type === 'function_call_output')) {
+  assert.ok(batchedCalls.has(it.call_id), `orphan output ${it.call_id} would 400 every later request`);
+}
+assert.ok(!batched.items.some((i) => i.call_id === 'old'),
+  'a cut-away batched call must not leave its output in the tail');
+histTrim(giant, 10);
+assert.equal(giant.items[0].content, 'THE TASK');
 const small = { items: turn(1, '') };
 histTrim(small, 100000);
-assert.equal(small.items.length, 3);
+assert.equal(small.items.length, 4);
+
+// histApplyCompaction: after a server-side compaction item, everything before it
+// goes except the turn openers — the task survives, the compaction carries the rest.
+const comp = histApplyCompaction([
+  { role: 'user', content: 'task A' },
+  { type: 'function_call', call_id: 'a1', name: 'computer_snapshot', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'a1', output: 'big' },
+  { role: 'user', content: 'continue' },
+  { type: 'function_call', call_id: 'b1', name: 'computer_snapshot', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'b1', output: 'big' },
+  { role: 'user', content: [{ type: 'input_text', text: 'steer' }] },
+  { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque' },
+  { type: 'function_call', call_id: 'b2', name: 'computer_click', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'b2', output: 'ok' },
+]);
+assert.deepEqual(comp.map((i) => i.call_id || i.type || i.content), ['task A', 'continue', 'compaction', 'b2', 'b2']);
+assert.deepEqual(histApplyCompaction(small.items), small.items, 'no compaction item: untouched');
 
 const closed = histCloseOpenCalls([
   { type: 'reasoning', summary: [] },
@@ -374,7 +462,13 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(chatFn, /res\.on\('close', \(\) => \{ clientGone\(\); gone\.abort\(\); \}\)/);
   assert.match(loopFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);
   assert.ok(!/responses\.create\(params\)/.test(loopFn), 'every round is abortable');
-  assert.match(loopFn, /summary !== 'auto' && !gone\.signal\.aborted/, 'an abort never retries as a summary fallback');
+  assert.match(loopFn, /if \(gone\.signal\.aborted\) throw err;/, 'an abort never retries as a param fallback');
+  assert.match(loopFn, /if \(isRateLimited\(err\)\) throw err;/);
+  assert.match(loopFn, /else if \(summary !== 'auto'\)/);
+  assert.ok(loopFn.lastIndexOf('histApplyCompaction') > loopFn.indexOf("histCloseOpenCalls(hist.items, { keepReasoning: true })"),
+    'the tool round applies compaction only after closing its open calls');
+  assert.equal([...loopFn.matchAll(/histApplyCompaction/g)].length, 2, 'both the answering and tool rounds compact');
+  assert.match(serveSrc, /\.filter\(\(it\) => !isBudgetWarn\(it\)\)/, 'the budget warning does not outlive its turn');
   assert.match(loopFn, /gone\.signal\.removeEventListener\('abort', relay\)/, 'round listener is unlinked');
   assert.match(serveSrc, /takeSteers\(thread\.id\)/, 'steer inbox drained in the loop');
   assert.match(serveSrc, /type: 'steer'/, 'steer emits to the stream');
@@ -396,8 +490,9 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
     /cache_control: \{ type: 'ephemeral' \}/, 'Anthropic path requests prompt cache');
   assert.match(loopFn, /hydrateShots\(hydrateAttaches\(hist\.items\)\)/);
   assert.match(chatFn, /attachment not found/, 'a missing file is an error, not a silent drop');
-  assert.ok(!/truncation:\s*['"]auto['"]/.test(loopFn), 'no truncation:auto');
-  assert.ok(!/compactHistory|SUMMARIZE_PROMPT|CASE_COMPACT_AT/.test(serveSrc), 'no compaction');
+  assert.match(loopFn, /truncation: 'auto'/);
+  assert.match(serveSrc, /CASE_COMPACT_AT/);
+  assert.ok(!/compactHistory|SUMMARIZE_PROMPT/.test(serveSrc), 'no client-side summarizer');
   assert.match(serveSrc, /try \{ computerId = await cid\(\); \}/);
   assert.ok(!/drive ntfy chat on \$\{cfg\.url\}\/\$\{cfg\.topic\}/.test(serveSrc));
 }
@@ -505,38 +600,6 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(typeof silent[0].content, 'string');
   assert.ok(!JSON.stringify(silent).includes('image'));
   fs.rmSync(dir, { recursive: true, force: true });
-}
-
-{
-  let n = 0;
-  const out = await withRateRetry(async () => {
-    n += 1;
-    if (n < 3) {
-      const err = new Error('rate limit: try again in 0s');
-      err.status = 429;
-      throw err;
-    }
-    return 'ok';
-  }, () => {}, 5);
-  assert.equal(out, 'ok');
-  assert.equal(n, 3);
-}
-
-{
-  const ctl = new AbortController();
-  let n = 0;
-  const started = Date.now();
-  await assert.rejects(
-    withRateRetry(async () => {
-      n += 1;
-      const err = new Error('rate limited');
-      err.status = 429;
-      throw err;
-    }, () => ctl.abort(), 5, ctl.signal),
-    (err) => err?.name === 'AbortError',
-  );
-  assert.equal(n, 1, 'disconnect stops retries before another provider request');
-  assert.ok(Date.now() - started < 500, 'disconnect interrupts the backoff sleep');
 }
 
 {

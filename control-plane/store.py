@@ -66,7 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_handoffs_status_created ON handoffs(status, creat
 CREATE TABLE IF NOT EXISTS schedules (
   id TEXT PRIMARY KEY, computer_id TEXT, name TEXT, prompt TEXT,
   kind TEXT, spec TEXT, jitter_s INTEGER, enabled INTEGER,
-  next_run_at TEXT, last_run_at TEXT, last_status TEXT, created_at TEXT
+  next_run_at TEXT, last_run_at TEXT, last_status TEXT, created_at TEXT,
+  tz TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, schedule_id TEXT, computer_id TEXT,
@@ -131,6 +132,7 @@ class Store:
         ("credentials", "probe_url", "TEXT"),
         ("credentials", "proof_spec", "TEXT"),
         ("credentials", "verification_hosts", "TEXT"),
+        ("schedules", "tz", "TEXT"),
     ]
 
     # Active (non-terminal) auth-attempt statuses, kept here so the partial unique
@@ -541,10 +543,10 @@ class Store:
             (ts, ts)).rowcount
 
     # ---- schedules ----
-    def insert_schedule(self, sid, cid, name, prompt, kind, spec, jitter_s, next_run_at):
+    def insert_schedule(self, sid, cid, name, prompt, kind, spec, jitter_s, next_run_at, tz=None):
         self.q("INSERT INTO schedules (id,computer_id,name,prompt,kind,spec,jitter_s,enabled,"
-               "next_run_at,last_run_at,last_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-               (sid, cid, name, prompt, kind, spec, jitter_s, 1, next_run_at, None, None, now()))
+               "next_run_at,last_run_at,last_status,created_at,tz) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (sid, cid, name, prompt, kind, spec, jitter_s, 1, next_run_at, None, None, now(), tz))
 
     def get_schedule(self, sid, enabled_only=False):
         if enabled_only:

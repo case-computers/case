@@ -20,7 +20,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry } from './case-tools.mjs';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRateLimited } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
 import * as telegram from './telegram.mjs';
@@ -381,7 +381,7 @@ async function power(res, req, action) {
 }
 
 // Chat: same NDJSON contract as web/serve.mjs, hands always local REST.
-// Tool names + semantics match mcp/case_mcp.py (prod default surface; no schedules).
+// Tool names + semantics match mcp/case_mcp.py.
 const EXTRA_TOOLS = [
   { type: 'function', name: 'computer_list', description: 'List all computers with state, resources and credential names. Reuse an existing computer — only computer_create for an identity that should stay separate.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'computer_create', description: 'Create a persistent computer (Linux desktop + Chromium). Blocks until running. Computers are durable: logins, cookies and files survive sleep. Check computer_list first.', parameters: { type: 'object', properties: { name: { type: 'string' } }, additionalProperties: false } },
@@ -548,8 +548,16 @@ function actFor(name, args, id) {
 
 const ROUNDS = 200;
 // ROUNDS bounds steps, not spend: history is re-sent every round, so cost is quadratic
-// in rounds. This bounds the money — cumulative input tokens for one turn.
+// in rounds. This bounds the money — cumulative *billed* input for one turn, i.e.
+// eff = (in - cached) + 0.1*cached. Counting raw `in` killed turns at ~260k eff
+// (97% cache hit → 7.6x inflated); see the `drive turn` log line.
 const TURN_TOKEN_BUDGET = Number(process.env.CASE_TURN_TOKENS || 2_000_000);
+const BUDGET_WARN = 'Turn budget nearly spent — a few tool steps remain. Append your progress and the exact next step to a file under /home/agent/reports now, then stop and say where you stopped.';
+const isBudgetWarn = (it) => Array.isArray(it?.content) && it.content.some((c) => c?.text === BUDGET_WARN);
+// Window guard. OpenAI compacts server-side once the rendered context passes this
+// (opaque `compaction` item we carry forward); `truncation:'auto'` is the floor if a
+// model lacks compaction. 200k fits every window in the list (272k–1M). 0 = off.
+const COMPACT_AT = Number(process.env.CASE_COMPACT_AT || 200_000);   // '0' is truthy → off
 // Threads: the sidebar's unit of navigation, each with its own conversation memory.
 // The Responses API runs stateless here (store:false), so the item list IS the
 // memory. agent stays '' until the run first needs hands (a tool call executes) —
@@ -649,24 +657,84 @@ function threadsRoute(req, res, url) {
   return json(res, 405, { error: 'method' });
 }
 function finishTurn(hist, thread) {
-  hist.items = histCloseOpenCalls(hist.items);
+  // The budget warning is turn-scoped: left in, the next turn opens with
+  // "nearly spent" and wraps up on its first round.
+  hist.items = histCloseOpenCalls(hist.items).filter((it) => !isBudgetWarn(it));
   histTrim(hist);
   thread.updated = Date.now();
   saveThreads();
 }
 
 const HIST_MAX = 240_000;
-export function histTrim(h, max = HIST_MAX) {
-  // Turn boundaries are derived, not tracked: the only user-role items are the ones
-  // that open a turn, so they survive any filtering of the array.
-  let starts = h.items.map((it, i) => (it.role === 'user' ? i : -1)).filter((i) => i >= 0);
-  let size = JSON.stringify(h.items).length;
-  while (starts.length > 1 && size > max) {
-    const cut = starts[1];
-    size -= JSON.stringify(h.items.slice(0, cut)).length;
-    h.items.splice(0, cut);
-    starts = starts.slice(1).map((i) => i - cut);
+// A turn opener is the prompt the user typed: string content. Screenshots, steers
+// and "screen unchanged" notes are role:user too but carry content arrays — they
+// are NOT boundaries (cutting at one deleted the task and kept the tool spam).
+const isTurnStart = (it) => it?.role === 'user' && typeof it.content === 'string';
+const turnStarts = (items) => items.map((it, i) => (isTurnStart(it) ? i : -1)).filter((i) => i >= 0);
+const PROMPT_KEEP = 20_000;   // the user's own words: elide only a genuinely huge paste
+const TAIL_KEEP = 40_000;     // recent observations carried into the next turn
+/** The last `budget` chars of a turn, whole call/output pairs only — a tail that
+ *  opens on an orphaned function_call_output 400s every later request. */
+function turnTail(items, budget) {
+  const out = [];
+  let n = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    n += JSON.stringify(items[i]).length;
+    if (n > budget && out.length) break;
+    out.unshift(items[i]);
   }
+  const calls = new Set(out.filter((it) => it.type === 'function_call').map((it) => it.call_id));
+  const outs = new Set(out.filter((it) => it.type === 'function_call_output').map((it) => it.call_id));
+  // A suffix cut can land between a call and its output, or between two
+  // batched calls and one of their outputs. Either orphan 400s the next request.
+  return out.filter((it) => {
+    if (it.type === 'function_call_output') return calls.has(it.call_id);
+    if (it.type === 'function_call') return outs.has(it.call_id);
+    return true;
+  });
+}
+/** Over budget, turns collapse to [prompt, last reply]: the task and the model's own
+ *  "stopped at X" survive forever, tool observations die. Only if every turn is
+ *  already collapsed and it is still over does the oldest go.
+ *  The newest turn collapses too — every caller runs this after the turn has ended,
+ *  so nothing in flight is cut, and a 159-round turn left whole is what the *next*
+ *  turn pays to re-send on every round. A short turn is nowhere near `max`, so a
+ *  follow-up like "click the blue one" still has its snapshot to work from. */
+export function histTrim(h, max = HIST_MAX) {
+  const over = () => JSON.stringify(h.items).length > max;
+  let starts = turnStarts(h.items);
+  for (let k = 0; k < starts.length && over(); k++) {
+    const [a, b] = [starts[k], starts[k + 1] ?? h.items.length];
+    const turn = h.items.slice(a, b);
+    const body = turn.slice(1);
+    let keep;
+    if (k === starts.length - 1) {
+      // The newest turn is the one "continue" resumes into, so it keeps a bounded
+      // tail of real observations, not just its closing line. Older turns are
+      // already answered — their reply is the summary.
+      keep = turnTail(body, TAIL_KEEP);
+    } else {
+      const last = [...body].reverse().find((it) => it.type === 'message' && it.role === 'assistant');
+      keep = last ? [{ ...last, content: (last.content || []).map((c) => (c.type === 'output_text' ? { ...c, text: clip(c.text, 2000) } : c)) }] : [];
+    }
+    // A compaction item is the only copy of everything summarized away for it.
+    const comp = body.filter((it) => it.type === 'compaction' && !keep.includes(it));
+    const kept = [{ ...turn[0], content: clip(turn[0].content, PROMPT_KEEP) }, ...comp, ...keep];
+    if (kept.length === turn.length) continue;
+    h.items.splice(a, b - a, ...kept);
+    starts = turnStarts(h.items);
+  }
+  while (starts.length > 1 && over()) {
+    h.items.splice(0, starts[1]);
+    starts = turnStarts(h.items);
+  }
+}
+/** A server-side compaction item carries everything before it. Drop that — except
+ *  the turn openers, so the task is never only inside an opaque blob. */
+export function histApplyCompaction(items) {
+  const ci = items.findLastIndex((it) => it?.type === 'compaction');
+  if (ci < 0) return items;
+  return [...items.slice(0, ci).filter(isTurnStart), ...items.slice(ci)];
 }
 /** Drop stale reasoning and close any function_call that has no output.
  *  OpenAI 400s "No tool output found for function call …" otherwise. */
@@ -1027,12 +1095,14 @@ export async function runTurn({
       }
       finishTurn(hist, thread);
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
-      return { text, computerId: id, threadId: thread.id };
+      return { text, computerId: id, threadId: thread.id, finished };
     }
     const client = new OpenAI({ apiKey: auth.key });
     let text = '';
     const spend = { in: 0, cached: 0, out: 0 };
+    const effSoFar = () => Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
     let summary = 'detailed';
+    let compact = COMPACT_AT > 0;
     const round = async () => {
       // The SDK leaves its abort listener on the signal after the round ends; over a
       // 200-round turn that is 200 dead listeners on one signal. A per-round
@@ -1049,15 +1119,31 @@ export async function runTurn({
         // exactly the shape the prefix cache wants. A stable key is required for
         // reliable matching; cached input bills at 0.1x.
         prompt_cache_key: thread.id,
+        truncation: 'auto',
+        ...(compact ? { context_management: [{ type: 'compaction', compact_threshold: COMPACT_AT }] } : {}),
       };
+      // Two params can be rejected independently: context_management, and a
+      // 'detailed' reasoning summary. Drop whichever the error names and go round
+      // again. Each branch flips a one-way flag, so this runs at most three times.
       let stream;
-      try { stream = await client.responses.create(params, { signal: rc.signal }); }
-      catch (err) {
-        // Only the summary-unsupported fallback retries; an abort must not.
-        if (summary !== 'auto' && !gone.signal.aborted) {
-          summary = 'auto';
-          stream = await client.responses.create({ ...params, reasoning: { effort, summary } }, { signal: rc.signal });
-        } else throw err;
+      for (;;) {
+        try { stream = await client.responses.create(params, { signal: rc.signal }); break; }
+        catch (err) {
+          // Only param fallbacks retry here. An abort must not — and neither may a
+          // rate limit: `summary`/`compact` outlive the round, so treating a 429 as
+          // "unsupported" retries with no backoff AND thins reasoning / drops the
+          // window guard for every later round. Let withRateRetry have it.
+          if (gone.signal.aborted) throw err;
+          if (isRateLimited(err)) throw err;
+          if (compact && /context_management|compaction/i.test(err?.message || '')) {
+            console.log(`drive turn ${thread.id}: compaction rejected — ${err?.message || 'no message'}`);
+            compact = false;
+            delete params.context_management;
+          } else if (summary !== 'auto') {
+            summary = 'auto';
+            params.reasoning = { effort, summary };
+          } else throw err;
+        }
       }
       let response = null;
       let thinkDelta = false;
@@ -1102,9 +1188,16 @@ export async function runTurn({
     let finished = false;
     const shots = new Set();      // screenshot hashes already in this turn's history
     const snaps = { last: '' };   // hash of the most recent snapshot's element list
-    const overBudget = () => spend.in > TURN_TOKEN_BUDGET;
+    const overBudget = () => effSoFar() > TURN_TOKEN_BUDGET;
+    let warned = '';
+    let compactions = 0;
     let i = 0;
     for (; i < ROUNDS && !finished && !stopped() && !overBudget(); i++) {
+      if (!warned && (effSoFar() > 0.8 * TURN_TOKEN_BUDGET || i >= 0.8 * ROUNDS)) {
+        warned = effSoFar() > 0.8 * TURN_TOKEN_BUDGET ? 'budget' : 'rounds';
+        pushSteerItems(hist.items, [BUDGET_WARN]);
+        emit({ type: 'think', text: `[80% of the turn ${warned} — told the model to wrap up]` });
+      }
       const nudges = takeSteers(thread.id);
       if (nudges.length) {
         for (const n of nudges) {
@@ -1124,6 +1217,10 @@ export async function runTurn({
         // only in the stream: reloads show bare prompts and the model never
         // sees what it already said.
         hist.items.push(...response.output);
+        if (compact && response.output.some((it) => it.type === 'compaction')) {
+          compactions++;
+          hist.items = histApplyCompaction(hist.items);
+        }
         if (text && !textDelta) emit({ type: 'text', text });
         break;
       }
@@ -1145,6 +1242,17 @@ export async function runTurn({
         if (image_b64) images.push(image_b64);
       }
       hist.items = histCloseOpenCalls(hist.items, { keepReasoning: true });
+      if (compact && response.output.some((it) => it.type === 'compaction')) {
+        compactions++;
+        hist.items = histApplyCompaction(hist.items);
+        // Both dedup caches point at items compaction just deleted. Left set, the
+        // next screenshot comes back "identical to an earlier one this turn" with
+        // no earlier one in the input, and snapshotElide promises refs are "still
+        // valid" from a snapshot the model can no longer see.
+        shots.clear();
+        snaps.last = '';
+        emit({ type: 'think', text: '[context compacted server-side — carrying the summary forward]' });
+      }
       for (const b64 of images) pushShot(hist.items, shots, b64);
     }
     if (!finished && !stopped()) {
@@ -1152,20 +1260,21 @@ export async function runTurn({
       // "it just stopped" — and the carried history makes "continue" actually resume.
       text = (text ? text + '\n\n' : '')
         + (overBudget()
-          ? `**Out of budget.** Stopped after ${spend.in.toLocaleString('en-US')} input tokens with the task unfinished. Say **continue** and I pick up from here.`
+          ? `**Out of budget.** Stopped after ${effSoFar().toLocaleString('en-US')} billed input tokens with the task unfinished. Say **continue** and I pick up from here.`
           : `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`);
       emit({ type: 'text', text });
     }
     // Reasoning items are only valid inside the turn that produced them; carrying
     // them forward bloats the payload and some models reject stale ones.
     finishTurn(hist, thread);
-    const eff = Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
+    const eff = effSoFar();
     console.log(`drive turn ${thread.id}: in=${spend.in} cached=${spend.cached}`
       + ` (${spend.in ? Math.round((100 * spend.cached) / spend.in) : 0}%)`
-      + ` eff=${eff} out=${spend.out} rounds=${i}`);
+      + ` eff=${eff} out=${spend.out} rounds=${i} warn=${warned || 'none'}`
+      + ` hist=${JSON.stringify(hist.items).length} compactions=${compactions}`);
     spend.eff = eff;
     emit({ type: 'done', text, computer_id: id, thread_id: thread.id, spend, rounds: i });
-    return { text, computerId: id, threadId: thread.id };
+    return { text, computerId: id, threadId: thread.id, finished };
   } catch (err) {
     // Keep the turn even on provider errors: tools already ran, that work is
     // real. histCloseOpenCalls synthesizes outputs for any dangling
@@ -1173,7 +1282,7 @@ export async function runTurn({
     // inside the round; landing here means retries ran dry or a real fault.)
     finishTurn(hist, thread);
     if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
-    return { text: '', computerId: id, threadId: thread.id, error: err?.message || 'provider error' };
+    return { text: '', computerId: id, threadId: thread.id, finished: false, error: err?.message || 'provider error' };
   } finally {
     const leftover = takeSteers(thread.id);
     if (leftover.length) {
@@ -1182,6 +1291,100 @@ export async function runTurn({
       saveThreads();
     }
   }
+}
+
+// Mutable so HTTP tests can stub the provider loop without a live key.
+export const driveLoop = { turn: runTurn };
+
+export async function schedulesRoute(req, res, url) {
+  const id = await cid();
+  if (!id) return json(res, 409, { error: 'no computer' });
+  const sid = String(url.searchParams.get('id') || '').trim();
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/schedules') {
+      const r = await api('GET', `/computers/${encodeURIComponent(id)}/schedules`);
+      return json(res, r.status >= 400 ? r.status : 200, r.json || []);
+    }
+    if (req.method === 'POST' && url.pathname === '/api/schedules') {
+      const buf = await readBody(req, res);
+      if (!buf) return;
+      let body;
+      try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+      catch { return json(res, 400, { error: 'bad json' }); }
+      const r = await api('POST', `/computers/${encodeURIComponent(id)}/schedules`, { body, timeoutMs: 15000 });
+      return json(res, r.status >= 400 ? r.status : 201, r.json || {});
+    }
+    if (req.method === 'DELETE' && url.pathname === '/api/schedules') {
+      if (!sid) return json(res, 400, { error: 'id required' });
+      const r = await api('DELETE', `/schedules/${encodeURIComponent(sid)}`);
+      if (r.status >= 400) return json(res, r.status, r.json || { error: r.raw || 'delete failed' });
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/schedules/run') {
+      const buf = await readBody(req, res);
+      if (!buf) return;
+      let body = {};
+      try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+      catch { return json(res, 400, { error: 'bad json' }); }
+      const runId = String(body.id || sid || '').trim();
+      if (!runId) return json(res, 400, { error: 'id required' });
+      const r = await api('POST', `/schedules/${encodeURIComponent(runId)}/run`);
+      return json(res, r.status >= 400 ? r.status : 202, r.json || {});
+    }
+    return json(res, 405, { error: 'method' });
+  } catch (err) {
+    return json(res, 502, { error: err.message || 'cased unreachable' });
+  }
+}
+
+export async function brainRoute(req, res) {
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return json(res, 400, { error: 'bad json' }); }
+  const computerId = String(body.computer_id || '').trim();
+  const prompt = String(body.prompt || '').slice(0, 32000);
+  const name = String(body.name || '').trim();
+  if (!computerId || !prompt) return json(res, 400, { error: 'computer_id and prompt required' });
+  const auth = envDriveAuth();
+  if (!auth.key) {
+    return json(res, 503, { error: 'set CASE_DRIVE_API_KEY (and CASE_DRIVE_PROVIDER) in .env' });
+  }
+  const model = resolveChatModel(process.env.CASE_DRIVE_MODEL || '', auth.provider);
+  const thread = newThread('sched · ' + (name || prompt), computerId);
+  CHAT_BUSY.add(thread.id);   // fresh thread, never busy; the set is what steer routes read
+  let text = '';
+  let errText = '';
+  let finished = false;
+  const emit = (obj) => {
+    if (obj?.type === 'done') text = obj.text || text;
+    if (obj?.type === 'text' && obj.text) text = obj.text;
+    if (obj?.type === 'error') errText = obj.error || 'provider error';
+  };
+  // cased owns the deadline (CASE_BRAIN_TIMEOUT). When it gives up it closes the
+  // socket, and the turn must stop with it rather than keep spending the box key
+  // against a computer the scheduler is about to put to sleep.
+  let clientGone;
+  const goneP = new Promise((r) => { clientGone = r; });
+  const gone = new AbortController();
+  res.on('close', () => { clientGone(); gone.abort(); });
+  try {
+    const result = await driveLoop.turn({
+      thread, inputText: prompt, attaches: [], auth, computerId,
+      model, effort: 'medium', emit, stopped: () => res.destroyed,
+      signal: gone.signal, disconnect: goneP,
+    });
+    if (result?.error) errText = result.error;
+    if (result?.text) text = result.text;
+    finished = !errText && !!result?.finished;
+  } catch (err) {
+    errText = err.message || 'turn failed';
+  } finally {
+    CHAT_BUSY.delete(thread.id);
+  }
+  if (errText) return json(res, 200, { ok: false, error: errText });
+  return json(res, 200, { ok: true, finished, text });
 }
 
 async function chat(req, res) {
@@ -1574,9 +1777,10 @@ export const server = http.createServer(async (req, res) => {
         running: Number(h.json?.running) || 0,
         computers: Number(h.json?.computers) || 0,
         docker: !!h.json?.docker,
+        brain_key: !!envDriveAuth().key,
       });
     } catch {
-      return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0 });
+      return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
     }
   }
   try {
@@ -1587,6 +1791,8 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/creds') return creds(req, res, url);
     if (p === '/api/threads') return threadsRoute(req, res, url);
     if (req.method === 'GET' && p === '/api/file') return fsFile(res, url);
+    if (req.method === 'POST' && p === '/api/brain') return brainRoute(req, res);
+    if (p === '/api/schedules' || p === '/api/schedules/run') return schedulesRoute(req, res, url);
     if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
     if (req.method === 'POST' && p === '/api/chat/steer') return steer(req, res);
     if (req.method === 'POST' && p === '/api/attach') return attach(req, res);

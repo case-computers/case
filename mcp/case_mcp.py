@@ -601,12 +601,16 @@ def handoff_get(handoff_id: str) -> dict:
 if os.environ.get("CASE_MCP_SCHEDULES") == "1":
     @mcp.tool()
     def schedule_create(computer_id: str, prompt: str, kind: str = "daily",
-                        spec: str = "09:00", name: str = "", jitter_s: int = 300) -> dict:
-        """Create a recurring schedule on a computer. kind=daily (spec HH:MM local) or
-        interval (spec seconds as string). Fires unattended using the host brain credential."""
+                        spec: str = "09:00", name: str = "", jitter_s: int = 300,
+                        tz: str = "") -> dict:
+        """Create a recurring schedule on a computer. kind=daily (spec HH:MM in tz,
+        or box local if tz is empty) or interval (spec seconds as string). Fires
+        unattended using the host brain credential."""
         body = {"prompt": prompt, "kind": kind, "spec": spec, "jitter_s": jitter_s}
         if name:
             body["name"] = name
+        if tz:
+            body["tz"] = tz
         return call("POST", f"/computers/{computer_id}/schedules", json=body).json()
 
 

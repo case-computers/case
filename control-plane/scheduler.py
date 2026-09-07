@@ -16,8 +16,11 @@ import shutil
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from config import (BRAIN_BIN, BRAIN_CMD, BRAIN_TIMEOUT, MAX_RUNNING, MCP_CONFIG,
+import requests
+
+from config import (BRAIN_BIN, BRAIN_CMD, BRAIN_TIMEOUT, BRAIN_URL, MAX_RUNNING, MCP_CONFIG,
                     RUNS_DIR, log)
 from deskclient import desk_json, screenshot_bytes
 from errors import ApiError
@@ -31,20 +34,47 @@ SCHED_RUNNING = set()   # in-memory guard, fine while one cased process runs
 _LOCK = threading.Lock()   # guards the check-then-add on SCHED_RUNNING (sweeper vs run-now)
 
 
-def compute_next(kind, spec, jitter_s):
-    """Next fire time as UTC ISO. Lexicographic order == chronological (zero-padded, Z)."""
+def _wall_exists(t, hh, mm):
+    """False when t is a spring-forward gap (that clock time never happened)."""
+    back = t.astimezone(timezone.utc).astimezone(t.tzinfo)
+    return (back.hour, back.minute) == (hh, mm)
+
+
+def compute_next(kind, spec, jitter_s, tz=None, *, now=None):
+    """Next fire time as UTC ISO. Lexicographic order == chronological (zero-padded, Z).
+    Daily HH:MM is wall clock in tz (IANA). Empty tz = box local (MCP / old callers).
+    `now` overrides the clock for tests; for daily it is the wall clock in that zone."""
     j = random.randint(0, int(jitter_s or 0))
     if kind == "interval":
         if int(spec) < 60:
             raise ApiError(400, "bad_request", "interval must be at least 60 seconds")
-        nxt = datetime.now(timezone.utc) + timedelta(seconds=int(spec) + j)
+        nxt = (now or datetime.now(timezone.utc)) + timedelta(seconds=int(spec) + j)
     elif kind == "daily":
-        local = datetime.now()
+        name = str(tz).strip() if tz else ""
+        if name:
+            try:
+                local = now or datetime.now(ZoneInfo(name))
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ApiError(400, "bad_tz", f"unknown timezone {name}")
+        else:
+            # Naive on purpose: astimezone() below then picks the offset of the fire
+            # date, so a schedule set before a DST switch still fires at HH:MM after it.
+            # datetime.now().astimezone() would freeze today's offset into tomorrow.
+            local = now or datetime.now()
         hh, mm = (int(x) for x in str(spec).split(":"))
         t = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if t <= local:
             t += timedelta(days=1)
-        nxt = (t + timedelta(seconds=j)).astimezone(timezone.utc)   # naive→aware picks that date's offset
+        # Spring-forward gap: this HH:MM never happened that day. replace()
+        # still builds the invalid wall time and astimezone() shifts it (02:30
+        # → 03:30). Skip to the next day that actually has that clock time.
+        # Re-check after jitter: 01:45 + 45m can land in the same hole.
+        if not _wall_exists(t, hh, mm):
+            t += timedelta(days=1)
+        fired = t + timedelta(seconds=j)
+        if not _wall_exists(fired, fired.hour, fired.minute):
+            fired = t + timedelta(days=1) + timedelta(seconds=j)
+        nxt = fired.astimezone(timezone.utc)
     else:
         raise ApiError(400, "bad_kind", "kind must be 'interval' or 'daily'")
     return nxt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -67,8 +97,43 @@ def brain_argv(full_prompt):
             "--allowedTools", "mcp__case__*"]
 
 
-def run_brain(cid, prompt):
-    """Invoke the headless brain against this computer via Case MCP. Returns (code, summary)."""
+def _run_brain_url(cid, prompt, name=""):
+    """POST {computer_id, prompt, name} to Drive. Returns the same (code, summary) as
+    the argv path, clipped the same way. `name` only titles the Drive thread."""
+    token = (os.environ.get("CASE_TOKEN") or "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = requests.post(BRAIN_URL, json={"computer_id": cid, "prompt": prompt, "name": name},
+                          headers=headers, timeout=BRAIN_TIMEOUT)
+    except requests.ConnectionError:      # before Timeout: ConnectTimeout is both
+        return 127, (f"schedule brain unreachable at {BRAIN_URL} — start the ui service "
+                     "or set CASE_BRAIN_CMD")
+    except requests.Timeout:
+        return -1, "brain run timed out"
+    except requests.RequestException as e:
+        return 127, f"schedule brain request failed: {e}"
+    try:
+        body = r.json() if r.content else {}
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    if r.status_code == 503:
+        return 2, str(body.get("error") or "schedule brain unavailable")
+    if r.status_code == 401:
+        return 1, "schedule brain rejected the token — CASE_TOKEN must match between cased and ui"
+    if body.get("ok"):
+        return (0 if body.get("finished") else 3), str(body.get("text") or "").strip()[-800:]
+    if body.get("error"):
+        return 1, str(body["error"])[-800:]
+    return 1, (r.text or f"HTTP {r.status_code}")[-800:]
+
+
+def run_brain(cid, prompt, name=""):
+    """Invoke the headless brain against this computer. Returns (code, summary).
+    Precedence: CASE_BRAIN_CMD > CASE_BRAIN_URL > stock claude on PATH."""
+    if not BRAIN_CMD and BRAIN_URL:
+        return _run_brain_url(cid, prompt, name)
     try:
         argv = brain_argv(f"On Case computer {cid}: {prompt}")
     except ValueError as e:
@@ -134,8 +199,10 @@ def run_schedule(sid):
         s = store.get_schedule(sid, enabled_only=True)
         if not s:
             return
+        # sqlite3.Row has no dict.get — index like every other column.
+        tz = s["tz"] if "tz" in s.keys() else None
         # Reschedule FIRST so a hung/crashed run never wedges the slot.
-        store.set_schedule_next(sid, compute_next(s["kind"], s["spec"], s["jitter_s"]))
+        store.set_schedule_next(sid, compute_next(s["kind"], s["spec"], s["jitter_s"], tz))
         cid, rid, started = s["computer_id"], new_id("run"), now()
         code, summary, status, artifact = -1, "", "fail", None
         # Only the run that woke an asleep box may put it back, never borrow a live session
@@ -145,7 +212,7 @@ def run_schedule(sid):
             was_asleep = get_computer(cid)["state"] == "asleep"
             do_wake(cid)
             woke_for_run = was_asleep
-            code, summary = run_brain(cid, s["prompt"])
+            code, summary = run_brain(cid, s["prompt"], name=s["name"])
             status = "ok" if code == 0 else "fail"
             artifact = capture_run_artifacts(cid, rid, s["name"], status, summary, started)  # awake
         except ApiError as e:
@@ -154,6 +221,9 @@ def run_schedule(sid):
             if e.code == "too_many_running":
                 status = "skipped"
                 summary = f"another computer is running (max {MAX_RUNNING} on this box)"
+            elif e.code == "not_enough_ram":
+                status = "skipped"
+                summary = f"not enough free RAM on this box ({e.message})"
             else:
                 summary = f"{e.code}: {e.message}"
                 log.exception("schedule %s run failed", sid)
@@ -182,9 +252,11 @@ def fire_due_schedules(spawn):
 
 
 def schedule_json(row):
-    return {k: row[k] for k in ("id", "computer_id", "name", "prompt", "kind", "spec",
-                                "jitter_s", "enabled", "next_run_at", "last_run_at",
-                                "last_status", "created_at")}
+    out = {k: row[k] for k in ("id", "computer_id", "name", "prompt", "kind", "spec",
+                               "jitter_s", "enabled", "next_run_at", "last_run_at",
+                               "last_status", "created_at")}
+    out["tz"] = row["tz"] if "tz" in row.keys() else None
+    return out
 
 
 def create_schedule(cid, body):
@@ -192,16 +264,17 @@ def create_schedule(cid, body):
     if "prompt" not in body or "spec" not in body:
         raise ApiError(400, "bad_request", "prompt and spec are required")
     kind = body.get("kind", "daily")
+    tz = str(body.get("tz") or "").strip() or None
     try:
         jitter = int(body.get("jitter_s", 300))
-        nxt = compute_next(kind, body["spec"], jitter)   # also validates kind/spec
+        nxt = compute_next(kind, body["spec"], jitter, tz)   # also validates kind/spec/tz
     except (TypeError, ValueError):
         raise ApiError(400, "bad_request",
                        "spec must be seconds (interval) or HH:MM (daily); "
                        "jitter_s must be an integer")
     sid = new_id("sch")
     store.insert_schedule(sid, cid, str(body.get("name") or sid), body["prompt"],
-                          kind, str(body["spec"]), jitter, nxt)
+                          kind, str(body["spec"]), jitter, nxt, tz)
     return schedule_json(store.get_schedule(sid))
 
 
