@@ -41,6 +41,8 @@ services:
       CASE_BIND: "0.0.0.0"
       CASE_IMAGE: ${CASE_IMAGE:-case-desk:0.1}
       CASE_TOKEN: ${CASE_TOKEN:-}
+      CASE_BRAIN_URL: ${CASE_BRAIN_URL:-http://ui:4174/api/brain}
+      CASE_BRAIN_CMD: ${CASE_BRAIN_CMD:-}
       CASE_MAX_RUNNING: ${CASE_MAX_RUNNING:-4}
       # Total RAM the awake desktops may hold. Unset = 75% of what the engine sees,
       # which on a Mac is the Docker VM, not the Mac.

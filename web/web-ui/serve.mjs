@@ -381,7 +381,7 @@ async function power(res, req, action) {
 }
 
 // Chat: same NDJSON contract as web/serve.mjs, hands always local REST.
-// Tool names + semantics match mcp/case_mcp.py (prod default surface; no schedules).
+// Tool names + semantics match mcp/case_mcp.py.
 const EXTRA_TOOLS = [
   { type: 'function', name: 'computer_list', description: 'List all computers with state, resources and credential names. Reuse an existing computer — only computer_create for an identity that should stay separate.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'computer_create', description: 'Create a persistent computer (Linux desktop + Chromium). Blocks until running. Computers are durable: logins, cookies and files survive sleep. Check computer_list first.', parameters: { type: 'object', properties: { name: { type: 'string' } }, additionalProperties: false } },
@@ -1089,7 +1089,7 @@ export async function runTurn({
       }
       finishTurn(hist, thread);
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
-      return { text, computerId: id, threadId: thread.id };
+      return { text, computerId: id, threadId: thread.id, finished };
     }
     const client = new OpenAI({ apiKey: auth.key });
     let text = '';
@@ -1268,7 +1268,7 @@ export async function runTurn({
       + ` hist=${JSON.stringify(hist.items).length} compactions=${compactions}`);
     spend.eff = eff;
     emit({ type: 'done', text, computer_id: id, thread_id: thread.id, spend, rounds: i });
-    return { text, computerId: id, threadId: thread.id };
+    return { text, computerId: id, threadId: thread.id, finished };
   } catch (err) {
     // Keep the turn even on provider errors: tools already ran, that work is
     // real. histCloseOpenCalls synthesizes outputs for any dangling
@@ -1276,7 +1276,7 @@ export async function runTurn({
     // inside the round; landing here means retries ran dry or a real fault.)
     finishTurn(hist, thread);
     if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
-    return { text: '', computerId: id, threadId: thread.id, error: err?.message || 'provider error' };
+    return { text: '', computerId: id, threadId: thread.id, finished: false, error: err?.message || 'provider error' };
   } finally {
     const leftover = takeSteers(thread.id);
     if (leftover.length) {
@@ -1285,6 +1285,51 @@ export async function runTurn({
       saveThreads();
     }
   }
+}
+
+// Mutable so HTTP tests can stub the provider loop without a live key.
+export const driveLoop = { turn: runTurn };
+
+export async function brainRoute(req, res) {
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return json(res, 400, { error: 'bad json' }); }
+  const computerId = String(body.computer_id || '').trim();
+  const prompt = String(body.prompt || '').slice(0, 32000);
+  if (!computerId || !prompt) return json(res, 400, { error: 'computer_id and prompt required' });
+  const auth = envDriveAuth();
+  if (!auth.key) {
+    return json(res, 503, { error: 'set CASE_DRIVE_API_KEY (and CASE_DRIVE_PROVIDER) in .env' });
+  }
+  const model = resolveChatModel(process.env.CASE_DRIVE_MODEL || '', auth.provider);
+  const thread = newThread('sched · ' + prompt, computerId);
+  if (CHAT_BUSY.has(thread.id)) return json(res, 409, { error: 'this thread is still running a turn' });
+  CHAT_BUSY.add(thread.id);
+  let text = '';
+  let errText = '';
+  let finished = false;
+  const emit = (obj) => {
+    if (obj?.type === 'done') text = obj.text || text;
+    if (obj?.type === 'text' && obj.text) text = obj.text;
+    if (obj?.type === 'error') errText = obj.error || 'provider error';
+  };
+  try {
+    const result = await driveLoop.turn({
+      thread, inputText: prompt, attaches: [], auth, computerId,
+      model, effort: 'medium', emit, stopped: () => false,
+    });
+    if (result?.error) errText = result.error;
+    if (result?.text) text = result.text;
+    finished = !errText && !!result?.finished;
+  } catch (err) {
+    errText = err.message || 'turn failed';
+  } finally {
+    CHAT_BUSY.delete(thread.id);
+  }
+  if (errText) return json(res, 200, { ok: false, error: errText });
+  return json(res, 200, { ok: true, finished, text });
 }
 
 async function chat(req, res) {
@@ -1677,9 +1722,10 @@ export const server = http.createServer(async (req, res) => {
         running: Number(h.json?.running) || 0,
         computers: Number(h.json?.computers) || 0,
         docker: !!h.json?.docker,
+        brain_key: !!envDriveAuth().key,
       });
     } catch {
-      return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0 });
+      return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
     }
   }
   try {
@@ -1690,6 +1736,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/creds') return creds(req, res, url);
     if (p === '/api/threads') return threadsRoute(req, res, url);
     if (req.method === 'GET' && p === '/api/file') return fsFile(res, url);
+    if (req.method === 'POST' && p === '/api/brain') return brainRoute(req, res);
     if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
     if (req.method === 'POST' && p === '/api/chat/steer') return steer(req, res);
     if (req.method === 'POST' && p === '/api/attach') return attach(req, res);
