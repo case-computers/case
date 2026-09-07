@@ -372,9 +372,29 @@ function clipJson(v, n = 8000) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+/** Is this the provider saying "too fast" rather than "bad request"? Callers with
+ * their own error fallbacks (unsupported summary/effort) must ask first: a 429
+ * misread as an unsupported-param error retries with no backoff and degrades the
+ * request for nothing. */
+export function isRateLimited(err) {
+  const status = err?.status ?? err?.response?.status;
+  return status === 429 || status === 529
+    || /rate limit|overloaded/i.test(err?.message || '');
+}
+
+/** Seconds to wait before attempt `a`: the server's own hint ("try again in Xs"
+ * or retry-after) if it gave one, else exponential. Padded, clamped to 1..60s. */
+export function rateWaitS(err, a) {
+  const m = /try again in ([\d.]+)s/i.exec(err?.message || '');
+  const hdr = Number(err?.headers?.['retry-after']
+    ?? err?.response?.headers?.get?.('retry-after'));
+  const wait = m ? Number(m[1]) : Number.isFinite(hdr) && hdr > 0 ? hdr : 2 ** a;
+  return Math.min(Math.max(wait + 0.5, 1), 60);
+}
+
 /** Retry a provider round on rate limits (429/529), honoring the server's
- * suggested wait ("try again in Xs" / retry-after), capped at 60s. History is
- * only mutated after a round completes, so replaying a failed round is safe. */
+ * suggested wait. History is only mutated after a round completes, so replaying
+ * a failed round is safe. `signal` cancels the backoff sleep on STOP. */
 function abortError(signal) {
   if (signal?.reason instanceof Error) return signal.reason;
   const err = new Error(signal?.reason ? String(signal.reason) : 'stopped by user');
@@ -407,16 +427,10 @@ export async function withRateRetry(fn, emit, tries = 5, signal) {
     try { return await fn(); }
     catch (err) {
       if (signal?.aborted) throw err;
-      const status = err?.status ?? err?.response?.status;
-      const limited = status === 429 || status === 529
-        || /rate limit|overloaded/i.test(err?.message || '');
-      if (!limited || a >= tries - 1) throw err;
-      const m = /try again in ([\d.]+)s/i.exec(err?.message || '');
-      const hdr = Number(err?.headers?.['retry-after']
-        ?? err?.response?.headers?.get?.('retry-after'));
-      let wait = m ? Number(m[1]) : Number.isFinite(hdr) && hdr > 0 ? hdr : 2 ** a;
-      wait = Math.min(Math.max(wait + 0.5, 1), 60);
-      emit?.({ type: 'think', text: `rate limited — retrying in ${Math.ceil(wait)}s` });
+      if (!isRateLimited(err) || a >= tries - 1) throw err;
+      const wait = rateWaitS(err, a);
+      // `rate: true` so a non-UI consumer can pick the wait out of the think stream.
+      emit?.({ type: 'think', rate: true, text: `rate limited — retrying in ${Math.ceil(wait)}s` });
       await abortableDelay(wait * 1000, signal);
     }
   }
@@ -479,7 +493,9 @@ export async function anthropicToolLoop({
       result = await withRateRetry(() => round(params), emit, 5, signal);
     } catch (err) {
       if (signal?.aborted) throw err;
-      if (!params.output_config) throw err;
+      // This fallback is for models that reject output_config — not for a rate
+      // limit whose retries already ran dry, which would only buy 5 more waits.
+      if (!params.output_config || isRateLimited(err)) throw err;
       const rest = { ...params };
       delete rest.output_config;
       result = await withRateRetry(() => round(rest), emit, 5, signal);
