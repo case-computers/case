@@ -75,7 +75,9 @@ in Drive. Cursor:
   to help through Drive, Telegram, or an Assist link.
 - **Skills:** the agent saves a completed task as a `SKILL.md` on the computer
   and follows it next time. The file survives restarts.
-- **Schedules:** recurring runs use the computer's saved identity.
+- **Schedules:** recurring runs use the computer's saved identity. They use
+  `CASE_DRIVE_API_KEY` from `.env` (the same box key as phone chat). Set
+  `CASE_BRAIN_CMD` if you want a different harness.
 - **Phone chat:** send tasks and answer handoffs through Telegram or ntfy.
   See [phone setup](#phone-chat).
 
@@ -117,9 +119,10 @@ Drive connects out to the service, so phone chat works without exposing a local
 port. Your host and Docker must stay running to receive messages and run tasks.
 
 Phone tasks use a shared thread named `Phone`. They need a provider key on the
-server because there is no browser tab to supply one. If you do not have a `.env`
-file yet, copy `.env.example` to `.env` next to `compose.yaml`. Add these settings
-to that file, replacing the placeholder with your key:
+server because there is no browser tab to supply one. Schedules use the same
+key. If you do not have a `.env` file yet, copy `.env.example` to `.env` next to
+`compose.yaml`. Add these settings to that file, replacing the placeholder with
+your key:
 
 ```dotenv
 CASE_DRIVE_PROVIDER=openai              # or anthropic
