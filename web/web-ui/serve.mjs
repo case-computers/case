@@ -1339,13 +1339,14 @@ export async function brainRoute(req, res) {
   catch { return json(res, 400, { error: 'bad json' }); }
   const computerId = String(body.computer_id || '').trim();
   const prompt = String(body.prompt || '').slice(0, 32000);
+  const name = String(body.name || '').trim();
   if (!computerId || !prompt) return json(res, 400, { error: 'computer_id and prompt required' });
   const auth = envDriveAuth();
   if (!auth.key) {
     return json(res, 503, { error: 'set CASE_DRIVE_API_KEY (and CASE_DRIVE_PROVIDER) in .env' });
   }
   const model = resolveChatModel(process.env.CASE_DRIVE_MODEL || '', auth.provider);
-  const thread = newThread('sched · ' + prompt, computerId);
+  const thread = newThread('sched · ' + (name || prompt), computerId);
   CHAT_BUSY.add(thread.id);   // fresh thread, never busy; the set is what steer routes read
   let text = '';
   let errText = '';

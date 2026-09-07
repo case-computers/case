@@ -82,12 +82,13 @@ def brain_argv(full_prompt):
             "--allowedTools", "mcp__case__*"]
 
 
-def _run_brain_url(cid, prompt):
-    """POST {computer_id, prompt} to Drive. Returns the same (code, summary) as the argv path."""
+def _run_brain_url(cid, prompt, name=""):
+    """POST {computer_id, prompt, name} to Drive. Returns the same (code, summary) as
+    the argv path, clipped the same way. `name` only titles the Drive thread."""
     token = (os.environ.get("CASE_TOKEN") or "").strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        r = requests.post(BRAIN_URL, json={"computer_id": cid, "prompt": prompt},
+        r = requests.post(BRAIN_URL, json={"computer_id": cid, "prompt": prompt, "name": name},
                           headers=headers, timeout=BRAIN_TIMEOUT)
     except requests.ConnectionError:      # before Timeout: ConnectTimeout is both
         return 127, (f"schedule brain unreachable at {BRAIN_URL} — start the ui service "
@@ -107,17 +108,17 @@ def _run_brain_url(cid, prompt):
     if r.status_code == 401:
         return 1, "schedule brain rejected the token — CASE_TOKEN must match between cased and ui"
     if body.get("ok"):
-        return (0 if body.get("finished") else 3), str(body.get("text") or "")
+        return (0 if body.get("finished") else 3), str(body.get("text") or "").strip()[-800:]
     if body.get("error"):
-        return 1, str(body["error"])
+        return 1, str(body["error"])[-800:]
     return 1, (r.text or f"HTTP {r.status_code}")[-800:]
 
 
-def run_brain(cid, prompt):
+def run_brain(cid, prompt, name=""):
     """Invoke the headless brain against this computer. Returns (code, summary).
     Precedence: CASE_BRAIN_CMD > CASE_BRAIN_URL > stock claude on PATH."""
     if not BRAIN_CMD and BRAIN_URL:
-        return _run_brain_url(cid, prompt)
+        return _run_brain_url(cid, prompt, name)
     try:
         argv = brain_argv(f"On Case computer {cid}: {prompt}")
     except ValueError as e:
@@ -196,7 +197,7 @@ def run_schedule(sid):
             was_asleep = get_computer(cid)["state"] == "asleep"
             do_wake(cid)
             woke_for_run = was_asleep
-            code, summary = run_brain(cid, s["prompt"])
+            code, summary = run_brain(cid, s["prompt"], name=s["name"])
             status = "ok" if code == 0 else "fail"
             artifact = capture_run_artifacts(cid, rid, s["name"], status, summary, started)  # awake
         except ApiError as e:

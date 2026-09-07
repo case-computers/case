@@ -52,6 +52,9 @@ try {
   const h = await (await get('/api/health', { authorization: 'Bearer tok' })).json();
   assert.equal(h.brain_key, true);
 
+  await post('/api/brain', { computer_id: 'c_1', prompt: 'hi', name: 'morning sweep' }, { authorization: 'Bearer tok' });
+  assert.equal(seen.thread.title, 'sched · morning sweep');
+
   serve.driveLoop.turn = async () => ({ error: 'provider down' });
   const bad = await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, { authorization: 'Bearer tok' });
   assert.equal(bad.status, 200);

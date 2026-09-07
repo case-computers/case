@@ -293,7 +293,7 @@ def test_run_schedule_does_not_sleep_borrowed_running_computer():
         scheduler.get_computer = lambda cid: {"id": cid, "state": "running"}
         scheduler.do_wake = lambda cid: None
         scheduler.do_sleep = lambda cid: slept.append(cid)
-        scheduler.run_brain = lambda cid, p: (0, "done")
+        scheduler.run_brain = lambda cid, p, name="": (0, "done")
         scheduler.capture_run_artifacts = lambda *a, **k: None
         scheduler.notifier = type("N", (), {"push": lambda self, m: None})()
         scheduler.emit = lambda *a, **k: None
@@ -332,7 +332,7 @@ def test_run_schedule_sleeps_only_when_it_woke_and_no_auth():
         scheduler.get_computer = lambda cid: {"id": cid, "state": "asleep"}
         scheduler.do_wake = lambda cid: None
         scheduler.do_sleep = lambda cid: slept.append(cid)
-        scheduler.run_brain = lambda cid, p: (0, "done")
+        scheduler.run_brain = lambda cid, p, name="": (0, "done")
         scheduler.capture_run_artifacts = lambda *a, **k: None
         scheduler.notifier = type("N", (), {"push": lambda self, m: None})()
         scheduler.emit = lambda *a, **k: None
@@ -395,10 +395,16 @@ def test_run_brain_url_finished():
         resp = mock.Mock(status_code=200, content=b'{"ok":true}', text="ok")
         resp.json.return_value = {"ok": True, "finished": True, "text": "done"}
         with mock.patch("scheduler.requests.post", return_value=resp) as post:
-            code, text = scheduler.run_brain("c_1", "hello")
+            code, text = scheduler.run_brain("c_1", "hello", name="nightly")
         assert (code, text) == (0, "done")
         assert post.call_args.args[0] == "http://ui:4174/api/brain"
-        assert post.call_args.kwargs["json"] == {"computer_id": "c_1", "prompt": "hello"}
+        assert post.call_args.kwargs["json"] == {"computer_id": "c_1", "prompt": "hello",
+                                                 "name": "nightly"}
+        # same clip as the argv path, so runs.summary and the logbook stay bounded
+        resp.json.return_value = {"ok": True, "finished": True, "text": "x" * 5000 + "END"}
+        with mock.patch("scheduler.requests.post", return_value=resp):
+            _, text = scheduler.run_brain("c_1", "hello")
+        assert len(text) == 800 and text.endswith("END"), len(text)
     finally:
         scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
 
