@@ -557,7 +557,7 @@ const isBudgetWarn = (it) => Array.isArray(it?.content) && it.content.some((c) =
 // Window guard. OpenAI compacts server-side once the rendered context passes this
 // (opaque `compaction` item we carry forward); `truncation:'auto'` is the floor if a
 // model lacks compaction. 200k fits every window in the list (272k–1M). 0 = off.
-const COMPACT_AT = Number(process.env.CASE_COMPACT_AT ?? 200_000);
+const COMPACT_AT = Number(process.env.CASE_COMPACT_AT || 200_000);   // '0' is truthy → off
 // Threads: the sidebar's unit of navigation, each with its own conversation memory.
 // The Responses API runs stateless here (store:false), so the item list IS the
 // memory. agent stays '' until the run first needs hands (a tool call executes) —
@@ -709,7 +709,7 @@ export function histTrim(h, max = HIST_MAX) {
       keep = turnTail(body, TAIL_KEEP);
     } else {
       const last = [...body].reverse().find((it) => it.type === 'message' && it.role === 'assistant');
-      keep = last ? [{ ...last, content: last.content.map((c) => (c.type === 'output_text' ? { ...c, text: clip(c.text, 2000) } : c)) }] : [];
+      keep = last ? [{ ...last, content: (last.content || []).map((c) => (c.type === 'output_text' ? { ...c, text: clip(c.text, 2000) } : c)) }] : [];
     }
     // A compaction item is the only copy of everything summarized away for it.
     const comp = body.filter((it) => it.type === 'compaction' && !keep.includes(it));
@@ -1346,8 +1346,7 @@ export async function brainRoute(req, res) {
   }
   const model = resolveChatModel(process.env.CASE_DRIVE_MODEL || '', auth.provider);
   const thread = newThread('sched · ' + prompt, computerId);
-  if (CHAT_BUSY.has(thread.id)) return json(res, 409, { error: 'this thread is still running a turn' });
-  CHAT_BUSY.add(thread.id);
+  CHAT_BUSY.add(thread.id);   // fresh thread, never busy; the set is what steer routes read
   let text = '';
   let errText = '';
   let finished = false;
@@ -1356,10 +1355,18 @@ export async function brainRoute(req, res) {
     if (obj?.type === 'text' && obj.text) text = obj.text;
     if (obj?.type === 'error') errText = obj.error || 'provider error';
   };
+  // cased owns the deadline (CASE_BRAIN_TIMEOUT). When it gives up it closes the
+  // socket, and the turn must stop with it rather than keep spending the box key
+  // against a computer the scheduler is about to put to sleep.
+  let clientGone;
+  const goneP = new Promise((r) => { clientGone = r; });
+  const gone = new AbortController();
+  res.on('close', () => { clientGone(); gone.abort(); });
   try {
     const result = await driveLoop.turn({
       thread, inputText: prompt, attaches: [], auth, computerId,
-      model, effort: 'medium', emit, stopped: () => false,
+      model, effort: 'medium', emit, stopped: () => res.destroyed,
+      signal: gone.signal, disconnect: goneP,
     });
     if (result?.error) errText = result.error;
     if (result?.text) text = result.text;

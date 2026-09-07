@@ -34,23 +34,27 @@ SCHED_RUNNING = set()   # in-memory guard, fine while one cased process runs
 _LOCK = threading.Lock()   # guards the check-then-add on SCHED_RUNNING (sweeper vs run-now)
 
 
-def compute_next(kind, spec, jitter_s, tz=None):
+def compute_next(kind, spec, jitter_s, tz=None, *, now=None):
     """Next fire time as UTC ISO. Lexicographic order == chronological (zero-padded, Z).
-    Daily HH:MM is wall clock in tz (IANA). Empty tz = box local (MCP / old callers)."""
+    Daily HH:MM is wall clock in tz (IANA). Empty tz = box local (MCP / old callers).
+    `now` overrides the clock for tests; for daily it is the wall clock in that zone."""
     j = random.randint(0, int(jitter_s or 0))
     if kind == "interval":
         if int(spec) < 60:
             raise ApiError(400, "bad_request", "interval must be at least 60 seconds")
-        nxt = datetime.now(timezone.utc) + timedelta(seconds=int(spec) + j)
+        nxt = (now or datetime.now(timezone.utc)) + timedelta(seconds=int(spec) + j)
     elif kind == "daily":
         name = str(tz).strip() if tz else ""
         if name:
             try:
-                local = datetime.now(ZoneInfo(name))
+                local = now or datetime.now(ZoneInfo(name))
             except (ZoneInfoNotFoundError, ValueError):
                 raise ApiError(400, "bad_tz", f"unknown timezone {name}")
         else:
-            local = datetime.now().astimezone()
+            # Naive on purpose: astimezone() below then picks the offset of the fire
+            # date, so a schedule set before a DST switch still fires at HH:MM after it.
+            # datetime.now().astimezone() would freeze today's offset into tomorrow.
+            local = now or datetime.now()
         hh, mm = (int(x) for x in str(spec).split(":"))
         t = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if t <= local:
@@ -85,10 +89,13 @@ def _run_brain_url(cid, prompt):
     try:
         r = requests.post(BRAIN_URL, json={"computer_id": cid, "prompt": prompt},
                           headers=headers, timeout=BRAIN_TIMEOUT)
+    except requests.ConnectionError:      # before Timeout: ConnectTimeout is both
+        return 127, (f"schedule brain unreachable at {BRAIN_URL} — start the ui service "
+                     "or set CASE_BRAIN_CMD")
     except requests.Timeout:
         return -1, "brain run timed out"
-    except requests.RequestException:
-        return 127, f"schedule brain unreachable at {BRAIN_URL}"
+    except requests.RequestException as e:
+        return 127, f"schedule brain request failed: {e}"
     try:
         body = r.json() if r.content else {}
     except ValueError:
@@ -97,6 +104,8 @@ def _run_brain_url(cid, prompt):
         body = {}
     if r.status_code == 503:
         return 2, str(body.get("error") or "schedule brain unavailable")
+    if r.status_code == 401:
+        return 1, "schedule brain rejected the token — CASE_TOKEN must match between cased and ui"
     if body.get("ok"):
         return (0 if body.get("finished") else 3), str(body.get("text") or "")
     if body.get("error"):

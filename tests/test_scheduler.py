@@ -49,6 +49,31 @@ def test_daily_kolkata_is_0330_utc():
     assert nxt.hour == 3 and nxt.minute == 30, nxt.isoformat()
 
 
+def test_daily_box_local_survives_dst_switch():
+    # Set the night before clocks go back (London, 2026-10-25 01:00 UTC). 09:00 local
+    # tomorrow is 09:00Z, not the 08:00Z a frozen BST offset would give.
+    import time
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/London"
+    time.tzset()
+    try:
+        nxt = compute_next("daily", "09:00", 0, now=datetime(2026, 10, 24, 23, 0))
+        assert nxt == "2026-10-25T09:00:00Z", nxt
+    finally:
+        if old is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+def test_daily_tz_survives_dst_switch():
+    from zoneinfo import ZoneInfo
+    now = datetime(2026, 10, 24, 23, 0, tzinfo=ZoneInfo("Europe/London"))
+    nxt = compute_next("daily", "09:00", 0, "Europe/London", now=now)
+    assert nxt == "2026-10-25T09:00:00Z", nxt
+
+
 def test_bad_tz_raises():
     from errors import ApiError
     try:
@@ -418,12 +443,45 @@ def test_run_brain_url_connection_error():
     try:
         scheduler.BRAIN_CMD = ""
         scheduler.BRAIN_URL = "http://ui:4174/api/brain"
-        with mock.patch("scheduler.requests.post", side_effect=scheduler.requests.ConnectionError()):
-            code, text = scheduler.run_brain("c_1", "hello")
-        assert code == 127
-        assert "http://ui:4174/api/brain" in text
+        # ConnectTimeout subclasses both ConnectionError and Timeout: it is "unreachable"
+        for exc in (scheduler.requests.ConnectionError(), scheduler.requests.ConnectTimeout()):
+            with mock.patch("scheduler.requests.post", side_effect=exc):
+                code, text = scheduler.run_brain("c_1", "hello")
+            assert code == 127, (exc, code)
+            assert "http://ui:4174/api/brain" in text and "CASE_BRAIN_CMD" in text, text
     finally:
         scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
+
+
+def test_run_brain_url_sends_bearer_only_when_token_set():
+    import unittest.mock as mock
+    import scheduler
+    old_cmd, old_url = scheduler.BRAIN_CMD, scheduler.BRAIN_URL
+    old_tok = os.environ.get("CASE_TOKEN")
+    try:
+        scheduler.BRAIN_CMD = ""
+        scheduler.BRAIN_URL = "http://ui:4174/api/brain"
+        resp = mock.Mock(status_code=200, content=b"{}", text="")
+        resp.json.return_value = {"ok": True, "finished": True, "text": ""}
+        os.environ["CASE_TOKEN"] = "tok"
+        with mock.patch("scheduler.requests.post", return_value=resp) as post:
+            scheduler.run_brain("c_1", "hello")
+        assert post.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
+        os.environ["CASE_TOKEN"] = ""
+        with mock.patch("scheduler.requests.post", return_value=resp) as post:
+            scheduler.run_brain("c_1", "hello")
+        assert post.call_args.kwargs["headers"] == {}
+        resp401 = mock.Mock(status_code=401, content=b'{"error":"unauthorized"}', text="")
+        resp401.json.return_value = {"error": "unauthorized"}
+        with mock.patch("scheduler.requests.post", return_value=resp401):
+            code, text = scheduler.run_brain("c_1", "hello")
+        assert code == 1 and "CASE_TOKEN" in text, (code, text)
+    finally:
+        scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
+        if old_tok is None:
+            os.environ.pop("CASE_TOKEN", None)
+        else:
+            os.environ["CASE_TOKEN"] = old_tok
 
 
 def test_run_brain_url_timeout():

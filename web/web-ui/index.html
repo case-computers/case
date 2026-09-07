@@ -1268,7 +1268,9 @@ function paintSchedList(rows){
     return;
   }
   box.innerHTML=rows.map(s=>{
-    const when=s.kind==='interval'?'every '+(Number(s.spec)/3600)+'h':'daily '+(s.spec||'')+(s.tz?' '+s.tz:'');
+    const secs=Number(s.spec)||0;
+    const every=secs%3600===0?(secs/3600)+'h':Math.round(secs/60)+'m';
+    const when=s.kind==='interval'?'every '+every:'daily '+(s.spec||'')+(s.tz?' '+s.tz:'');
     const last=s.last_status?('last '+s.last_status):'never run';
     return '<div class="sched-row" data-id="'+esc(s.id)+'">'
       +'<div><div class="sn">'+esc(s.name||s.id)+'</div>'

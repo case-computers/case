@@ -37,13 +37,25 @@ assert.equal((await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, { a
 const origTurn = serve.driveLoop.turn;
 process.env.CASE_DRIVE_API_KEY = 'sk-test';
 process.env.CASE_DRIVE_PROVIDER = 'openai';
-serve.driveLoop.turn = async () => ({ text: 'did it', finished: true });
+let seen;
+serve.driveLoop.turn = async (args) => { seen = args; return { text: 'did it', finished: true }; };
 try {
   const r = await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, { authorization: 'Bearer tok' });
   assert.equal(r.status, 200);
   assert.deepEqual(await r.json(), { ok: true, finished: true, text: 'did it' });
+  assert.equal(seen.computerId, 'c_1');
+  assert.equal(seen.inputText, 'hi');
+  assert.equal(seen.thread.title, 'sched · hi');
+  // cased's socket is the deadline: the turn gets an abort signal and a disconnect promise
+  assert.ok(seen.signal instanceof AbortSignal);
+  assert.ok(seen.disconnect instanceof Promise);
   const h = await (await get('/api/health', { authorization: 'Bearer tok' })).json();
   assert.equal(h.brain_key, true);
+
+  serve.driveLoop.turn = async () => ({ error: 'provider down' });
+  const bad = await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, { authorization: 'Bearer tok' });
+  assert.equal(bad.status, 200);
+  assert.deepEqual(await bad.json(), { ok: false, error: 'provider down' });
 } finally {
   serve.driveLoop.turn = origTurn;
   delete process.env.CASE_DRIVE_API_KEY;
