@@ -684,8 +684,14 @@ function turnTail(items, budget) {
     out.unshift(items[i]);
   }
   const calls = new Set(out.filter((it) => it.type === 'function_call').map((it) => it.call_id));
-  while (out.length && out[0].type === 'function_call_output' && !calls.has(out[0].call_id)) out.shift();
-  return out;
+  const outs = new Set(out.filter((it) => it.type === 'function_call_output').map((it) => it.call_id));
+  // A suffix cut can land between a call and its output, or between two
+  // batched calls and one of their outputs. Either orphan 400s the next request.
+  return out.filter((it) => {
+    if (it.type === 'function_call_output') return calls.has(it.call_id);
+    if (it.type === 'function_call') return outs.has(it.call_id);
+    return true;
+  });
 }
 /** Over budget, turns collapse to [prompt, last reply]: the task and the model's own
  *  "stopped at X" survive forever, tool observations die. Only if every turn is

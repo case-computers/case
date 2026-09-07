@@ -59,6 +59,12 @@ def compute_next(kind, spec, jitter_s, tz=None, *, now=None):
         t = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if t <= local:
             t += timedelta(days=1)
+        # Spring-forward gap: this HH:MM never happened that day. replace()
+        # still builds the invalid wall time and astimezone() shifts it (02:30
+        # → 03:30). Skip to the next day that actually has that clock time.
+        back = t.astimezone(timezone.utc).astimezone(t.tzinfo)
+        if (back.hour, back.minute) != (hh, mm):
+            t += timedelta(days=1)
         nxt = (t + timedelta(seconds=j)).astimezone(timezone.utc)
     else:
         raise ApiError(400, "bad_kind", "kind must be 'interval' or 'daily'")

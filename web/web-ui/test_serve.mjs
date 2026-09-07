@@ -165,6 +165,24 @@ const tailCalls = new Set(giant.items.filter((i) => i.type === 'function_call').
 for (const it of giant.items.filter((i) => i.type === 'function_call_output')) {
   assert.ok(tailCalls.has(it.call_id), `orphan output ${it.call_id} would 400 every later request`);
 }
+// Batched calls: two calls then two outputs. A suffix cut that keeps `kept`'s
+// call plus `old`'s output (but not `old`'s call) used to leave that output
+// in the middle of the tail — leading-only stripping missed it.
+const batched = { items: [
+  { role: 'user', content: 'TASK' },
+  { type: 'function_call', call_id: 'old', name: 'computer_eval', arguments: 'x'.repeat(5000) },
+  { type: 'function_call', call_id: 'kept', name: 'computer_eval', arguments: '{}' },
+  { type: 'function_call_output', call_id: 'old', output: 'z'.repeat(35000) },
+  { type: 'function_call_output', call_id: 'kept', output: 'ok' },
+  reply('batched'),
+] };
+histTrim(batched, 1000);
+const batchedCalls = new Set(batched.items.filter((i) => i.type === 'function_call').map((i) => i.call_id));
+for (const it of batched.items.filter((i) => i.type === 'function_call_output')) {
+  assert.ok(batchedCalls.has(it.call_id), `orphan output ${it.call_id} would 400 every later request`);
+}
+assert.ok(!batched.items.some((i) => i.call_id === 'old'),
+  'a cut-away batched call must not leave its output in the tail');
 histTrim(giant, 10);
 assert.equal(giant.items[0].content, 'THE TASK');
 const small = { items: turn(1, '') };

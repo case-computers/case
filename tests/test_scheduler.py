@@ -74,6 +74,31 @@ def test_daily_tz_survives_dst_switch():
     assert nxt == "2026-10-25T09:00:00Z", nxt
 
 
+def test_daily_skips_spring_forward_gap():
+    # America/New_York 2026-03-08: 02:00 → 03:00, so 02:30 never happens.
+    # Fire the next day at 02:30 EDT (06:30Z), not 03:30 that morning.
+    from zoneinfo import ZoneInfo
+    now = datetime(2026, 3, 8, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+    nxt = compute_next("daily", "02:30", 0, "America/New_York", now=now)
+    assert nxt == "2026-03-09T06:30:00Z", nxt
+
+
+def test_daily_box_local_skips_spring_forward_gap():
+    import time
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        nxt = compute_next("daily", "02:30", 0, now=datetime(2026, 3, 8, 0, 30))
+        assert nxt == "2026-03-09T06:30:00Z", nxt
+    finally:
+        if old is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
 def test_bad_tz_raises():
     from errors import ApiError
     try:
