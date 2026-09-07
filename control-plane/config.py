@@ -67,6 +67,9 @@ BRAIN_BIN = os.environ.get("CASE_BRAIN_BIN", "")
 # contain {prompt}. Unset = stock claude. The template carries no --allowedTools clamp:
 # a template harness runs with the box's full privileges, only use one you trust.
 BRAIN_CMD = os.environ.get("CASE_BRAIN_CMD", "")
+# HTTP brain (compose default): POST {computer_id, prompt} to Drive. Used only
+# when BRAIN_CMD is empty. Precedence: CASE_BRAIN_CMD > CASE_BRAIN_URL > claude.
+BRAIN_URL = os.environ.get("CASE_BRAIN_URL", "")
 MCP_CONFIG = os.environ.get(
     "CASE_MCP_CONFIG",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "case-mcp.json"))

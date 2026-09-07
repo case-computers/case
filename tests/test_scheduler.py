@@ -44,6 +44,37 @@ def test_daily_fires_at_requested_local_time():
         assert f"{local.hour:02d}:{local.minute:02d}" == spec, (spec, local.isoformat())
 
 
+def test_daily_kolkata_is_0330_utc():
+    nxt = _dt(compute_next("daily", "09:00", 0, "Asia/Kolkata"))
+    assert nxt.hour == 3 and nxt.minute == 30, nxt.isoformat()
+
+
+def test_bad_tz_raises():
+    from errors import ApiError
+    try:
+        compute_next("daily", "09:00", 0, "Not/AZone")
+        assert False, "expected bad_tz"
+    except ApiError as e:
+        assert e.code == "bad_tz", e
+
+
+def test_sqlite_row_has_no_get_but_tz_index_works():
+    store.q("DELETE FROM schedules")
+    store.insert_schedule("sch_tz", "c_1", "n", "p", "daily", "09:00", 0,
+                          "2026-08-30T03:30:00Z", "Asia/Kolkata")
+    s = store.get_schedule("sch_tz")
+    assert not hasattr(s, "get"), type(s)
+    tz = s["tz"] if "tz" in s.keys() else None
+    assert tz == "Asia/Kolkata", tz
+    nxt = compute_next(s["kind"], s["spec"], s["jitter_s"], tz)
+    assert nxt[11:16] == "03:30", nxt
+
+
+def test_schedules_tz_column_exists():
+    cols = [r["name"] for r in store.db.execute("PRAGMA table_info(schedules)")]
+    assert "tz" in cols
+
+
 def test_jitter_stays_bounded():
     base = datetime.now(timezone.utc)
     for _ in range(20):
@@ -291,6 +322,138 @@ def test_run_schedule_sleeps_only_when_it_woke_and_no_auth():
          scheduler.run_brain, scheduler.capture_run_artifacts, scheduler.notifier,
          scheduler.emit) = old
     assert rec.get("status") == "ok", rec
+
+
+def test_ram_tight_box_is_a_skip_too():
+    import scheduler
+    from errors import ApiError
+    rec = {}
+
+    class _Store:
+        def get_schedule(self, sid, enabled_only=False):
+            return {"id": sid, "computer_id": "c_1", "name": "nightly", "prompt": "go",
+                    "kind": "interval", "spec": "3600", "jitter_s": 0}
+        def set_schedule_next(self, *a): pass
+        def insert_run(self, rid, sid, cid, started, ended, code, summary, artifact, status):
+            rec["summary"] = summary
+        def set_schedule_result(self, sid, at, status):
+            rec["status"] = status
+
+    def _tight(cid):
+        raise ApiError(409, "not_enough_ram", "3072 MB in use of 4096")
+
+    old = (scheduler.store, scheduler.do_wake, scheduler.do_sleep, scheduler.get_computer,
+           scheduler.notifier, scheduler.emit)
+    try:
+        scheduler.store = _Store()
+        scheduler.get_computer = lambda cid: {"id": cid, "state": "asleep"}
+        scheduler.do_wake = _tight
+        scheduler.do_sleep = lambda cid: None
+        scheduler.notifier = type("N", (), {"push": lambda self, m: None})()
+        scheduler.emit = lambda *a, **k: None
+        scheduler.run_schedule("sch_x")
+    finally:
+        (scheduler.store, scheduler.do_wake, scheduler.do_sleep, scheduler.get_computer,
+         scheduler.notifier, scheduler.emit) = old
+    assert rec["status"] == "skipped", rec
+    assert "not enough free RAM" in rec["summary"], rec
+    assert "ApiError" not in rec["summary"], rec
+
+
+def test_run_brain_url_finished():
+    import unittest.mock as mock
+    import scheduler
+    old_cmd, old_url = scheduler.BRAIN_CMD, scheduler.BRAIN_URL
+    try:
+        scheduler.BRAIN_CMD = ""
+        scheduler.BRAIN_URL = "http://ui:4174/api/brain"
+        resp = mock.Mock(status_code=200, content=b'{"ok":true}', text="ok")
+        resp.json.return_value = {"ok": True, "finished": True, "text": "done"}
+        with mock.patch("scheduler.requests.post", return_value=resp) as post:
+            code, text = scheduler.run_brain("c_1", "hello")
+        assert (code, text) == (0, "done")
+        assert post.call_args.args[0] == "http://ui:4174/api/brain"
+        assert post.call_args.kwargs["json"] == {"computer_id": "c_1", "prompt": "hello"}
+    finally:
+        scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
+
+
+def test_run_brain_url_unfinished():
+    import unittest.mock as mock
+    import scheduler
+    old_cmd, old_url = scheduler.BRAIN_CMD, scheduler.BRAIN_URL
+    try:
+        scheduler.BRAIN_CMD = ""
+        scheduler.BRAIN_URL = "http://ui:4174/api/brain"
+        resp = mock.Mock(status_code=200, content=b'{"ok":true}', text="")
+        resp.json.return_value = {"ok": True, "finished": False, "text": "stopped mid-task"}
+        with mock.patch("scheduler.requests.post", return_value=resp):
+            code, text = scheduler.run_brain("c_1", "hello")
+        assert code == 3 and text == "stopped mid-task"
+    finally:
+        scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
+
+
+def test_run_brain_url_503():
+    import unittest.mock as mock
+    import scheduler
+    old_cmd, old_url = scheduler.BRAIN_CMD, scheduler.BRAIN_URL
+    try:
+        scheduler.BRAIN_CMD = ""
+        scheduler.BRAIN_URL = "http://ui:4174/api/brain"
+        resp = mock.Mock(status_code=503, content=b'{"error":"no key"}', text="")
+        resp.json.return_value = {"error": "set CASE_DRIVE_API_KEY in .env"}
+        with mock.patch("scheduler.requests.post", return_value=resp):
+            code, text = scheduler.run_brain("c_1", "hello")
+        assert code == 2
+        assert "CASE_DRIVE_API_KEY" in text
+    finally:
+        scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
+
+
+def test_run_brain_url_connection_error():
+    import unittest.mock as mock
+    import scheduler
+    old_cmd, old_url = scheduler.BRAIN_CMD, scheduler.BRAIN_URL
+    try:
+        scheduler.BRAIN_CMD = ""
+        scheduler.BRAIN_URL = "http://ui:4174/api/brain"
+        with mock.patch("scheduler.requests.post", side_effect=scheduler.requests.ConnectionError()):
+            code, text = scheduler.run_brain("c_1", "hello")
+        assert code == 127
+        assert "http://ui:4174/api/brain" in text
+    finally:
+        scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
+
+
+def test_run_brain_url_timeout():
+    import unittest.mock as mock
+    import scheduler
+    old_cmd, old_url = scheduler.BRAIN_CMD, scheduler.BRAIN_URL
+    try:
+        scheduler.BRAIN_CMD = ""
+        scheduler.BRAIN_URL = "http://ui:4174/api/brain"
+        with mock.patch("scheduler.requests.post", side_effect=scheduler.requests.Timeout()):
+            code, text = scheduler.run_brain("c_1", "hello")
+        assert code == -1
+        assert "timed out" in text
+    finally:
+        scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
+
+
+def test_run_brain_cmd_wins_over_url():
+    import unittest.mock as mock
+    import scheduler
+    old_cmd, old_url = scheduler.BRAIN_CMD, scheduler.BRAIN_URL
+    try:
+        scheduler.BRAIN_CMD = "definitely-not-a-brain-bin {prompt}"
+        scheduler.BRAIN_URL = "http://ui:4174/api/brain"
+        with mock.patch("scheduler.requests.post") as post:
+            code, _ = scheduler.run_brain("c_1", "hello")
+        assert post.call_count == 0
+        assert code == 127
+    finally:
+        scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old_cmd, old_url
 
 
 if __name__ == "__main__":
