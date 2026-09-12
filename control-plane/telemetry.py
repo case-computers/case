@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Anonymous usage stats that help improve Case.
+"""Usage stats that help improve Case.
 
 Three events: install_ping (boot), install_heartbeat (once per UTC day), and
 run_completed (did a scheduled run work). Each carries a random install id and a
@@ -38,20 +38,22 @@ _TEST_RUN = ("pytest" in sys.modules
 ENABLED = ((os.environ.get("DO_NOT_TRACK") or "").strip().lower() not in ("1", "true", "yes", "on")
            and _CHOICE not in ("0", "false", "no", "off")
            and (not _TEST_RUN or _CHOICE in ("1", "true", "yes", "on")))
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 
 def _load():
-    try:
-        with open(PATH) as f:
-            s = json.load(f)
-        if isinstance(s, dict) and s.get("install_id"):
-            return s
-    except Exception:
-        pass
-    s = {"install_id": uuid.uuid4().hex, "first_seen": now()}
-    _save(s)
-    return s
+    # Locked so two sends racing on a missing file mint one id, not two.
+    with _LOCK:
+        try:
+            with open(PATH) as f:
+                s = json.load(f)
+            if isinstance(s, dict) and s.get("install_id"):
+                return s
+        except Exception:
+            pass
+        s = {"install_id": uuid.uuid4().hex, "first_seen": now()}
+        _save(s)
+        return s
 
 
 def _save(s):

@@ -66,7 +66,7 @@ async def lifespan(_app):
     notifier.listen(handoffs.on_ntfy_answer)
     log.info("cased up on %s (image=%s, max_running=%d, max_ram_mb=%d, captcha_auto=%s)",
              API_BASE, IMAGE, MAX_RUNNING, MAX_RAM_MB, "on" if captcha.enabled() else "off")
-    log.info("usage stats %s", "on (anonymous; CASE_TELEMETRY=0 to turn off)"
+    log.info("usage stats %s", "on (CASE_TELEMETRY=0 to turn off)"
              if telemetry.ENABLED else "off")
     telemetry.install_ping()
     yield

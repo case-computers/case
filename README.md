@@ -88,10 +88,10 @@ The defaults are enough to try Case locally. Optional settings are listed in
 `compose.yaml`, then run `docker compose up -d` to apply changes. Edit an existing
 `.env` rather than replacing it.
 
-Case sends a few anonymous numbers that help us see what breaks: a random install
-id, how many computers and schedules exist, and whether scheduled runs succeed.
-Never a name, prompt, domain or credential. Turn it off with `CASE_TELEMETRY=0`
-(or `DO_NOT_TRACK=1`) in `.env`.
+Case sends a few usage numbers that help us see what breaks: a random install id,
+how many computers and schedules exist, and whether scheduled runs succeed. Never
+a name, prompt, domain or credential. Like any web request it reaches our server
+with your IP. Turn it off with `CASE_TELEMETRY=0` (or `DO_NOT_TRACK=1`) in `.env`.
 
 <a id="stop-and-start-again"></a>
 <details>
