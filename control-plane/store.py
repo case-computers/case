@@ -613,6 +613,20 @@ class Store:
     def get_run(self, rid):
         return self.one("SELECT * FROM runs WHERE id=?", (rid,))
 
+    def telemetry_counts(self, since):
+        """Counts only: this leaves the box as anonymous usage stats. Nothing here
+        may become a name, prompt, domain or username."""
+        n = lambda sql, args=(): self.one(sql, args)["c"]
+        return {
+            "computers": n("SELECT COUNT(*) c FROM computers"),
+            "credentials": n("SELECT COUNT(*) c FROM credentials"),
+            "schedules": n("SELECT COUNT(*) c FROM schedules"),
+            "schedules_enabled": n("SELECT COUNT(*) c FROM schedules WHERE enabled=1"),
+            "runs_7d": n("SELECT COUNT(*) c FROM runs WHERE started_at >= ?", (since,)),
+            "runs_ok_7d": n("SELECT COUNT(*) c FROM runs WHERE started_at >= ? "
+                            "AND status='ok'", (since,)),
+        }
+
     def prune_terminal_handoffs(self, cutoff):
         self.q("UPDATE handoffs SET screenshot=NULL WHERE screenshot IS NOT NULL "
                "AND status IN ('completed','answered','failed','expired')")
