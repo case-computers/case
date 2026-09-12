@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,6 +29,7 @@ from events import emit
 from lifecycle import do_sleep, do_wake, get_computer
 from notify import notifier
 from store import store
+import telemetry
 from util import new_id, now
 
 SCHED_RUNNING = set()   # in-memory guard, fine while one cased process runs
@@ -203,7 +205,7 @@ def run_schedule(sid):
         tz = s["tz"] if "tz" in s.keys() else None
         # Reschedule FIRST so a hung/crashed run never wedges the slot.
         store.set_schedule_next(sid, compute_next(s["kind"], s["spec"], s["jitter_s"], tz))
-        cid, rid, started = s["computer_id"], new_id("run"), now()
+        cid, rid, started, t0 = s["computer_id"], new_id("run"), now(), time.monotonic()
         code, summary, status, artifact = -1, "", "fail", None
         # Only the run that woke an asleep box may put it back, never borrow a live session
         # (and never sleep under an active AuthAttempt; do_sleep also 409s as a belt).
@@ -241,6 +243,11 @@ def run_schedule(sid):
             shot = " 📸" if artifact else ""
             notifier.push(f"[{s['name']}] {status}: {summary[:200]}{shot}")
             emit("schedule.run", {"schedule": sid, "run": rid, "computer_id": cid, "status": status})
+            # status and shape only; the prompt and its output never leave the box
+            telemetry.capture("run_completed",
+                              {"status": status, "kind": s["kind"],
+                               "duration_s": int(time.monotonic() - t0),
+                               "had_artifact": bool(artifact)})
     finally:
         SCHED_RUNNING.discard(sid)
 

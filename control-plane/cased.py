@@ -37,6 +37,7 @@ import assist
 import login_flow
 import scheduler
 import session_keeper
+import telemetry
 from config import (API_BASE, AUDIT_DIR, BIND_HOST, BIND_PORT, IMAGE, MAX_COMPUTER_RAM_MB,
                     MAX_CPUS, MAX_RAM_MB, MAX_RUNNING, MIN_CPUS, MIN_RAM_MB, RUNS_DIR,
                     VNC_PORT, log)
@@ -65,6 +66,9 @@ async def lifespan(_app):
     notifier.listen(handoffs.on_ntfy_answer)
     log.info("cased up on %s (image=%s, max_running=%d, max_ram_mb=%d, captcha_auto=%s)",
              API_BASE, IMAGE, MAX_RUNNING, MAX_RAM_MB, "on" if captcha.enabled() else "off")
+    log.info("usage stats %s", "on (anonymous; CASE_TELEMETRY=0 to turn off)"
+             if telemetry.ENABLED else "off")
+    telemetry.install_ping()
     yield
     # SIGTERM (docker compose down, systemctl stop): park the desktops. They are not
     # compose services, so nothing else would.
@@ -1101,6 +1105,7 @@ def sweeper():
                 prune_old_audit_files()
                 store.prune_terminal_handoffs(cutoff)
             scheduler.fire_due_schedules(_spawn)
+            telemetry.heartbeat_if_due()   # at most one event per UTC day
             # preflight persistent session health: it drives desks over the network,
             # and a hung one must not stall reconcile or the schedule fire loop
             threading.Thread(target=session_keeper.tick, daemon=True).start()
