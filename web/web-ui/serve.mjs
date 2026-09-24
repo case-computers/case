@@ -84,6 +84,12 @@ export function livePathHasDotDot(rawUrl) {
   }
   return false;
 }
+// Did the browser reach us over HTTPS? The proxy in front says so, or the page's
+// origin does. Plain-http loopback must not get a Secure cookie: it never comes back.
+export function viaHttps(req) {
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return proto === 'https' || /^https:\/\//i.test(String(req.headers.origin || ''));
+}
 export function tokenMatches(req, need = TOKEN) {
   if (!need) return true;
   const auth = req.headers.authorization || '';
@@ -1774,7 +1780,7 @@ export const server = http.createServer(async (req, res) => {
   if (TOKEN && req.method === 'GET' && url.searchParams.has('token') && tokenMatches(req)) {
     res.writeHead(302, {
       Location: p === '/' ? '/' : p,
-      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${viaHttps(req) ? '; Secure' : ''}`,
       'Cache-Control': 'no-store',
     });
     return res.end();

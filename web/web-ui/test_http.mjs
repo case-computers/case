@@ -37,6 +37,11 @@ assert.equal((await get('/api/threads')).status, 401);
 assert.equal((await get('/api/threads', { authorization: 'Bearer tok' })).status, 200);
 assert.equal((await fetch(base + '/api/threads', { method: 'POST', headers: { authorization: 'Bearer tok', origin: 'https://evil.example' } })).status, 403);
 assert.equal((await get('/?token=tok')).status, 302);
+// the cookie is Secure only when the browser came in over HTTPS
+assert.doesNotMatch((await get('/?token=tok')).headers.get('set-cookie'), /Secure/);
+assert.match((await get('/?token=tok', { 'x-forwarded-proto': 'https' })).headers.get('set-cookie'), /; Secure$/);
+assert.match((await get('/?token=tok', { 'x-forwarded-proto': 'https,http' })).headers.get('set-cookie'), /; Secure$/);
+assert.doesNotMatch((await get('/?token=tok', { 'x-forwarded-proto': 'http' })).headers.get('set-cookie'), /Secure/);
 // fetch silently ignores a Host override; use http.get for the rebinding case.
 const status = await new Promise((r) => http.get({ host: '127.0.0.1', port: server.address().port, path: '/api/threads',
   headers: { authorization: 'Bearer tok', host: 'evil.example' } }, (res) => { res.resume(); r(res.statusCode); }));
