@@ -362,6 +362,47 @@ def test_approval_approve_persists_approve_not_done():
         _cleanup("h_plain")
 
 
+def test_approval_takes_only_approve_or_deny():
+    # Anything but "deny" used to approve: "no", a stray OTP, an empty ntfy body.
+    _cleanup("h_plain")
+    try:
+        for bad in ("no", "reject", None, {}, "123456", "done"):
+            _persist("h_plain", "approval", "Ship it?", continuation="submit_value")
+            try:
+                handoffs.answer_handoff("h_plain", bad)
+                assert False, f"expected 400 for {bad!r}"
+            except ApiError as e:
+                assert e.status == 400, (bad, e)
+            row = store.get_handoff("h_plain")
+            assert row["status"] == "pending" and row["answer"] is None, (bad, dict(row))
+        _persist("h_plain", "approval", "Ship it?", continuation="submit_value")
+        row = handoffs.answer_handoff("h_plain", " Approve ")
+        assert row["status"] == "completed" and row["answer"] == "approve", dict(row)
+    finally:
+        _cleanup("h_plain")
+
+
+def test_public_answer_door_returns_the_public_shape():
+    import cased
+    from fastapi.testclient import TestClient
+    _cleanup("h_plain")
+    try:
+        store.insert_handoff("h_plain", "c_1", "approval", "Pay $500?", "iVBORw0KGgo=",
+                             "bank", continuation="submit_value")
+        client = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+        url = f"/answer/h_plain/{store.sign('answer:h_plain')}"
+        assert client.post(url, json={}).status_code == 400
+        assert store.get_handoff("h_plain")["status"] == "pending"
+        r = client.post(url, json={"value": "approve"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "completed" and body["answer"] == "approve", body
+        assert "screenshot" not in body and "screenshot_png_b64" not in body, body
+        assert "login_credential" not in body, body
+    finally:
+        _cleanup("h_plain")
+
+
 def test_wait_external_rejects_answer_handoff():
     _cleanup("h_otp")
     try:

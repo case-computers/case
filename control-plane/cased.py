@@ -797,7 +797,10 @@ async def assist_submit(token: str, request: Request):
             return HTMLResponse(assist.GONE_HTML, status_code=410)
         raise
     st = row["status"]
-    if st in ("completed", "answered"):
+    if view["kind"] == "approval" and st != "pending":
+        title = "Approved ✓" if value.lower() == "approve" else "Denied"
+        body = "Your answer was sent. You can close this page."
+    elif st in ("completed", "answered"):
         title, body = "Submitted ✓", "The code was accepted. You can close this page."
     elif st == "failed":
         title, body = "Failed", "This challenge could not be completed. Ask for a new link."
@@ -1045,7 +1048,8 @@ def answer_handoff_ep(hid: str, body: dict = Body(...)):
 def answer_public(hid: str, token: str, body: dict = Body(...)):
     """ntfy's Approve/Deny buttons. The signed token in the URL is the whole auth —
     a phone has no bearer, and the notification is the only place it leaks to."""
-    return handoffs.answer_by_token(hid, token, body.get("value"))
+    return handoffs.handoff_json(handoffs.answer_by_token(hid, token, body.get("value")),
+                                 with_screenshot=False)
 
 
 # ---------- schedules ----------

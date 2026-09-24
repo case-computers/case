@@ -483,6 +483,15 @@ def render_page(view, token):
                f"<p class=note>This page updates automatically.</p>"
         return _shell("Verifying", body, view, marg="16vh auto", align="center", poll=True)
 
+    if cont == "submit_value" and view["kind"] == "approval":
+        body = f"<h1>Approve?</h1><p class=note>{prompt}</p>" + "".join(
+            f'<form method=post action="/assist/{tok}/submit">'
+            f'<input type=hidden name=expected_revision value="{rev}">'
+            f'<input type=hidden name=value value={value}>'
+            f"<button>{label}</button></form>"
+            for value, label in (("approve", "Approve"), ("deny", "Deny")))
+        return _shell("Approve", body, view, poll=True)
+
     if cont == "submit_value":
         body = (
             f"<h1>Enter the code</h1><p class=note>{prompt}</p>"

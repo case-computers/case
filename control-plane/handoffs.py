@@ -54,6 +54,10 @@ CONTINUATION_BY_KIND = {
 
 VERIFY_DONE_VALUES = frozenset({"done", "approve", "i'm done", "im done", "i am done"})
 
+# The only answers an approval takes. ntfy and Telegram buttons and the Assist page
+# send these; anything else (a typed "no", an empty body) is refused, not approved.
+APPROVAL_VALUES = ("approve", "deny")
+
 TERMINAL_STATUSES = frozenset({"completed", "answered", "failed", "expired"})
 
 
@@ -99,7 +103,7 @@ def _durable_answer(kind, continuation, value):
     # Approval markers first, "approve" is also a verify_page synonym, but an
     # approval handoff must persist approve/deny, not collapse to "done".
     if kind == "approval":
-        return low if low in ("approve", "deny") else None
+        return low if low in APPROVAL_VALUES else None
     if continuation == "verify_page" or low in VERIFY_DONE_VALUES:
         return "done"
     if low in ("approve", "deny"):
@@ -357,6 +361,10 @@ def submit_handoff_value(hid, value):
     if _continuation_of(row) != "submit_value":
         raise ApiError(400, "bad_request",
                        f"handoff continuation is {_continuation_of(row)!r}, not submit_value")
+    if row["kind"] == "approval":
+        value = str(value).strip().lower() if isinstance(value, str) else ""
+        if value not in APPROVAL_VALUES:
+            raise ApiError(400, "bad_request", "approval handoff expects 'approve' or 'deny'")
     _claim_validating(row, value)
     row = store.get_handoff(hid)
     aid = _attempt_id_of(row)

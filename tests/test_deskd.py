@@ -190,6 +190,20 @@ def test_question_challenge_is_never_injected_into_page():
     press.assert_not_called()
 
 
+def test_approval_action_takes_only_approve_or_deny():
+    tab = FakeTab()
+    with mock.patch.object(deskd.time, "sleep") as sleep, \
+         mock.patch.object(deskd, "settle") as settle:
+        for bad in (None, "", "no", "123456"):
+            assert deskd.apply_challenge_action(tab, "approval", bad) == \
+                "approval expects 'approve' or 'deny'", bad
+        assert deskd.apply_challenge_action(tab, "approval", "deny") == "denied by human"
+        sleep.assert_not_called()
+        settle.assert_not_called()
+        assert deskd.apply_challenge_action(tab, "approval", "Approve") is None
+        settle.assert_called_once()
+
+
 # ---- challenge_signals_from_text: generic tags for durable-auth observations ----
 
 def test_challenge_signals_captcha_otp_approval():

@@ -768,8 +768,11 @@ def apply_challenge_action(tab, kind, value=None):
     """Generic challenge action: otp/code fill+enter, or approval settle. Returns err str or None."""
     k = (kind or "").lower()
     if k in ("approval", "approve"):
-        if value is not None and str(value).lower() == "deny":
+        v = "" if value is None else str(value).lower()
+        if v == "deny":
             return "denied by human"
+        if v != "approve":
+            return "approval expects 'approve' or 'deny'"
         time.sleep(8)  # human approved out-of-band; let the site catch up
         settle(tab)
         return None

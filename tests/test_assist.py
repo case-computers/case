@@ -293,6 +293,27 @@ def test_render_phases_submit_verify_wait_and_terminal_attempt():
     assert payload_ok["allowed_actions"] == []
 
 
+def test_approval_renders_approve_and_deny_buttons():
+    _cleanup()
+    _pending("h_otp", "approval", continuation="submit_value")
+    html = assist.render_page(
+        assist.build_view(store.get_handoff("h_otp"), store.get_handoff("h_otp"), None), "tok")
+    assert "Enter the code" not in html and "inputmode=numeric" not in html
+    assert "name=value value=approve" in html and "name=value value=deny" in html
+    assert html.count('action="/assist/tok/submit"') == 2
+
+    raw, _ = assist.mint_assist_token("h_otp")
+    session, _ = assist.exchange(raw)
+    from fastapi.testclient import TestClient
+    client = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+    response = client.post(
+        f"/assist/{raw}/submit", data={"value": "approve", "expected_revision": "0"},
+        cookies={assist.COOKIE: session}, headers={"Origin": "http://127.0.0.1"})
+    assert response.status_code == 200, response.text
+    assert "Approved" in response.text
+    assert store.get_handoff("h_otp")["answer"] == "approve"
+
+
 def test_attempt_scoped_session_follows_current_handoff():
     _cleanup()
     _attempt("aa_1", status="awaiting_human", current_handoff_id="h_cap")
