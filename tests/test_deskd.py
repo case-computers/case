@@ -7,8 +7,10 @@ module on the host; the functions under test don't use it.
 """
 import base64
 import os
+import subprocess
 import sys
 import threading
+import time
 import types
 import unittest.mock as mock
 
@@ -572,6 +574,40 @@ def test_injection_gates_screenshot_exec_and_file():
             assert r.json()["error"]["code"] == "credential_injection"
     finally:
         deskd.state["injecting"] = False
+
+
+def _exec(command, timeout_s):
+    t0 = time.time()
+    r = _client().post("/exec", headers=H, json={
+        "command": command, "timeout_s": timeout_s, "cwd": tempfile.gettempdir()})
+    return r.json(), time.time() - t0
+
+
+def _running(pattern):
+    return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
+
+
+def test_exec_returns_when_bash_exits_despite_a_background_job():
+    # the job inherits the pipes; waiting for their EOF ran the call into its timeout
+    out, took = _exec("sleep 30.17 & echo started", 10)
+    try:
+        assert out["exit_code"] == 0 and out["stdout"] == "started\n", out
+        assert took < 5, took
+    finally:
+        subprocess.run(["pkill", "-f", "sleep 30.17"])
+
+
+def test_exec_timeout_kills_the_whole_command():
+    out, took = _exec("sleep 30.23; echo done", 1)
+    assert out["exit_code"] == 124 and "timed out" in out["stderr"], out
+    assert took < 5, took
+    time.sleep(0.2)
+    assert not _running("sleep 30.23")          # only bash died, the child lingered
+
+
+def test_exec_passes_a_command_own_124_through():
+    out, _ = _exec("exit 124", 5)
+    assert out["exit_code"] == 124 and "timed out" not in out["stderr"], out
 
 
 def test_file_get_rejects_paths_outside_home():

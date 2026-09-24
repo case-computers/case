@@ -11,6 +11,7 @@ import hmac
 import json
 import os
 import re
+import signal
 import struct
 import subprocess
 import threading
@@ -233,6 +234,14 @@ def home_path(path):
     return p if p.startswith(HOME + "/") else None
 
 
+def _slurp(f, buf):
+    # drains until EOF even past CAP, so a writer never blocks on a full pipe
+    for chunk in iter(lambda: f.read1(65536), b""):
+        if len(buf) <= CAP:
+            buf.extend(chunk)
+    f.close()
+
+
 @app.post("/exec")
 def exec_(b: dict = Body(...)):
     gen = state["inject_gen"]
@@ -243,14 +252,34 @@ def exec_(b: dict = Body(...)):
     timeout = min(int(b.get("timeout_s", 30)), 600)
     cwd = b.get("cwd", "/home/agent")
     try:
-        p = subprocess.run(["bash", "-c", b["command"]], cwd=cwd, env=denv(),
-                           capture_output=True, timeout=timeout)
-        code, out, errb = p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired as e:
-        code, out = 124, e.stdout or b""
-        errb = (e.stderr or b"") + b"\n[deskd] command timed out"
+        # own session, so a timeout kills the whole command and not just bash
+        p = subprocess.Popen(["bash", "-c", b["command"]], cwd=cwd, env=denv(),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             start_new_session=True)
     except (FileNotFoundError, NotADirectoryError, PermissionError):
         return err(400, "bad_cwd", f"no such directory: {cwd}")
+    out, errb = bytearray(), bytearray()
+    readers = [threading.Thread(target=_slurp, args=io, daemon=True)
+               for io in ((p.stdout, out), (p.stderr, errb))]
+    for t in readers:
+        t.start()
+    try:
+        code = p.wait(timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.wait()
+        code = None
+    # `cmd &` leaves the job holding the pipes after bash exits: stop listening
+    # shortly after, or the call would last as long as the job
+    grace = time.time() + 0.5
+    for t in readers:
+        t.join(max(0, grace - time.time()))
+    out, errb = bytes(out), bytes(errb)
+    if code is None:
+        code, errb = 124, errb + b"\n[deskd] command timed out"
     if (r := injected_since(gen)):
         return r
     truncated = len(out) > CAP or len(errb) > CAP

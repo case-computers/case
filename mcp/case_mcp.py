@@ -158,7 +158,10 @@ def computer_action(computer_id: str, type: str, x: int | None = None, y: int | 
 
 @tool
 def computer_exec(computer_id: str, command: str, timeout_s: int = 30) -> dict:
-    """Run a shell command on the computer (bash, as user 'agent')."""
+    """Run a shell command on the computer (bash, as user 'agent'). Returns when bash
+    exits; a timeout kills the command and everything it started. Start background
+    jobs as `nohup cmd >/dev/null 2>&1 &` — output a job writes after bash exits is
+    lost."""
     return call("POST", f"/computers/{computer_id}/exec", params={"wake": "true"},
                 json={"command": command, "timeout_s": timeout_s},
                 timeout=timeout_s + 30).json()
