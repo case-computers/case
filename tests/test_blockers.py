@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: MIT
 """Blocker routing: one live challenge owns one durable handoff."""
-import os
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ["CASE_HOME"] = "/tmp/case-blockers-test"
+import _helpers
+
+_helpers.isolated_home()
 
 import login_flow  # noqa: E402
 import cased  # noqa: E402

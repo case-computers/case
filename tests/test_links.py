@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: MIT
 """Human link tokens: mint/expiry/burn + the /desk forward_auth check.
 Run: .venv/bin/python tests/test_links.py"""
-import os
-import sys
+import _helpers
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: _cleanup() truncates the links table, and an inherited
-# CASE_HOME (exported in a dev shell, or ~/.case/env) would point that at the real
-# vault and kill every outstanding human link.
-os.environ["CASE_HOME"] = "/tmp/case-links-test"
+_helpers.isolated_home()
 import links  # noqa: E402
 from store import store  # noqa: E402
 

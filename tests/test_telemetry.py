@@ -4,14 +4,11 @@ Run: .venv/bin/python tests/test_telemetry.py"""
 import importlib
 import json
 import os
-import shutil
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-HOME = "/tmp/case-telemetry-test"
-shutil.rmtree(HOME, ignore_errors=True)
-os.environ["CASE_HOME"] = HOME
+import _helpers
+
+_helpers.isolated_home()
 os.environ.pop("CASE_TELEMETRY", None)
 os.environ.pop("DO_NOT_TRACK", None)
 

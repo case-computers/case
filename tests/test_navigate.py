@@ -2,11 +2,9 @@
 """deskclient.navigate — the sentinel/poll loop that replaces an agent's manual
 readyState polling. Pure: eval_js is faked, no Docker, no deskd.
 Run: .venv/bin/python tests/test_navigate.py"""
-import os
-import sys
+import _helpers
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ.setdefault("CASE_HOME", "/tmp/case-navigate-test")
+_helpers.isolated_home()
 import deskclient  # noqa: E402
 from errors import ApiError  # noqa: E402
 

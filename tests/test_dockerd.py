@@ -2,10 +2,10 @@
 """dockerd network vs loopback reachability. Pure — no Docker daemon.
 Run: .venv/bin/python tests/test_dockerd.py"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ["CASE_HOME"] = "/tmp/case-dockerd-test"
+import _helpers
+
+_helpers.isolated_home()
 os.environ.pop("CASE_DOCKER_NETWORK", None)
 import dockerd  # noqa: E402
 

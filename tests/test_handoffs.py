@@ -2,13 +2,11 @@
 """Typed handoff state + verified continuation (restart recovery + Assist foundation).
 Run: .venv/bin/python tests/test_handoffs.py"""
 import os
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: the tests below write handoff rows, and an inherited
-# CASE_HOME would put them in a live box's DB. Same reasoning as tests/test_links.py.
-os.environ["CASE_HOME"] = "/tmp/case-handoffs-test"
+import _helpers
+
+_helpers.isolated_home()
 import handoffs  # noqa: E402
 import links  # noqa: E402
 from errors import ApiError  # noqa: E402

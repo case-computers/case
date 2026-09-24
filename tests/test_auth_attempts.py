@@ -4,15 +4,12 @@ Run: .venv/bin/python tests/test_auth_attempts.py"""
 import json
 import os
 import shutil
-import sys
 import tempfile
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: these tests write auth_attempt rows, and an inherited
-# CASE_HOME would put them in a live box's DB.
-_HOME = tempfile.mkdtemp(prefix="case-auth-attempts-")
-os.environ["CASE_HOME"] = _HOME
+import _helpers
+
+_HOME = _helpers.isolated_home()
 
 import auth_attempts  # noqa: E402
 import handoffs  # noqa: E402

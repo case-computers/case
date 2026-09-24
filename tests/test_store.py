@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: MIT
 """Concurrent reads from the shared vault connection. No Docker required."""
 from concurrent.futures import ThreadPoolExecutor
-import os
 import shutil
-import sys
-import tempfile
 import threading
 import unittest.mock as mock
 
-_HOME = tempfile.mkdtemp(prefix="case-store-test-")
-os.environ["CASE_HOME"] = _HOME
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
+import _helpers
+
+_HOME = _helpers.isolated_home()
 from store import store  # noqa: E402
 
 

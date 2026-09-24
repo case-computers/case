@@ -2,12 +2,10 @@
 """Read routes: runs, credential health, handoff list.
 Run: .venv/bin/python tests/test_runs.py"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault — these tests DELETE FROM real tables, and an inherited
-# CASE_HOME would point them at a live box's vault. Same reasoning as tests/test_links.py.
-os.environ["CASE_HOME"] = "/tmp/case-runs-test"
+import _helpers
+
+HOME = _helpers.isolated_home()
 import cased  # noqa: E402
 from store import store  # noqa: E402
 
@@ -43,7 +41,7 @@ def test_unlink_run_artifacts_only_under_runs_dir():
     from config import RUNS_DIR
     os.makedirs(RUNS_DIR, exist_ok=True)
     inside = os.path.join(RUNS_DIR, "prune_me.png")
-    outside = os.path.join("/tmp", "case-prune-outside.png")
+    outside = os.path.join(HOME, "case-prune-outside.png")
     open(inside, "wb").write(b"in")
     open(outside, "wb").write(b"out")
     try:

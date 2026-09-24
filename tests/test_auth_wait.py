@@ -2,15 +2,12 @@
 """Auth attempt long-poll wait (cursor + event wake).
 Run: .venv/bin/python tests/test_auth_wait.py"""
 import asyncio
-import os
 import shutil
-import sys
-import tempfile
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-_HOME = tempfile.mkdtemp(prefix="case-auth-wait-")
-os.environ["CASE_HOME"] = _HOME
+import _helpers
+
+_HOME = _helpers.isolated_home()
 
 import auth_attempts  # noqa: E402
 import events  # noqa: E402

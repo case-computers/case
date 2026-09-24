@@ -5,11 +5,9 @@ import os
 import sys
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: the run-status tests below truncate the runs table, and an
-# inherited CASE_HOME (exported in a dev shell, or ~/.case/env) would point that at a
-# live box's real history. Same reasoning as tests/test_links.py.
-os.environ["CASE_HOME"] = "/tmp/case-sched-test"
+import _helpers
+
+_helpers.isolated_home()
 from scheduler import compute_next  # noqa: E402
 from store import store  # noqa: E402
 

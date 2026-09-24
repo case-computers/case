@@ -2,12 +2,11 @@
 """browse.py — snapshot/click/fill/wait/tabs composition logic. Pure: eval_js and
 desk_json are faked, no Docker, no deskd.
 Run: .venv/bin/python tests/test_browse.py"""
-import os
-import sys
 from urllib.parse import quote
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ.setdefault("CASE_HOME", "/tmp/case-browse-test")
+import _helpers
+
+_helpers.isolated_home()
 import browse  # noqa: E402
 from errors import ApiError  # noqa: E402
 

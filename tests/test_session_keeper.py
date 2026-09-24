@@ -3,15 +3,12 @@
 Run: .venv/bin/python tests/test_session_keeper.py"""
 import json
 import os
-import sys
-import tempfile
 import unittest.mock as mock
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: these tests write credential probe rows.
-_HOME = tempfile.mkdtemp(prefix="case-session-keeper-")
-os.environ["CASE_HOME"] = _HOME
+import _helpers
+
+_helpers.isolated_home()
 
 import session_keeper  # noqa: E402
 from store import store  # noqa: E402

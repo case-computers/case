@@ -2,12 +2,12 @@
 """ntfy notifier wiring. Run: .venv/bin/python tests/test_notify.py"""
 import importlib
 import os
-import sys
 import threading
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ["CASE_HOME"] = "/tmp/case-notify-test"
+import _helpers
+
+_helpers.isolated_home()
 
 # Force a clean import under known env for module-level notifier wiring tests.
 os.environ.pop("CASE_NTFY_TOPIC", None)

@@ -2,12 +2,10 @@
 """The state machine reified in lifecycle.TRANSITIONS. Pure — no Docker.
 Run: .venv/bin/python tests/test_lifecycle.py"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: these tests create and delete computer rows, and an
-# inherited CASE_HOME (a dev shell, ~/.case/env) would point that at the real vault.
-os.environ["CASE_HOME"] = "/tmp/case-lifecycle-test"
+import _helpers
+
+HOME = _helpers.isolated_home()
 from errors import ApiError  # noqa: E402
 from lifecycle import can_transition, do_sleep, ensure_running  # noqa: E402
 from store import store  # noqa: E402
@@ -428,7 +426,7 @@ def test_vault_directory_and_database_are_private():
     # predates this (or a loose umask) leaves them world-readable.
     import shutil
     from store import Store
-    home = "/tmp/case-perms-test"
+    home = os.path.join(HOME, "perms")
     shutil.rmtree(home, ignore_errors=True)
     os.makedirs(home, mode=0o755)                  # the permissive dir an upgrade inherits
     try:

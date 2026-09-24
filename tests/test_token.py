@@ -2,12 +2,10 @@
 """Optional CASE_TOKEN gate. Pure — no Docker.
 Run: .venv/bin/python tests/test_token.py"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: an inherited CASE_HOME (a dev shell, ~/.case/env)
-# would open the real vault just to read a token setting.
-os.environ["CASE_HOME"] = "/tmp/case-token-test"
+import _helpers
+
+_helpers.isolated_home()
 import cased  # noqa: E402
 
 

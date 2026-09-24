@@ -8,11 +8,11 @@ and must NOT call /login/resume (deskd state["login"] stays intact for handoff).
 """
 import json
 import os
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ["CASE_HOME"] = "/tmp/case-captcha-test"
+import _helpers
+
+_helpers.isolated_home()
 
 # Clear DBC env for deterministic enabled() tests; individual tests set what they need.
 for _k in ("CASE_DBC_USERNAME", "CASE_DBC_PASSWORD", "CASE_DBC_AUTHTOKEN",

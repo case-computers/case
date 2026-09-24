@@ -4,13 +4,11 @@ Run: .venv/bin/python tests/test_gates.py"""
 import glob
 import os
 import shutil
-import sys
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: this suite writes audit files and wipes the audit
-# directory, and an inherited CASE_HOME would aim that at the real vault.
-os.environ["CASE_HOME"] = "/tmp/case-gates-test"
+import _helpers
+
+_helpers.isolated_home()
 from fastapi.testclient import TestClient  # noqa: E402
 
 import cased  # noqa: E402
