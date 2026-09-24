@@ -116,7 +116,6 @@ services:
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_THREADS: /data/threads.json
       CASE_HOME: /data
-      CASE_LOCAL: "1"
       PORT: "4174"
       CASE_NTFY_URL: ${CASE_NTFY_URL:-https://ntfy.sh}
       CASE_NTFY_TOPIC: ${CASE_NTFY_TOPIC:-}

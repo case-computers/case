@@ -4,15 +4,14 @@
  * Drive UI + deployer — talks to local cased (compose or CASE_URL).
  * Serves Drive at / (index.html) and the computer deployer at /deploy.
  *
- * CASE_LOCAL (default on): 127.0.0.1 / compose `cased` — no SSH tunnel, /live
- * relays noVNC through cased. CASE_LOCAL=0 is a no-op here (this process never
- * tunnels); it only flips the health `local` flag.
+ * No SSH tunnel: cased is on CASE_URL (loopback or compose `cased`), and /live
+ * relays noVNC through it.
  *
  * OpenAI key arrives per-request in x-openai-key; Anthropic in x-anthropic-key;
  * never logged.
  * Optional CASE_TOKEN: Bearer, case_token cookie, or ?token= on first hit.
  *
- * Run: CASE_LOCAL=1 node web/web-ui/serve.mjs  →  http://127.0.0.1:4174/
+ * Run: node web/web-ui/serve.mjs  →  http://127.0.0.1:4174/
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -53,13 +52,6 @@ export function parseCaseUrl(raw) {
 const CASE = parseCaseUrl(process.env.CASE_URL || 'http://127.0.0.1:8787');
 process.env.CASE_URL = `${CASE.protocol}//${CASE.hostname}:${CASE.port}/v1`;
 
-export function isLocalMode(env = process.env, host = CASE.hostname) {
-  const flag = String(env.CASE_LOCAL || '').trim().toLowerCase();
-  if (flag === '0' || flag === 'false') return false;
-  if (flag === '1' || flag === 'true') return true;
-  return host === '127.0.0.1' || host === 'localhost' || host === 'cased';
-}
-const LOCAL = isLocalMode();
 const HOME = process.env.CASE_HOME || path.join(process.env.HOME || '/tmp', '.case');
 
 export function liveCid(pathname) {
@@ -225,7 +217,7 @@ async function computers(res) {
       api('GET', '/computers', { timeoutMs: 6000 }),
       originHealth().catch(() => ({ json: null })),
     ]);
-    if (r.status >= 400 || !r.json) return json(res, 502, { error: r.json?.error?.message || 'cased unreachable', up: false, local: LOCAL });
+    if (r.status >= 400 || !r.json) return json(res, 502, { error: r.json?.error?.message || 'cased unreachable', up: false });
     const rows = (r.json.computers || []).map((c) => ({
       id: c.id, name: c.name, state: c.state === 'running' ? 'awake' : c.state,
       credentials: c.credentials || [], pending_handoffs: c.pending_handoffs || 0,
@@ -237,12 +229,12 @@ async function computers(res) {
     const running = rows.filter((c) => awake.includes(c.state)).length;
     const maxRunning = Number(h.json?.max_running) || 0;
     return json(res, 200, {
-      computers: rows, live: CASE.hostname, up: true, local: LOCAL,
+      computers: rows, live: CASE.hostname, up: true,
       max_running: maxRunning, running: Number(h.json?.running) || running,
       max_ram_mb: Number(h.json?.max_ram_mb) || 0, ram_mb: Number(h.json?.ram_mb) || 0,
     });
   } catch {
-    return json(res, 502, { error: 'cased unreachable', up: false, local: LOCAL });
+    return json(res, 502, { error: 'cased unreachable', up: false });
   }
 }
 
@@ -1818,7 +1810,7 @@ export const server = http.createServer(async (req, res) => {
     try {
       const h = await originHealth();
       return json(res, 200, {
-        ok: true, live: CASE.hostname, up: h.status === 200, local: LOCAL,
+        ok: true, live: CASE.hostname, up: h.status === 200,
         max_running: Number(h.json?.max_running) || 0,
         running: Number(h.json?.running) || 0,
         computers: Number(h.json?.computers) || 0,
@@ -1826,7 +1818,7 @@ export const server = http.createServer(async (req, res) => {
         brain_key: !!envDriveAuth().key,
       });
     } catch {
-      return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
+      return json(res, 200, { ok: true, live: CASE.hostname, up: false, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
     }
   }
   try {
@@ -1874,7 +1866,7 @@ if (isMain) {
   // One bad request must never take Drive (and every running turn) down with it.
   process.on('unhandledRejection', (err) => console.error('drive unhandled:', err));
   server.listen(PORT, BIND, () => {
-    process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port}${LOCAL ? ', local' : ''})\n`);
+    process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port})\n`);
     startPhoneNtfy();
     startPhoneTelegram();
   });

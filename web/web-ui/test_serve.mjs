@@ -17,7 +17,7 @@ import {
 // serve.mjs loads threads.json at import and rewrites it; never the developer's own.
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
 process.env.CASE_TURN_TOKENS = '10000';   // small enough for the scripted turns below to cross 80%
-const { runTurn, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
+const { runTurn, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 assert.match(html, /x-anthropic-key/);
@@ -228,11 +228,6 @@ const kept = histCloseOpenCalls([{ type: 'reasoning', summary: [] }], { keepReas
 assert.equal(kept[0].type, 'reasoning');
 
 assert.deepEqual(parseCaseUrl('http://cased:8787'), { hostname: 'cased', port: 8787, protocol: 'http:' });
-assert.equal(isLocalMode({ CASE_LOCAL: '1' }, 'example.com'), true);
-assert.equal(isLocalMode({ CASE_LOCAL: '0' }, '127.0.0.1'), false);
-assert.equal(isLocalMode({}, '127.0.0.1'), true);
-assert.equal(isLocalMode({}, 'cased'), true);
-assert.equal(isLocalMode({}, 'remote.example'), false);
 assert.equal(liveCid('/live/c_abc12/vnc.html'), 'c_abc12');
 assert.equal(liveCid('/live/vnc.html'), '');
 assert.equal(liveDestPath('/live/c_abc12/vnc.html?autoconnect=1'), '/vnc.html?autoconnect=1');

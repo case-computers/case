@@ -328,7 +328,7 @@ Start cased, then Drive:
 
 ```bash
 bin/case up
-CASE_LOCAL=1 CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
+CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
 ```
 
 Open the [computers page](http://127.0.0.1:4174/deploy). Drive runs in the

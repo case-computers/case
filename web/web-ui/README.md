@@ -13,8 +13,7 @@ choice (the DRIVE button, stored in `localStorage['case.drive.computer']`).
 Drive never switches computers on its own: landing on the wrong desk means
 landing in someone else's sessions, so a missing pick says so and stops.
 
-**Transport:** `CASE_LOCAL=1` (default when `CASE_URL` is loopback or compose
-`cased`). Talks to cased on `CASE_URL` — no SSH tunnel. Compose sets
+**Transport:** talks to cased on `CASE_URL` — no SSH tunnel. Compose sets
 `http://cased:8787/v1`. `/live/<id>/…` proxies to cased
 `/v1/computers/<id>/live/…`, which relays noVNC: Drive is not on the desks
 network and never dials a desktop itself.
