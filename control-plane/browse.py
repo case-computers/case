@@ -214,6 +214,14 @@ def _stamp(row):
         return False
 
 
+def _snapshot_or_none(row):
+    # the action already happened; a snapshot lost to navigation churn is no reason to raise
+    try:
+        return snapshot(row)
+    except ApiError:
+        return None
+
+
 def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
     """The page as it stands once the action stops moving it."""
     if not stamped:
@@ -229,10 +237,7 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
                 continue
             if r.get("value") == "complete":
                 break
-        try:
-            return snapshot(row)
-        except ApiError:
-            return None
+        return _snapshot_or_none(row)
     deadline = time.time() + budget_s
     grace = time.time() + settle_s
     while time.time() < deadline:
@@ -248,18 +253,15 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
             break
         navigated, ready = v[0], v[1]
         if navigated and ready == "complete":
-            return snapshot(row)
+            return _snapshot_or_none(row)
         if not navigated and time.time() >= grace:
-            fresh = snapshot(row)
+            fresh = _snapshot_or_none(row)
             try:
                 eval_js(row, f"delete {_STAMP}", 3)
             except ApiError:
                 pass
             return fresh
-    try:
-        return snapshot(row)
-    except ApiError:
-        return None
+    return _snapshot_or_none(row)
 
 
 def _attach_snapshot(row, res, want, stamped):

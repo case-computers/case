@@ -421,6 +421,20 @@ def test_click_that_changes_nothing_still_returns_the_current_page():
     assert any(UNSTAMP in c for c in browse.eval_js.calls), browse.eval_js.calls
 
 
+def test_click_survives_a_snapshot_lost_to_navigation():
+    # the OS click already fired; a 502 while snapshotting must not turn it into an error
+    browse.eval_js = fake_eval_map({
+        LOCATE: [{"ok": True, "value": {"ok": True, "name": "Go", "tag": "div", "x": 1, "y": 2}}],
+        STAMP: [{"ok": True, "value": 1}],
+        POLL: [{"ok": True, "value": [True, "complete"]}],
+        SNAP: [ApiError(502, "eval_error", "Target closed")],
+    })
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Go")
+    assert out["ok"] and out["clicked"] == "Go", out
+    assert "snapshot" not in out, out
+
+
 def test_click_snapshot_can_be_turned_off():
     browse.eval_js = fake_eval({"ok": True, "value": {"ok": True, "name": "n", "tag": "a",
                                                       "x": 1, "y": 2}})
