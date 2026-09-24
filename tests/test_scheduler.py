@@ -385,6 +385,54 @@ def test_run_schedule_sleeps_only_when_it_woke_and_no_auth():
     assert rec.get("status") == "ok", rec
 
 
+def test_a_run_does_not_sleep_the_box_under_another_schedule():
+    # A woke the box, B started on it while A ran; A's cleanup used to sleep it
+    # under B. The last run out sleeps it instead.
+    import threading
+    import time
+    import unittest.mock as mock
+    import scheduler
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    state, seen = {"c_two": "asleep"}, []
+    for sid in ("sch_A", "sch_B"):
+        store.insert_schedule(sid, "c_two", sid, "p", "interval", "3600", 0,
+                              "2020-01-01T00:00:00Z")
+    b_started, a_done = threading.Event(), threading.Event()
+
+    def brain(cid, prompt, name=""):
+        if name == "sch_A":
+            b_started.wait(2)
+        else:
+            b_started.set()
+            a_done.wait(2)
+            seen.append(state[cid])
+        return 0, "ok"
+
+    def run_a():
+        scheduler.run_schedule("sch_A")
+        a_done.set()
+
+    with mock.patch.object(scheduler, "get_computer", lambda cid: {"id": cid, "state": state[cid]}), \
+         mock.patch.object(scheduler, "do_wake", lambda cid: state.update({cid: "running"})), \
+         mock.patch.object(scheduler, "do_sleep", lambda cid: state.update({cid: "asleep"})), \
+         mock.patch.object(scheduler, "run_brain", brain), \
+         mock.patch.object(scheduler, "capture_run_artifacts", lambda *a, **k: None), \
+         mock.patch.object(scheduler.notifier, "push"), \
+         mock.patch.object(scheduler, "emit"):
+        ta = threading.Thread(target=run_a)
+        ta.start()
+        while state["c_two"] != "running":     # B borrows a box A already woke
+            time.sleep(0.01)
+        tb = threading.Thread(target=scheduler.run_schedule, args=("sch_B",))
+        tb.start()
+        ta.join(5)
+        tb.join(5)
+    assert seen == ["running"], seen             # B still had its box after A finished
+    assert state["c_two"] == "asleep"            # and the last one out put it back
+    assert scheduler._HOLDERS == {}
+
+
 def test_ram_tight_box_is_a_skip_too():
     import scheduler
     from errors import ApiError

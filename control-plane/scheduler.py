@@ -34,6 +34,9 @@ from util import new_id, now
 
 SCHED_RUNNING = set()   # in-memory guard, fine while one cased process runs
 _LOCK = threading.Lock()   # guards the check-then-add on SCHED_RUNNING (sweeper vs run-now)
+# computer_id -> [runs using it, whether one of them woke it]. Two schedules can share
+# a box, and the one that woke it must not sleep it under the other: the last one out does.
+_HOLDERS = {}
 
 
 def _wall_exists(t, hh, mm):
@@ -220,6 +223,8 @@ def run_schedule(sid):
         # Only the run that woke an asleep box may put it back, never borrow a live session
         # (and never sleep under an active AuthAttempt; do_sleep also 409s as a belt).
         woke_for_run = False
+        with _LOCK:
+            _HOLDERS.setdefault(cid, [0, False])[0] += 1
         try:
             if bad:
                 raise bad
@@ -245,11 +250,17 @@ def run_schedule(sid):
             summary = f"{type(e).__name__}: {e}"
             log.exception("schedule %s run failed", sid)
         finally:
-            try:
-                if woke_for_run and not store.active_attempt_exists(cid):
-                    do_sleep(cid)
-            except Exception:
-                log.exception("sleep after schedule %s", sid)
+            with _LOCK:            # held through the sleep: a run starting now waits, then wakes
+                held = _HOLDERS[cid]
+                held[0] -= 1
+                held[1] = held[1] or woke_for_run
+                if not held[0]:
+                    del _HOLDERS[cid]
+                    try:
+                        if held[1] and not store.active_attempt_exists(cid):
+                            do_sleep(cid)
+                    except Exception:
+                        log.exception("sleep after schedule %s", sid)
             store.insert_run(rid, sid, cid, started, now(), code, summary, artifact, status)
             store.set_schedule_result(sid, started, status)
             shot = " 📸" if artifact else ""
