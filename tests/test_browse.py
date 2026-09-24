@@ -10,6 +10,8 @@ _helpers.isolated_home()
 import browse  # noqa: E402
 from errors import ApiError  # noqa: E402
 
+browse.time = _helpers.FakeClock()
+
 ROW = {"desk_port": 1, "desk_token": "t"}
 ELS = [
     {"tag": "a", "type": "", "name": "Home", "value": "", "href": "/"},

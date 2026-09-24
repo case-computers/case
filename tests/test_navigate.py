@@ -8,6 +8,8 @@ _helpers.isolated_home()
 import deskclient  # noqa: E402
 from errors import ApiError  # noqa: E402
 
+deskclient.time = _helpers.FakeClock()
+
 ROW = {"desk_port": 1, "desk_token": "t"}
 OK = {"ok": True, "value": None}
 

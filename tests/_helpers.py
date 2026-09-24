@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -64,6 +65,21 @@ def load_case_mcp(**env):
         os.environ.pop(k, None)
     os.environ.update(env)
     return importlib.reload(importlib.import_module("case_mcp"))
+
+
+class FakeClock:
+    """Stands in for a module's `time`: sleep() moves the clock on instead of waiting."""
+
+    def __init__(self):
+        self.now = time.time()
+
+    def time(self):
+        return self.now
+
+    monotonic = time
+
+    def sleep(self, seconds):
+        self.now += seconds
 
 
 def run_tests(namespace):
