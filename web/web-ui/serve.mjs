@@ -727,7 +727,18 @@ function turnTail(items, budget) {
  *  turn pays to re-send on every round. A short turn is nowhere near `max`, so a
  *  follow-up like "click the blue one" still has its snapshot to work from. */
 export function histTrim(h, max = HIST_MAX) {
-  const over = () => JSON.stringify(h.items).length > max;
+  // Per-item sizes plus brackets and commas add up to JSON.stringify(h.items).length
+  // without re-serializing the whole history on every pass.
+  const size = (it) => (JSON.stringify(it) ?? 'null').length;
+  const sizes = h.items.map(size);
+  let sum = sizes.reduce((a, n) => a + n, 0);
+  const over = () => sum + Math.max(h.items.length - 1, 0) + 2 > max;
+  const splice = (at, n, add = []) => {
+    const added = add.map(size);
+    for (const g of sizes.splice(at, n, ...added)) sum -= g;
+    for (const g of added) sum += g;
+    h.items.splice(at, n, ...add);
+  };
   let starts = turnStarts(h.items);
   for (let k = 0; k < starts.length && over(); k++) {
     const [a, b] = [starts[k], starts[k + 1] ?? h.items.length];
@@ -747,11 +758,11 @@ export function histTrim(h, max = HIST_MAX) {
     const comp = body.filter((it) => it.type === 'compaction' && !keep.includes(it));
     const kept = [{ ...turn[0], content: clip(turn[0].content, PROMPT_KEEP) }, ...comp, ...keep];
     if (kept.length === turn.length) continue;
-    h.items.splice(a, b - a, ...kept);
+    splice(a, b - a, kept);
     starts = turnStarts(h.items);
   }
   while (starts.length > 1 && over()) {
-    h.items.splice(0, starts[1]);
+    splice(0, starts[1]);
     starts = turnStarts(h.items);
   }
 }
