@@ -910,6 +910,28 @@ def test_auth_submit_challenge_rejects_foreign_https_without_query_secret():
     assert "topsecret" not in out["reason"]
     apply.assert_not_called()
 
+
+def test_auth_submit_challenge_refused_code_is_not_ok_and_keeps_the_login_held():
+    held = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    deskd.state["login"], deskd.state["in_login"] = dict(held), True
+    tab = FakeTab(text="Invalid code. Enter the verification code", href="https://site.com/otp")
+    tab.close = lambda: None
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+        out = deskd.auth_submit_challenge({"kind": "otp", "value": "000000",
+                                           "domains": ["site.com"]})
+    assert out["ok"] is False and "Invalid code" in out["reason"], out
+    assert deskd.state["login"] == held and deskd.state["in_login"] is True
+
+    tab = FakeTab(text="Welcome back", href="https://site.com/home")
+    tab.close = lambda: None
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+        out = deskd.auth_submit_challenge({"kind": "otp", "value": "123456",
+                                           "domains": ["site.com"]})
+    assert out == {"ok": True}, out
+    assert deskd.state["login"] is None and deskd.state["in_login"] is False
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

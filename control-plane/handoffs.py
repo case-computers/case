@@ -371,19 +371,19 @@ def submit_handoff_value(hid, value):
         # Durable attempt: prefer generic challenge submit (works after prior resume
         # cleared deskd state["login"]); fall back to /login/resume while held.
         computer = get_computer(row["computer_id"])
-        submitted = False
+        out = None
         try:
             attempt = store.get_auth_attempt(aid)
             credential = store.get_credential(row["computer_id"], attempt["credential"])
             domains = json.loads(credential["domains"]) if credential else []
             out = auth_submit_challenge(computer, row["kind"], value=value, domains=domains)
-            submitted = bool(isinstance(out, dict) and out.get("ok"))
         except Exception as e:
             log.warning("auth_submit_challenge failed: %s", e)
-            submitted = False
-        if submitted:
+        if isinstance(out, dict) and out.get("ok"):
             return _finish_attempt_child(hid, row, answer=value, value_present=True, ctx=None)
-        if ctx:
+        # deskd already refused this code (the page kept its code wall, or the origin
+        # check failed); /login/resume would only type the same code again.
+        if ctx and not (row["kind"] == "otp" and isinstance(out, dict)):
             return _resume_and_finish(hid, ctx, value, value_present=True, hrow=row)
         # Soft fail, stay pending for retry; never keep the OTP in SQLite.
         store.transition_handoff(hid, "pending", answer=None)

@@ -913,8 +913,11 @@ def auth_submit_challenge(b: dict = Body(...)):
                 return err(400, "bad_request", "body needs 'value' for otp/code")
             if reason and reason.startswith("unknown challenge kind"):
                 return err(400, "bad_request", reason)
+            if not reason and str(kind).lower() in ("otp", "code"):
+                reason = code_refused(tab)
             if reason:
                 return {"ok": False, "reason": reason}
+            state["login"] = None   # the challenge a /login was held on is answered
             return {"ok": True}
         finally:
             tab.close()
@@ -922,7 +925,8 @@ def auth_submit_challenge(b: dict = Body(...)):
         return {"ok": False, "reason": f"submit_challenge error: {type(e).__name__}: {e}"}
     finally:
         inject_end()
-        state["in_login"] = False
+        if not state["login"]:
+            state["in_login"] = False
 
 
 @app.post("/auth/navigate_verification")

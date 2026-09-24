@@ -372,6 +372,28 @@ def test_bad_code_stays_pending_same_challenge():
         assert call.args[2] != "success", call
 
 
+def test_refused_code_is_not_typed_again_through_resume():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "cred", "https://example.com/login")
+    store.cas_auth_attempt_status(a["id"], "created", "awaiting_human", 0)
+    store.insert_handoff(
+        "h_bad", "c_1", "otp", "enter code", None, "cred",
+        continuation="submit_value", attempt_id=a["id"], sequence=1, revision=0)
+    store.set_attempt_handoff(a["id"], "h_bad")
+    handoffs.LOGIN_CTX["h_bad"] = {"computer_id": "c_1", "credential": "cred"}
+
+    with mock.patch.object(handoffs, "get_computer", return_value=COMP), \
+         mock.patch.object(handoffs, "auth_submit_challenge",
+                           return_value={"ok": False, "reason": "Invalid code"}) as submit, \
+         mock.patch.object(handoffs, "desk_json") as desk, \
+         mock.patch("auth_attempts.advance_attempt") as adv:
+        row = handoffs.submit_handoff_value("h_bad", "000000")
+    assert row["status"] == "pending", dict(row)
+    submit.assert_called_once()
+    desk.assert_not_called()
+    adv.assert_not_called()
+
+
 def test_list_helpers_and_set_handoff():
     _cleanup()
     a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
