@@ -3,6 +3,23 @@
 # PID 1 of a case-desk container. Brings up display, window manager, VNC, Chromium, deskd.
 # Traps SIGTERM (docker stop = sleep) so Chromium exits cleanly and flushes its profile.
 
+# Installed before anything starts: PID 1 ignores a TERM it has no handler for.
+# Every step is a no-op for what has not started yet. The whole thing fits in
+# the 10s docker stop gives it (3 + 4 + 2), or the pkill fallback never runs.
+term() {
+  kill "$CHROME_PID" 2>/dev/null                     # stop the respawn loop first
+  # Browser.close = graceful shutdown that persists fresh cookies; SIGTERM alone
+  # is chromium's fast path and loses anything newer than the last commit batch
+  curl -s -m 3 -X POST -H "Authorization: Bearer $DESK_TOKEN" \
+    http://localhost:8000/quiesce >/dev/null 2>&1
+  for _ in $(seq 1 20); do pgrep -f 'chrome-profile' >/dev/null || break; sleep 0.2; done
+  pkill -TERM -f 'chrome-profile' 2>/dev/null        # fallback if CDP was unreachable
+  for _ in $(seq 1 10); do pgrep -f 'chrome-profile' >/dev/null || break; sleep 0.2; done
+  kill -TERM "$DESKD_PID" "$XVFB_PID" 2>/dev/null
+  exit 0
+}
+trap term TERM INT
+
 RES="${DESK_RESOLUTION:-1280x800x24}"
 # Xvfb needs WxHxD and dies on bare WxH; depth 24 is the only one deskd's
 # XWD->PNG grab supports (32bpp), so it is appended, and replaces any other.
@@ -112,19 +129,5 @@ CHROME_PID=$!
 
 /opt/deskd/bin/python /opt/deskd/deskd.py &
 DESKD_PID=$!
-
-term() {
-  kill "$CHROME_PID" 2>/dev/null                     # stop the respawn loop first
-  # Browser.close = graceful shutdown that persists fresh cookies; SIGTERM alone
-  # is chromium's fast path and loses anything newer than the last commit batch
-  curl -s -m 6 -X POST -H "Authorization: Bearer $DESK_TOKEN" \
-    http://localhost:8000/quiesce >/dev/null 2>&1
-  for _ in $(seq 1 40); do pgrep -f 'chrome-profile' >/dev/null || break; sleep 0.2; done
-  pkill -TERM -f 'chrome-profile' 2>/dev/null        # fallback if CDP was unreachable
-  for _ in $(seq 1 10); do pgrep -f 'chrome-profile' >/dev/null || break; sleep 0.2; done
-  kill -TERM "$DESKD_PID" "$XVFB_PID" 2>/dev/null
-  exit 0
-}
-trap term TERM INT
 
 wait "$DESKD_PID"
