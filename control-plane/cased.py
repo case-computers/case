@@ -621,8 +621,9 @@ def delete_credential(cid: str, name: str):
 
 # ---------- human links (fill + desk) ----------
 # Minted URLs are the only human auth on a box: no accounts, no sessions.
-# Minting stays loopback-only (bin/case), because the agent's token must not
-# be able to answer handoffs or mint its own links.
+# Minting is an ordinary route behind CASE_TOKEN, not a loopback-only one (Drive
+# mints over the compose network), so any caller holding that token, the
+# agent's included, can mint links and answer handoffs.
 
 @app.post("/v1/computers/{cid}/links", status_code=201)
 def mint_link(cid: str, body: dict = Body(...)):
