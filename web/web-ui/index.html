@@ -929,6 +929,7 @@ async function openThread(tid){
       inner.appendChild(art);
     }
     log.scrollTop=log.scrollHeight;
+    if(promptQ.length&&queuedThread(promptQ[0],'')===tid)drainQ(tid);
   }catch{
     if(gen===threadGen)inner.innerHTML='<div class="empty">cannot reach the drive server</div>';
   }
@@ -1463,6 +1464,17 @@ function steerTarget(run,active){return run&&run!=='__pending'&&run===active?run
 function queuedThread(item,ran){
   return item&&typeof item==='object'&&typeof item.tid==='string'&&item.tid!=='__pending'?item.tid:ran;
 }
+/* Send the next queued prompt to the thread it was typed into, never to whatever is
+   on screen. A thread that has to load first drains from openThread once it is up;
+   pick another meanwhile and the prompt stays queued until its thread is opened. */
+function drainQ(ran){
+  if(chatCtl||!promptQ.length)return;
+  const to=queuedThread(promptQ[0],ran);
+  if(to&&to!==activeTid){openThread(to);return;}
+  const n=promptQ.shift();paintQ();
+  if(!to&&activeTid)newTask();
+  sendPrompt(n);
+}
 /* Mid-turn message: try to inject into the running turn; fall back to the
    local queue if the turn just ended (409) or the server is unreachable. */
 async function steerPrompt(t){
@@ -1598,6 +1610,7 @@ async function sendPrompt(t,files){
           }
           if(activeTid==='__pending')activeTid=ev.thread_id;
           if(runTid==='__pending')runTid=ev.thread_id;
+          for(const p of promptQ)if(p&&p.tid==='__pending')p.tid=ev.thread_id;
         }
         else if(ev.type==='claim'&&ev.thread_id){claimThread(ev.thread_id,ev.agent);}
         else if(ev.type==='round'){mark={raw,think:thinkEl.textContent,tools:toolsEl.children.length};}
@@ -1642,14 +1655,7 @@ async function sendPrompt(t,files){
     const ran=runTid!=='__pending'?runTid:'';
     runTid='';
     refresh(); // state may have changed (wake on first tool); threads re-sync too
-    // A queued prompt goes to the thread it was typed into, whatever is on screen now.
-    if(promptQ.length){
-      const n=promptQ.shift();paintQ();
-      const to=queuedThread(n,ran);
-      if(to===activeTid)sendPrompt(n);
-      else if(!to){newTask();sendPrompt(n);}
-      else openThread(to).then(()=>{if(chatCtl){promptQ.unshift(n);paintQ();}else sendPrompt(n);});
-    }
+    drainQ(ran);
   }
 }
 

@@ -40,6 +40,15 @@ fs.writeFileSync(mod, `
   ${grab('navHtml')}
   ${grab('steerTarget')}
   ${grab('queuedThread')}
+  // drainQ against a fake page: opening a thread is recorded, not loaded
+  let chatCtl = null;
+  const promptQ = [], calls = [];
+  const paintQ = () => {};
+  const newTask = () => { calls.push('new'); activeTid = ''; };
+  const sendPrompt = (n) => calls.push('send ' + n.text + ' to ' + (activeTid || 'new'));
+  const openThread = (t) => { calls.push('open ' + t); activeTid = t; };
+  ${grab('drainQ')}
+  export const fake = { promptQ, calls, drainQ, view: (t) => { activeTid = t; } };
   export const set = (s) => {
     apiUp = s.apiUp ?? true;
     comps = s.comps || [];
@@ -99,6 +108,23 @@ assert(nav.queuedThread({ text: 'x', tid: '' }, 't1') === '', 'a prompt typed in
 assert(nav.queuedThread({ text: 'x', tid: 't2' }, 't1') === 't2', 'a prompt typed into another thread goes there');
 assert(nav.queuedThread({ text: 'x', tid: '__pending' }, 't1') === 't1', 'typed while the thread was being born: the one that ran');
 assert(nav.queuedThread('x', 't1') === 't1', 'a queue item with no thread belongs to the turn that ran');
+
+// A queued prompt is sent only into the thread it was typed into: if another thread
+// is picked while that one loads, it waits instead of landing in the new pick.
+const { fake } = nav;
+fake.view('t1');
+fake.promptQ.push({ text: 'hi', files: [], tid: 't2' });
+fake.drainQ('t1');
+assert(fake.calls.join() === 'open t2', 'a prompt for another thread opens it first');
+fake.view('t3');                                   // clicked away while t2 loaded
+assert(fake.promptQ.length === 1, 'and does not send while that thread is not on screen');
+fake.view('t2');                                   // t2 finished loading: openThread drains
+fake.drainQ('t2');
+assert(fake.calls.join() === 'open t2,send hi to t2', 'it goes to t2 once t2 is up');
+fake.calls.length = 0;
+fake.promptQ.push({ text: 'fresh', files: [], tid: '' });
+fake.drainQ('t2');
+assert(fake.calls.join() === 'new,send fresh to new', 'a prompt typed into a new task starts one');
 
 if (failed) {
   console.error(`\n${failed} failed`);
