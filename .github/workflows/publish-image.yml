@@ -91,15 +91,17 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
 
       - name: One manifest for both arches
+        env:
+          META_JSON: ${{ steps.meta.outputs.json }}
         run: |
           cd /tmp/digests
           # shellcheck disable=SC2046
           docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$META_JSON") \
             $(printf '${{ env.IMAGE }}@sha256:%s ' *)
 
       - name: Show what landed
