@@ -65,9 +65,12 @@ const out = await withRateRetry(async () => {
 }, (ev) => seen.push(ev));
 assert.equal(out, 'round done');
 assert.equal(calls, 3);
-assert.equal(seen.length, 2, 'one notice per wait');
-assert.ok(seen.every((e) => e.type === 'think' && e.rate === true), 'notices carry rate:true so headless consumers can log them');
-assert.match(seen[0].text, /rate limited — retrying in 1s/);
+// a replay re-streams the round: the UI is told where it began and to drop the
+// failed attempt's partial output before each retry
+assert.deepEqual(seen.map((e) => e.type), ['round', 'round_reset', 'think', 'round_reset', 'think']);
+const notes = seen.filter((e) => e.type === 'think');
+assert.ok(notes.every((e) => e.rate === true), 'notices carry rate:true so headless consumers can log them');
+assert.match(notes[0].text, /rate limited — retrying in 1s/);
 
 // a transient 5xx is retried the same way, and the notice does not call it a rate limit
 {
@@ -79,7 +82,7 @@ assert.match(seen[0].text, /rate limited — retrying in 1s/);
     return 'ok';
   }, (ev) => notes.push(ev));
   assert.equal(r, 'ok');
-  assert.match(notes[0].text, /^provider error — retrying in 1s/);
+  assert.match(notes.find((e) => e.type === 'think').text, /^provider error — retrying in 1s/);
 }
 
 // retries do run dry — the caller has to see the error, not hang forever
@@ -101,7 +104,7 @@ assert.equal(calls, 3, 'tries is a hard cap');
       const err = new Error('rate limited');
       err.status = 429;
       throw err;
-    }, () => ctl.abort(), 5, ctl.signal),
+    }, (e) => { if (e.type === 'think') ctl.abort(); }, 5, ctl.signal),
     (err) => err?.name === 'AbortError',
   );
   assert.equal(n, 1, 'disconnect stops retries before another provider request');

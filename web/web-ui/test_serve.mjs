@@ -495,6 +495,10 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(loopFn, /if \(!stopped\(\)\) emit\(\{ type: 'error'/);
   assert.match(html, /\/api\/chat\/steer/);
   assert.match(html, /steerPrompt/);
+  assert.match(html, /ev\.type==='round'\)\{mark=/, 'the UI marks where each provider round began');
+  assert.match(html, /ev\.type==='round_reset'&&mark/, 'and drops a failed round\'s partial output on replay');
+  assert.match(caseToolsSrc, /emit\(\{ type: 'round_reset' \}\);\n      result = await withRateRetry\(\(\) => round\(rest\)/,
+    'the output_config fallback replays the round too');
   assert.match(loopFn, /eff=\$\{eff\}/, 'turn log reports billed tokens, not nominal');
   assert.match(serveSrc, /p === '\/api\/attach'/, 'user files land on disk, not in the chat body');
   assert.match(fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8'),

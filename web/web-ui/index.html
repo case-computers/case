@@ -1498,6 +1498,7 @@ async function sendPrompt(t,files){
   const toolsEl=reply.querySelector('.tool-block');
   const pEl=reply.querySelector('.pmsg');
   let raw='';
+  let mark=null;   // render state when the provider round began; round_reset returns to it
   const caret=caretEl();
   const setText=t=>{raw=t;pEl.innerHTML=md(raw);pEl.appendChild(caret);};  // machine types
   const addText=t=>setText(raw+t);
@@ -1578,6 +1579,11 @@ async function sendPrompt(t,files){
           if(activeTid==='__pending')activeTid=ev.thread_id;
         }
         else if(ev.type==='claim'&&ev.thread_id){claimThread(ev.thread_id,ev.agent);}
+        else if(ev.type==='round'){mark={raw,think:thinkEl.textContent,tools:toolsEl.children.length};}
+        else if(ev.type==='round_reset'&&mark){
+          setText(mark.raw);thinkEl.textContent=mark.think;
+          while(toolsEl.children.length>mark.tools)toolsEl.lastChild.remove();
+        }
         else if(ev.type==='think_delta'&&ev.text){thinkBlock.classList.add('has');thinkEl.textContent+=ev.text;}
         else if(ev.type==='think'&&ev.text){thinkBlock.classList.add('has');thinkEl.textContent+=(thinkEl.textContent?'\n\n':'')+ev.text;}
         else if(ev.type==='tool'||ev.type==='tool_args'){fillTool(toolRow(ev),ev);}

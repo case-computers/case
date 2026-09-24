@@ -408,8 +408,9 @@ export function rateWaitS(err, a) {
 }
 
 /** Retry a provider round on rate limits (429/529) and transient faults,
- * honoring the server's suggested wait. History is only mutated after a round completes, so replaying
- * a failed round is safe. `signal` cancels the backoff sleep on STOP. */
+ * honoring the server's suggested wait. History is only mutated after a round
+ * completes, so replaying a failed round is safe. `signal` cancels the backoff
+ * sleep on STOP. */
 function abortError(signal) {
   if (signal?.reason instanceof Error) return signal.reason;
   const err = new Error(signal?.reason ? String(signal.reason) : 'stopped by user');
@@ -437,6 +438,9 @@ function abortableDelay(ms, signal) {
 }
 
 export async function withRateRetry(fn, emit, tries = 5, signal) {
+  // What was streamed is not replay-safe: a round that fails mid-stream has already
+  // emitted text and tool rows. `round` marks its start, `round_reset` rolls back to it.
+  emit?.({ type: 'round' });
   for (let a = 0; ; a++) {
     if (signal?.aborted) throw abortError(signal);
     try { return await fn(); }
@@ -445,6 +449,7 @@ export async function withRateRetry(fn, emit, tries = 5, signal) {
       if (!isRetryable(err) || a >= tries - 1) throw err;
       const wait = rateWaitS(err, a);
       const why = isRateLimited(err) ? 'rate limited' : 'provider error';
+      emit?.({ type: 'round_reset' });
       // `rate: true` so a non-UI consumer can pick the wait out of the think stream.
       emit?.({ type: 'think', rate: true, text: `${why} — retrying in ${Math.ceil(wait)}s` });
       await abortableDelay(wait * 1000, signal);
@@ -517,6 +522,7 @@ export async function anthropicToolLoop({
       if (!params.output_config || isRetryable(err)) throw err;
       const rest = { ...params };
       delete rest.output_config;
+      emit({ type: 'round_reset' });
       result = await withRateRetry(() => round(rest), emit, 5, signal);
     }
     const { message, traces, textDelta } = result;
