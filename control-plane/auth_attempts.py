@@ -409,15 +409,17 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
                     challenge_fingerprint=None, expected_revision=None):
     """Bind a child handoff and move the attempt to awaiting_human."""
     row = _require(attempt_id)
-    row, rev = _ensure_advancing(row, expected_revision)
+    if row["status"] == "proving":
+        raise ApiError(409, "illegal_transition", "cannot raise a challenge while proving")
     # One pending/validating child at a time.
-    if row["current_handoff_id"]:
-        cur = store.get_handoff(row["current_handoff_id"])
-        if cur and cur["status"] in HANDOFF_LIVE:
-            # Ensure status is awaiting_human if we somehow still hold a live child.
-            if row["status"] == "advancing":
-                return _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
-            return attempt_public(row)
+    cur = store.get_handoff(row["current_handoff_id"]) if row["current_handoff_id"] else None
+    live = cur is not None and cur["status"] in HANDOFF_LIVE
+    if live and row["status"] == "awaiting_human" and (
+            expected_revision is None or int(expected_revision) == int(row["revision"] or 0)):
+        return attempt_public(row)
+    row, rev = _ensure_advancing(row, expected_revision)
+    if live:
+        return _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
 
     from deskclient import screenshot_b64  # cycle: handoffs → auth_attempts → deskclient
     from handoffs import create_handoff  # cycle: handoffs → auth_attempts
@@ -439,9 +441,14 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
     store.set_attempt_handoff(attempt_id, h["id"])
     # Pointer can change before the awaiting_human CAS; wake waiters early.
     _publish_updated(attempt_public(store.get_auth_attempt(attempt_id)))
+    try:
+        pub = _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
+    except ApiError:
+        _close_child(h["id"], "failed")   # a cancel or fail won the race; no orphan
+        raise
     # Provisional vault health, definitive answer arrives on prove/fail/expire.
     store.record_credential_result(row["computer_id"], row["credential"], "challenge")
-    return _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
+    return pub
 
 
 def fail_attempt(attempt_id, reason=None, expected_revision=None):

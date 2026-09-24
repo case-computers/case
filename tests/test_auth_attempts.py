@@ -175,6 +175,52 @@ def test_every_terminal_attempt_closes_its_live_child():
         assert "h_live" not in handoffs.LOGIN_CTX, end
 
 
+def test_raise_challenge_while_proving_creates_no_handoff():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    store.cas_auth_attempt_status(a["id"], "created", "proving", 0)
+    with mock.patch("handoffs.create_handoff") as create:
+        _raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
+                "illegal_transition")
+    create.assert_not_called()
+
+
+def test_raise_challenge_losing_to_a_cancel_leaves_no_pending_child():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    real_create = handoffs.create_handoff
+
+    def create_then_cancel(*args, **kw):
+        h = real_create(*args, **kw)
+        auth_attempts.cancel_attempt(a["id"])   # read the attempt before the pointer moved
+        return h
+
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.screenshot_b64", return_value=None), \
+         mock.patch("handoffs.create_handoff", side_effect=create_then_cancel):
+        _raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
+                "revision_conflict")
+    rows = store.all("SELECT id, status FROM handoffs")
+    assert [r["status"] for r in rows] == ["failed"], [dict(r) for r in rows]
+    assert not handoffs.LOGIN_CTX, handoffs.LOGIN_CTX
+
+
+def test_repeat_raise_challenge_with_a_live_child_changes_nothing():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    store.cas_auth_attempt_status(a["id"], "created", "awaiting_human", 0)
+    store.insert_handoff("h_live", "c_1", "otp", "enter code", None, "github",
+                         continuation="submit_value", attempt_id=a["id"], sequence=1)
+    store.set_attempt_handoff(a["id"], "h_live")
+    with mock.patch("events.emit") as emit, \
+         mock.patch("handoffs.create_handoff") as create:
+        out = auth_attempts.raise_challenge(a["id"], "otp", "code?")
+    assert out["status"] == "awaiting_human" and out["revision"] == 1, out
+    assert out["current_handoff_id"] == "h_live"
+    create.assert_not_called()
+    emit.assert_not_called()
+
+
 def test_claim_challenge_cas():
     _cleanup()
     store.insert_handoff(
