@@ -249,7 +249,10 @@ def exec_(b: dict = Body(...)):
         return r
     if "command" not in b:
         return err(400, "bad_request", "command required")
-    timeout = min(int(b.get("timeout_s", 30)), 600)
+    try:
+        timeout = min(int(b.get("timeout_s", 30)), 600)
+    except (TypeError, ValueError):
+        return err(400, "bad_request", "timeout_s must be an integer")
     cwd = b.get("cwd", "/home/agent")
     try:
         # own session, so a timeout kills the whole command and not just bash
@@ -294,8 +297,11 @@ async def file_put(request: Request, path: str):
     p = home_path(path)
     if not p:
         return err(400, "bad_path", f"path must be under {HOME}/")
-    if int(request.headers.get("content-length") or 0) > FILE_MAX:
-        return err(413, "too_large", f"file over {FILE_MAX} bytes")
+    try:
+        if int(request.headers.get("content-length") or 0) > FILE_MAX:
+            return err(413, "too_large", f"file over {FILE_MAX} bytes")
+    except ValueError:
+        return err(400, "bad_request", "bad content-length")
     data = bytearray()
     async for chunk in request.stream():
         if len(data) + len(chunk) > FILE_MAX:
@@ -363,7 +369,9 @@ class Tab:
 
 
 def navigate(tab, url, timeout=25):
-    tab.cmd("Page.navigate", url=url)
+    # a DNS or TLS failure lands on chrome-error://, which would read as a foreign origin
+    if (e := tab.cmd("Page.navigate", url=url).get("errorText")):
+        raise RuntimeError(f"navigation failed: {e}")
     t0 = time.time()
     while time.time() - t0 < timeout:
         if tab.js("document.readyState") == "complete":
@@ -436,7 +444,10 @@ def eval_(b: dict = Body(...)):
         return r
     if "expression" not in b:
         return err(400, "bad_request", "body needs 'expression'")
-    timeout = min(int(b.get("timeout_s", 20)), 120)
+    try:
+        timeout = min(int(b.get("timeout_s", 20)), 120)
+    except (TypeError, ValueError):
+        return err(400, "bad_request", "timeout_s must be an integer")
     try:
         tab = Tab()
         try:
@@ -768,6 +779,8 @@ def apply_challenge_action(tab, kind, value=None):
 
 @app.post("/login")
 def login(b: dict = Body(...)):
+    if "credential" not in b or "url" not in b:
+        return err(400, "bad_request", "body needs 'credential' and 'url'")
     cred, url = b["credential"], b["url"]
     if not inject_begin(alone=True):
         return err(409, "injection_running", "another credential injection is running")
@@ -801,6 +814,8 @@ def login(b: dict = Body(...)):
 
 @app.post("/login/resume")
 def login_resume(b: dict = Body(...)):
+    if "value" not in b:
+        return err(400, "bad_request", "body needs 'value'")
     value = str(b["value"])
     ctx = state["login"]
     if not ctx:

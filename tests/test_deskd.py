@@ -610,6 +610,30 @@ def test_exec_passes_a_command_own_124_through():
     assert out["exit_code"] == 124 and "timed out" not in out["stderr"], out
 
 
+def test_bad_input_is_400_not_500():
+    c = _client()
+    for r in (c.post("/exec", headers=H, json={"command": "id", "timeout_s": "abc"}),
+              c.post("/eval", headers=H, json={"expression": "1", "timeout_s": None}),
+              c.put("/file", headers={**H, "content-length": "x"},
+                    params={"path": "/home/agent/x"}, content=b""),
+              c.post("/login", headers=H, json={"url": "https://site.com/login"}),
+              c.post("/login/resume", headers=H, json={})):
+        assert r.status_code == 400, (r.request.url, r.status_code, r.text)
+        assert r.json()["error"]["code"] == "bad_request"
+
+
+def test_navigate_surfaces_the_navigation_error():
+    # chromium parks a failed load on chrome-error://, which login then reported as
+    # a foreign origin instead of the DNS failure it was
+    tab = RecordingTab()
+    tab.cmd = lambda method, **p: {"frameId": "f", "errorText": "net::ERR_NAME_NOT_RESOLVED"}
+    with mock.patch.object(deskd, "Tab", lambda: tab):
+        out = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
+                           "url": "https://site.com/login"})
+    assert out == {"status": "failed", "reason": "login error: RuntimeError: "
+                   "navigation failed: net::ERR_NAME_NOT_RESOLVED"}, out
+
+
 def test_file_get_rejects_paths_outside_home():
     c = _client()
     assert c.get("/file", headers=H, params={"path": "/etc/passwd"}).status_code == 400
