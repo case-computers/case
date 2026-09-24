@@ -8,6 +8,7 @@ module on the host; the functions under test don't use it.
 import base64
 import os
 import sys
+import threading
 import types
 import unittest.mock as mock
 
@@ -664,6 +665,60 @@ def test_login_clears_password_field_while_still_gated():
     assert out == {"status": "success"}, out
     assert (deskd.CLEAR_PASS, True) in tab.js_calls, tab.js_calls
     assert deskd.state["injecting"] is False
+
+
+def test_overlapping_injections_keep_the_gate_closed():
+    # The first injecting route to finish used to set injecting False while another
+    # was still typing, and a second /login stomped the first one's state.
+    started, release = threading.Event(), threading.Event()
+
+    def apply(tab, kind, value=None):
+        if not started.is_set():
+            started.set()
+            release.wait(5)
+
+    deskd.state["login"] = {"kind": "approval", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    with mock.patch.object(deskd, "Tab", RecordingTab), \
+         mock.patch.object(deskd, "apply_challenge_action", apply):
+        resume = threading.Thread(target=deskd.login_resume, args=({"value": "approve"},))
+        resume.start()
+        try:
+            assert started.wait(5)
+            assert deskd.auth_submit_challenge({"kind": "approval"}) == {"ok": True}
+            r = _client().post("/exec", headers=H, json={"command": "echo leaked"})
+            assert r.status_code == 423, r.text
+            again = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
+                                 "url": "https://site.com/login"})
+            assert again.status_code == 409
+        finally:
+            release.set()
+            resume.join()
+    assert deskd.state["injecting"] is False and deskd.state["injections"] == 0
+
+
+class SlowEvalTab(RecordingTab):
+    """Runtime.evaluate whose promise is still pending while `during` runs."""
+
+    def __init__(self, during):
+        super().__init__()
+        self.ws = types.SimpleNamespace(settimeout=lambda t: None)
+        self.during = during
+
+    def cmd(self, method, **params):
+        self.during()
+        return {"result": {"value": "hunter2"}}
+
+
+def test_eval_started_before_an_injection_is_refused():
+    def inject():
+        deskd.inject_begin()
+        deskd.inject_end()
+    with mock.patch.object(deskd, "Tab", lambda: SlowEvalTab(inject)):
+        r = _client().post("/eval", headers=H, json={"expression": "pw.value"})
+    assert r.status_code == 423 and "hunter2" not in r.text, r.text
+    with mock.patch.object(deskd, "Tab", lambda: SlowEvalTab(lambda: None)):
+        r = _client().post("/eval", headers=H, json={"expression": "1"})
+    assert r.json() == {"ok": True, "value": "hunter2", "truncated": False}, r.text
 
 
 def test_login_rejects_http_redirect_before_form_fill():

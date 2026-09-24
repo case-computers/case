@@ -34,6 +34,8 @@ app = FastAPI()
 
 state = {
     "injecting": False,   # screenshots 423 while true
+    "injections": 0,      # injecting routes in flight; injecting is injections > 0
+    "inject_gen": 0,      # bumped as each injection starts, see injected_since
     "login": None,        # pending challenge ctx for /login/resume
     "in_login": False,    # suppress blocker watchdog during login flows
     "blocker": None,      # {"kind","prompt","fingerprint"} or None
@@ -45,9 +47,37 @@ def err(status, code, message):
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
 
 
+_inject_lock = threading.Lock()
+
+
+def inject_begin(alone=False):
+    """Close the gate for one injecting route; alone refuses while another runs."""
+    with _inject_lock:
+        if alone and state["injections"]:
+            return False
+        state["injections"] += 1
+        state["inject_gen"] += 1
+        state["injecting"] = True
+        return True
+
+
+def inject_end():
+    with _inject_lock:
+        state["injections"] -= 1
+        state["injecting"] = state["injections"] > 0
+
+
 def injecting():
     if state["injecting"]:
         return err(423, "credential_injection", "blocked during credential injection")
+
+
+def injected_since(gen):
+    # A route that passed the gate before an injection started can still read the page
+    # during it (an awaited /eval polling the password field), so it gets the 423 too.
+    if state["inject_gen"] != gen:
+        return err(423, "credential_injection", "blocked during credential injection")
+    return injecting()
 
 
 @app.middleware("http")
@@ -172,6 +202,7 @@ def do_action(a):
 
 @app.post("/action")
 def action(a: dict = Body(...)):
+    gen = state["inject_gen"]
     if (r := injecting()):
         return r
     try:
@@ -183,9 +214,11 @@ def action(a: dict = Body(...)):
     out = {"ok": True}
     if a.get("screenshot"):
         time.sleep(min(int(a.get("delay_ms", 300)), 5000) / 1000)
-        if (r := injecting()):
+        if (r := injected_since(gen)):
             return r
         out["screenshot_png_b64"] = base64.b64encode(grab()).decode()
+    if (r := injected_since(gen)):
+        return r
     return out
 
 
@@ -202,6 +235,7 @@ def home_path(path):
 
 @app.post("/exec")
 def exec_(b: dict = Body(...)):
+    gen = state["inject_gen"]
     if (r := injecting()):
         return r
     if "command" not in b:
@@ -217,6 +251,8 @@ def exec_(b: dict = Body(...)):
         errb = (e.stderr or b"") + b"\n[deskd] command timed out"
     except (FileNotFoundError, NotADirectoryError, PermissionError):
         return err(400, "bad_cwd", f"no such directory: {cwd}")
+    if (r := injected_since(gen)):
+        return r
     truncated = len(out) > CAP or len(errb) > CAP
     return {"exit_code": code, "stdout": out[:CAP].decode(errors="replace"),
             "stderr": errb[:CAP].decode(errors="replace"), "truncated": truncated}
@@ -366,6 +402,7 @@ def press_enter(tab):
 
 @app.post("/eval")
 def eval_(b: dict = Body(...)):
+    gen = state["inject_gen"]
     if (r := injecting()):
         return r
     if "expression" not in b:
@@ -381,6 +418,8 @@ def eval_(b: dict = Body(...)):
             tab.close()
     except Exception as e:
         return err(502, "eval_error", f"{type(e).__name__}: {e}")
+    if (gated := injected_since(gen)):
+        return gated
     exc = r.get("exceptionDetails")
     if exc:
         desc = exc.get("exception", {}).get("description") or exc.get("text", "js exception")
@@ -701,9 +740,10 @@ def apply_challenge_action(tab, kind, value=None):
 @app.post("/login")
 def login(b: dict = Body(...)):
     cred, url = b["credential"], b["url"]
+    if not inject_begin(alone=True):
+        return err(409, "injection_running", "another credential injection is running")
     state["login"] = None
     state["in_login"] = True
-    state["injecting"] = True
     try:
         tab = Tab()
         try:
@@ -725,7 +765,7 @@ def login(b: dict = Body(...)):
     except Exception as e:
         return {"status": "failed", "reason": f"login error: {type(e).__name__}: {e}"}
     finally:
-        state["injecting"] = False
+        inject_end()
         if not state["login"]:
             state["in_login"] = False
 
@@ -737,7 +777,7 @@ def login_resume(b: dict = Body(...)):
     if not ctx:
         return err(409, "no_pending_login", "no login is waiting on a handoff")
     state["login"] = None
-    state["injecting"] = True
+    inject_begin()
     try:
         tab = Tab()
         try:
@@ -770,7 +810,7 @@ def login_resume(b: dict = Body(...)):
     except Exception as e:
         return {"status": "failed", "reason": f"resume error: {type(e).__name__}: {e}"}
     finally:
-        state["injecting"] = False
+        inject_end()
         state["in_login"] = False
 
 
@@ -803,7 +843,7 @@ def auth_submit_challenge(b: dict = Body(...)):
             not isinstance(b.get("domains"), list) or not b["domains"]):
         return err(400, "bad_request", "body needs 'domains' for otp/code")
     state["in_login"] = True
-    state["injecting"] = True
+    inject_begin()
     try:
         tab = Tab()
         try:
@@ -823,7 +863,7 @@ def auth_submit_challenge(b: dict = Body(...)):
     except Exception as e:
         return {"ok": False, "reason": f"submit_challenge error: {type(e).__name__}: {e}"}
     finally:
-        state["injecting"] = False
+        inject_end()
         state["in_login"] = False
 
 
