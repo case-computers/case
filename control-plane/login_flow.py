@@ -9,7 +9,6 @@ from urllib.parse import urlsplit
 
 import auth_attempts
 import captcha
-import events
 import handoffs
 import links
 from config import log
@@ -254,23 +253,17 @@ def _try_captcha_auto(row, cid, name, resume=True, record=True):
                     captcha.report(captcha_id)
                 return None
             if record:
-                store.record_credential_result(cid, name, "success")
-                events.emit("login_completed", {"computer_id": cid, "credential": name,
-                                                "status": "success"})
+                auth_attempts.record_login(cid, name, "success")
             log.info("captcha_auto=ok path=gate")
             return {"status": "success", "captcha_auto": True}
         if resumed.get("status") == "failed":
             log.info("captcha_auto=fail reason=resume_failed")
             if record:
-                store.record_credential_result(cid, name, "failed")
-                events.emit("login_completed", {"computer_id": cid, "credential": name,
-                                                "status": "failed"})
+                auth_attempts.record_login(cid, name, "failed")
             # Return failed to caller, do not create a dead handoff.
             return resumed if isinstance(resumed, dict) else {"status": "failed"}
         if record:
-            store.record_credential_result(cid, name, "success")
-            events.emit("login_completed", {"computer_id": cid, "credential": name,
-                                            "status": "success"})
+            auth_attempts.record_login(cid, name, "success")
         log.info("captcha_auto=ok")
         return {"status": "success", "captcha_auto": True}
     except Exception as e:

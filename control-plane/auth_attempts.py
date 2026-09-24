@@ -130,6 +130,16 @@ def login_result(attempt, reason=None):
     return {**base, "status": st}
 
 
+def record_login(computer_id, credential, status, attempt_id=None):
+    """A definitive login outcome: vault health plus the login_completed event."""
+    store.record_credential_result(computer_id, credential, status)
+    data = {"computer_id": computer_id, "credential": credential, "status": status}
+    if attempt_id:
+        data["attempt_id"] = attempt_id
+    from events import emit
+    emit("login_completed", data)
+
+
 def _require(attempt_id):
     row = store.get_auth_attempt(attempt_id)
     if not row:
@@ -479,14 +489,7 @@ def fail_attempt(attempt_id, reason=None, expected_revision=None):
         return attempt_public(row)
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
     pub = _cas_or_conflict(attempt_id, row["status"], "failed", rev, fail_reason=reason)
-    store.record_credential_result(row["computer_id"], row["credential"], "failed")
-    from events import emit
-    emit("login_completed", {
-        "computer_id": row["computer_id"],
-        "credential": row["credential"],
-        "status": "failed",
-        "attempt_id": attempt_id,
-    })
+    record_login(row["computer_id"], row["credential"], "failed", attempt_id=attempt_id)
     return pub
 
 
@@ -597,42 +600,16 @@ def prove_attempt(attempt_id, expected_revision=None, observation=None):
         rev = int(row["revision"] or 0)
 
     proof_spec = parse_proof_spec(row["proof_spec"])
-    from events import emit
     from lifecycle import get_computer
 
-    if not proof_spec:
-        # Spec: missing proof ends unverified, never authenticated.
-        pub = _cas_or_conflict(attempt_id, "proving", "unverified", rev)
-        store.record_credential_result(row["computer_id"], row["credential"], "unverified")
-        emit("login_completed", {
-            "computer_id": row["computer_id"],
-            "credential": row["credential"],
-            "status": "unverified",
-            "attempt_id": attempt_id,
-        })
-        return pub
-
-    computer = get_computer(row["computer_id"])
-    ok = check_proof(computer, proof_spec, observation=observation)
-    if ok:
+    # Spec: missing proof ends unverified, never authenticated.
+    if proof_spec and check_proof(get_computer(row["computer_id"]), proof_spec,
+                                  observation=observation):
         pub = _cas_or_conflict(attempt_id, "proving", "authenticated", rev)
-        store.record_credential_result(row["computer_id"], row["credential"], "success")
-        emit("login_completed", {
-            "computer_id": row["computer_id"],
-            "credential": row["credential"],
-            "status": "success",
-            "attempt_id": attempt_id,
-        })
+        record_login(row["computer_id"], row["credential"], "success", attempt_id=attempt_id)
         return pub
-
     pub = _cas_or_conflict(attempt_id, "proving", "unverified", rev)
-    store.record_credential_result(row["computer_id"], row["credential"], "unverified")
-    emit("login_completed", {
-        "computer_id": row["computer_id"],
-        "credential": row["credential"],
-        "status": "unverified",
-        "attempt_id": attempt_id,
-    })
+    record_login(row["computer_id"], row["credential"], "unverified", attempt_id=attempt_id)
     return pub
 
 

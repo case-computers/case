@@ -196,9 +196,7 @@ def expire_stale():
             continue
         if ctx:   # login handoffs only, a plain approval must never touch the vault
             # nobody answered: the login did not happen, and the vault says so
-            store.record_credential_result(ctx["computer_id"], ctx["credential"], "failed")
-            emit("login_completed", {"computer_id": ctx["computer_id"],
-                                     "credential": ctx["credential"], "status": "failed"})
+            auth_attempts.record_login(ctx["computer_id"], ctx["credential"], "failed")
     # An attempt whose challenge was answered elsewhere (or never raised one) has no
     # handoff to expire, so it would sit `active` forever and 409 every later login.
     for a in store.stale_active_auth_attempts(cutoff):
@@ -290,9 +288,8 @@ def _finish_attempt_child(hid, hrow, *, answer=None, value_present=False, ctx=No
         _continue_attempt(aid)
     elif ctx:
         # Legacy login handoff without an attempt, preserve prior success path.
-        store.record_credential_result(ctx["computer_id"], ctx["credential"], "success")
-        emit("login_completed", {"computer_id": ctx["computer_id"],
-                                 "credential": ctx["credential"], "status": "success"})
+        import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
+        auth_attempts.record_login(ctx["computer_id"], ctx["credential"], "success")
     return done
 
 
@@ -301,16 +298,14 @@ def _fail_attempt_child(hid, hrow, value, ctx=None):
     stored = _durable_answer(hrow["kind"], _continuation_of(hrow), value)
     store.transition_handoff(hid, "failed", answer=stored)
     aid = _attempt_id_of(hrow)
+    import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
     if aid:
         try:
-            import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
             auth_attempts.fail_attempt(aid, reason="denied")
         except Exception as e:
             log.warning("fail_attempt after deny %s: %s", aid, e)
     elif ctx:
-        store.record_credential_result(ctx["computer_id"], ctx["credential"], "failed")
-        emit("login_completed", {"computer_id": ctx["computer_id"],
-                                 "credential": ctx["credential"], "status": "failed"})
+        auth_attempts.record_login(ctx["computer_id"], ctx["credential"], "failed")
     return store.get_handoff(hid)
 
 

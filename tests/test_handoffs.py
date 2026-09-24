@@ -195,7 +195,7 @@ def test_otp_submit_resume_success_completes_and_pops_ctx():
         with mock.patch.object(handoffs, "get_computer", return_value=ROW), \
              mock.patch.object(handoffs, "desk_json",
                                return_value={"status": "success"}) as desk, \
-             mock.patch.object(handoffs, "emit", side_effect=lambda *a, **k: events.append(a)), \
+             mock.patch("events.emit", side_effect=lambda *a, **k: events.append(a)), \
              mock.patch.object(store, "record_credential_result") as rec:
             row = handoffs.submit_handoff_value("h_otp", "123456")
         assert row["status"] == "completed", row
@@ -466,7 +466,7 @@ def test_expire_stale_clears_login_ctx():
         store.q("UPDATE handoffs SET created_at=? WHERE id=?",
                 ("2000-01-01T00:00:00Z", "h_otp"))
         events = []
-        with mock.patch.object(handoffs, "emit", side_effect=lambda *a, **k: events.append(a)), \
+        with mock.patch("events.emit", side_effect=lambda *a, **k: events.append(a)), \
              mock.patch.object(store, "record_credential_result") as rec:
             handoffs.expire_stale()
         assert store.get_handoff("h_otp")["status"] == "expired"
