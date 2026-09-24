@@ -5,8 +5,12 @@
 
 RES="${DESK_RESOLUTION:-1280x800x24}"
 # Xvfb needs WxHxD and dies on bare WxH; depth 24 is the only one deskd's
-# XWD->PNG grab supports (32bpp), so it is also the only default we append.
-case "$RES" in *x*x*) ;; *) RES="${RES}x24" ;; esac
+# XWD->PNG grab supports (32bpp), so it is appended, and replaces any other.
+case "$RES" in
+  *x*x24) ;;
+  *x*x*) echo "[start] depth ${RES##*x} unsupported, using 24" >&2; RES="${RES%x*}x24" ;;
+  *) RES="${RES}x24" ;;
+esac
 
 # libXcursor honors this in every X client — the one switch that themes the
 # cursor everywhere (chromium reads it via GTK settings too, seeded below).
