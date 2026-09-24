@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   MAX_TEXT, STALE_S, chunk, handoffMessage, parseUpdate, poll, routeTelegram, telegramConfig, tgApi,
 } from './telegram.mjs';
-import { startPhoneTelegram } from './serve.mjs';
+
+process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
+const { startPhoneTelegram } = await import('./serve.mjs');
 
 assert.deepEqual(telegramConfig({}), { token: '', chatId: 0 });
 assert.deepEqual(telegramConfig({ CASE_TELEGRAM_TOKEN: ' 1:tok ', CASE_TELEGRAM_CHAT_ID: '42' }),

@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { envDriveAuth } from './case-tools.mjs';
 import {
   OUTBOUND_TAG, authHeaders, clipNtfy, inboundText, isOutbound, listen,
   ntfyConfig, parseSseData, publish, tagsOf,
 } from './ntfy.mjs';
-import { startPhoneNtfy } from './serve.mjs';
+
+process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
+const { startPhoneNtfy } = await import('./serve.mjs');
 
 assert.deepEqual(ntfyConfig({}), {
   url: 'https://ntfy.sh', topic: '', token: '', chat: false,

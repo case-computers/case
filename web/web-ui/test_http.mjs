@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: MIT
 // Real-HTTP checks for the auth and Host/Origin gates. Run: node web/web-ui/test_http.mjs
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 
 process.env.CASE_TOKEN = 'tok';
 delete process.env.CASE_DRIVE_API_KEY;
 delete process.env.CASE_DRIVE_PROVIDER;
+process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
 const serve = await import('./serve.mjs');
 const { server } = serve;
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
