@@ -2,12 +2,11 @@
 """Auth attempt long-poll wait (cursor + event wake).
 Run: .venv/bin/python tests/test_auth_wait.py"""
 import asyncio
-import shutil
 import unittest.mock as mock
 
 import _helpers
 
-_HOME = _helpers.isolated_home()
+_helpers.isolated_home()
 
 import auth_attempts  # noqa: E402
 import events  # noqa: E402
@@ -382,15 +381,4 @@ def json_dumps(obj):
 
 
 if __name__ == "__main__":
-    try:
-        for name, fn in sorted(globals().items()):
-            if name.startswith("test_"):
-                fn()
-                print("ok", name)
-        print("PASS")
-    finally:
-        try:
-            store.db.close()
-        except Exception:
-            pass
-        shutil.rmtree(_HOME, ignore_errors=True)
+    _helpers.run_tests(globals())

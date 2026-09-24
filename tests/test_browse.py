@@ -708,8 +708,4 @@ def test_teach_tick_504_still_raises():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

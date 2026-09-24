@@ -192,8 +192,4 @@ def test_poller_forgets_computers_that_left_running_and_survives_a_bad_desk():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().copy().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: MIT
 """Concurrent reads from the shared vault connection. No Docker required."""
 from concurrent.futures import ThreadPoolExecutor
-import shutil
 import threading
 import unittest.mock as mock
 
 import _helpers
 
-_HOME = _helpers.isolated_home()
+_helpers.isolated_home()
 from store import store  # noqa: E402
 
 
@@ -63,11 +62,4 @@ def test_prune_terminal_auth_attempts_keeps_active_and_recent_rows():
 
 
 if __name__ == "__main__":
-    try:
-        test_concurrent_reads_keep_their_rows_intact()
-        test_active_attempt_queries_use_an_index()
-        test_prune_terminal_auth_attempts_keeps_active_and_recent_rows()
-        print("test_store: ok")
-    finally:
-        store.db.close()
-        shutil.rmtree(_HOME)
+    _helpers.run_tests(globals())

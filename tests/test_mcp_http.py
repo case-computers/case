@@ -8,6 +8,8 @@ import os
 import sys
 import types
 
+import _helpers
+
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "mcp"))
 
@@ -165,7 +167,4 @@ def test_no_credential_write_tool():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
+    _helpers.run_tests(globals())

@@ -528,8 +528,4 @@ def test_first_click_of_fresh_link_sets_session_cookie_over_http():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

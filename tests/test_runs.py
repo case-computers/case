@@ -277,8 +277,4 @@ def test_the_handoff_list_does_not_ship_screenshots():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

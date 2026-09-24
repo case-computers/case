@@ -207,8 +207,4 @@ def test_create_handoff_mints_assist_and_passes_url_to_notifier():
 
 
 if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print("ok", name)
-    print("all passed")
+    _helpers.run_tests(globals())

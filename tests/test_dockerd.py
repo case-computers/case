@@ -241,16 +241,4 @@ def test_managed_containers_is_one_listing_keyed_by_name():
 
 
 if __name__ == "__main__":
-    test_host_mode_dials_loopback_and_publishes_ports()
-    test_container_limits_cover_swap_and_pids()
-    test_compose_mode_uses_container_dns_and_no_host_ports()
-    test_deskclient_accepts_sqlite_row()
-    test_deskclient_url_follows_the_network()
-    test_deskclient_reuses_one_session_per_thread()
-    test_vnc_url_hidden_when_computers_are_on_the_compose_network()
-    test_create_clears_a_name_stuck_in_removal_and_retries_once()
-    test_destroy_names_a_volume_it_could_not_remove()
-    test_new_volumes_carry_the_cased_label()
-    test_cached_client_reconnects_only_when_the_daemon_went_away()
-    test_managed_containers_is_one_listing_keyed_by_name()
-    print("test_dockerd: ok")
+    _helpers.run_tests(globals())

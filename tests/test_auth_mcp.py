@@ -7,6 +7,8 @@ import os
 import sys
 from unittest import mock
 
+import _helpers
+
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "mcp"))
 
@@ -231,7 +233,4 @@ def test_auth_attempt_wait_caps_max_wait():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
+    _helpers.run_tests(globals())

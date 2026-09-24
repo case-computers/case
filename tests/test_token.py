@@ -61,8 +61,4 @@ def test_awake_touches_on_success_only():
 
 
 if __name__ == "__main__":
-    test_open_when_unset()
-    test_requires_matching_bearer()
-    test_blank_token_is_open()
-    test_awake_touches_on_success_only()
-    print("test_token: ok")
+    _helpers.run_tests(globals())

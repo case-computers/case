@@ -673,8 +673,4 @@ def test_run_brain_cmd_wins_over_url():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

@@ -8,6 +8,7 @@ import sys
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
+import _helpers  # noqa: E402
 import test_acceptance as acceptance  # noqa: E402
 
 
@@ -127,11 +128,4 @@ def test_failures_retain_the_scratch_directory():
 
 
 if __name__ == "__main__":
-    test_import_does_not_start_a_server()
-    test_child_env_removes_case_and_provider_settings()
-    test_event_stream_is_not_consumed_by_response_capture()
-    test_cleanup_only_deletes_created_ids()
-    test_cleanup_continues_after_a_delete_failure()
-    test_stop_owned_process_terminates_and_waits()
-    test_failures_retain_the_scratch_directory()
-    print("test_acceptance_safety: ok")
+    _helpers.run_tests(globals())

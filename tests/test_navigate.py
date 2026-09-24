@@ -177,8 +177,4 @@ def test_page_text_eval_failure_is_omitted():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

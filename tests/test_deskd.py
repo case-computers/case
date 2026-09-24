@@ -14,6 +14,8 @@ import time
 import types
 import unittest.mock as mock
 
+import _helpers
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "image"))
 os.environ.setdefault("DESK_TOKEN", "test")
 sys.modules.setdefault("websocket", types.ModuleType("websocket"))
@@ -933,8 +935,4 @@ def test_auth_submit_challenge_refused_code_is_not_ok_and_keeps_the_login_held()
     assert deskd.state["login"] is None and deskd.state["in_login"] is False
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

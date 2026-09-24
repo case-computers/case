@@ -6,6 +6,8 @@ import os
 import sys
 from unittest import mock
 
+import _helpers
+
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "mcp"))
 
@@ -113,8 +115,4 @@ def test_tool_registered():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())
