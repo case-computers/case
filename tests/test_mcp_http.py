@@ -109,6 +109,22 @@ def test_http_refuses_a_rebound_host():
     assert codes == [421, 403, 200, 200, 200, 200, 200], codes
 
 
+def test_optional_params_accept_explicit_null():
+    # clients send "x": null for an unset optional; `x: int = None` rejected that
+    import asyncio
+    m = _load()
+    for name, tool in m.mcp._tool_manager._tools.items():
+        for arg, prop in tool.parameters["properties"].items():
+            if "default" in prop and prop["default"] is None:
+                assert {"type": "null"} in prop.get("anyOf", []), (name, arg, prop)
+    sent = []
+    m.requests = types.SimpleNamespace(
+        request=lambda *a, **kw: sent.append(kw["json"]) or _Resp(200, {"ok": True}))
+    asyncio.run(m.mcp.call_tool("computer_action", {
+        "computer_id": "c", "type": "key", "keys": "Return", "x": None, "button": None}))
+    assert sent == [{"type": "key", "screenshot": False, "keys": "Return"}], sent
+
+
 def test_no_credential_write_tool():
     # security invariant: secrets enter via `case cred add` only, never a tool call
     m = _load()

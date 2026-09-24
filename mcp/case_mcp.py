@@ -116,11 +116,11 @@ def computer_screenshot(computer_id: str, marks: bool = False) -> Image:
 
 
 @mcp.tool()
-def computer_action(computer_id: str, type: str, x: int = None, y: int = None,
-                    button: str = None, text: str = None, keys: str = None,
-                    dy: int = None, ms: int = None,
-                    from_x: int = None, from_y: int = None,
-                    to_x: int = None, to_y: int = None,
+def computer_action(computer_id: str, type: str, x: int | None = None, y: int | None = None,
+                    button: str | None = None, text: str | None = None, keys: str | None = None,
+                    dy: int | None = None, ms: int | None = None,
+                    from_x: int | None = None, from_y: int | None = None,
+                    to_x: int | None = None, to_y: int | None = None,
                     screenshot: bool = False) -> object:
     """Perform a UI action: click|double_click|move|drag|scroll|type|key|wait.
     Coordinates are pixels, origin top-left of the display (1280x800 by default;
@@ -208,8 +208,8 @@ def computer_snapshot(computer_id: str) -> dict:
 
 
 @mcp.tool()
-def computer_click_element(computer_id: str, ref: int, name: str = None,
-                           text: str = None, screenshot: bool = False) -> dict:
+def computer_click_element(computer_id: str, ref: int, name: str | None = None,
+                           text: str | None = None, screenshot: bool = False) -> dict:
     """Click element [ref] from the last computer_snapshot. Pass name (the quoted
     text from the snapshot line) so a changed page is caught: on mismatch this
     REFUSES to click and returns {ok:false, stale:true, snapshot} unless exactly
@@ -234,7 +234,7 @@ def computer_click_element(computer_id: str, ref: int, name: str = None,
 
 
 @mcp.tool()
-def computer_hover(computer_id: str, ref: int, name: str = None) -> dict:
+def computer_hover(computer_id: str, ref: int, name: str | None = None) -> dict:
     """Hover the OS pointer over snapshot [ref] without clicking — opens menus
     that only appear on hover. Pass name so a changed page is refused."""
     body = {"ref": ref}
@@ -245,7 +245,7 @@ def computer_hover(computer_id: str, ref: int, name: str = None) -> dict:
 
 
 @mcp.tool()
-def computer_upload(computer_id: str, ref: int, path: str, name: str = None) -> dict:
+def computer_upload(computer_id: str, ref: int, path: str, name: str | None = None) -> dict:
     """Assign a file already on the computer (path under /home/agent/, ≤5MB) to
     snapshot [ref], which must be input[type=file]. Never send file bytes through
     this tool — write the file with computer_file_put or computer_exec first."""
@@ -276,7 +276,7 @@ def computer_fill(computer_id: str, fields: list, submit: bool = False) -> dict:
 
 
 @mcp.tool()
-def computer_wait_for(computer_id: str, selector: str = None, text: str = None,
+def computer_wait_for(computer_id: str, selector: str | None = None, text: str | None = None,
                       gone: bool = False, network_idle: bool = False,
                       timeout_s: int = 30) -> dict:
     """Block in this one call until the page is ready — instead of polling with
@@ -302,8 +302,8 @@ def computer_wait_for(computer_id: str, selector: str = None, text: str = None,
 
 
 @mcp.tool()
-def computer_tabs(computer_id: str, action: str = "list", target_id: str = None,
-                  url: str = None) -> dict:
+def computer_tabs(computer_id: str, action: str = "list", target_id: str | None = None,
+                  url: str | None = None) -> dict:
     """Browser tab management: action=list|activate|new|close. list returns
     [{id, title, url, active}] — the ACTIVE tab is the one computer_eval,
     computer_snapshot and computer_capture talk to. If a click opened a new tab
@@ -345,7 +345,7 @@ def computer_capture_read(computer_id: str, stop: bool = False) -> dict:
 
 @mcp.tool()
 def computer_login(computer_id: str, credential: str, url: str,
-                   idempotency_key: str = None, proof_spec: dict = None) -> dict:
+                   idempotency_key: str | None = None, proof_spec: dict | None = None) -> dict:
     """Log into a site using a vaulted credential (added by the human via CLI/fill).
     Returns AuthAttemptResult / LoginResult with attempt_id always present:
     {"status":"success","attempt_id",…}, {"status":"failed"|"unverified","reason",
@@ -513,7 +513,7 @@ def computer_sleep(computer_id: str) -> dict:
 
 
 @mcp.tool()
-def auth_attempt_wait(attempt_id: str, since_revision: int = None,
+def auth_attempt_wait(attempt_id: str, since_revision: int | None = None,
                       max_wait_s: int = 240) -> dict:
     """Block in this tool call until the auth attempt advances or the budget ends.
     This is also the inspection tool: for a non-blocking snapshot of where a login
