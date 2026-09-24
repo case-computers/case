@@ -103,6 +103,16 @@ def test_schedule_runs_route_hides_the_host_path_too():
     store.q("DELETE FROM schedules")
 
 
+def test_run_json_resolves_names_from_an_empty_map_without_a_query():
+    store.q("DELETE FROM runs")
+    store.insert_run("run_n", "sch_1", "c_gone", "2026-07-27T09:00:00Z",
+                     "2026-07-27T09:05:00Z", 0, "", None, "ok")
+    from unittest import mock
+    with mock.patch.object(store, "computer_name") as one:
+        assert cased.run_json(store.get_run("run_n"), {})["computer_name"] == "c_gone"
+    one.assert_not_called()
+
+
 def test_screenshot_serves_only_from_the_runs_dir():
     from config import RUNS_DIR
     from errors import ApiError

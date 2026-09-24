@@ -1075,7 +1075,7 @@ def run_json(row, names=None):
     # its owners in one query rather than fifty.
     cid = row["computer_id"]
     return {"id": row["id"], "schedule_id": row["schedule_id"], "computer_id": cid,
-            "computer_name": names.get(cid, cid) if names else store.computer_name(cid),
+            "computer_name": names.get(cid, cid) if names is not None else store.computer_name(cid),
             "started_at": row["started_at"], "ended_at": row["ended_at"],
             "exit_code": row["exit_code"], "summary": row["summary"],
             "status": row["status"], "has_screenshot": bool(row["artifact_path"])}
