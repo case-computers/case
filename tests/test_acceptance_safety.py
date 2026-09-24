@@ -35,6 +35,7 @@ def test_child_env_removes_case_and_provider_settings():
     assert env["CASE_TOKEN"] == "test-token"
     assert env["CASE_IMAGE"] == "test-image"
     assert env["CASE_BIND"] == "127.0.0.1"
+    assert env["CASE_TELEMETRY"] == "0"
     assert "CASE_DOCKER_NETWORK" not in env
     assert "DESK_DEBUG" not in env
     assert "OPENAI_API_KEY" not in env

@@ -62,6 +62,9 @@ services:
       CASE_DBC_AUTHTOKEN: ${CASE_DBC_AUTHTOKEN:-}
       CASE_DBC_USERNAME: ${CASE_DBC_USERNAME:-}
       CASE_DBC_PASSWORD: ${CASE_DBC_PASSWORD:-}
+      # Usage stats opt-out (see .env.example)
+      CASE_TELEMETRY: ${CASE_TELEMETRY:-}
+      DO_NOT_TRACK: ${DO_NOT_TRACK:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - case-home:/data
