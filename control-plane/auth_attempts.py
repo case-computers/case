@@ -25,6 +25,7 @@ from util import new_id, row_get
 # and the MCP wait budget.
 WAIT_TIMEOUT_MAX_S = 270
 WAIT_TIMEOUT_DEFAULT_S = 30
+WAIT_REREAD_S = 15.0
 
 # Optional: fn(computer_row, computer_id, credential_name) -> {"status": "success"|"failed"}|None
 _CAPTCHA_AUTO = None
@@ -392,7 +393,7 @@ async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,
                 return _wait_payload(pub, changed=False, wait_status="timeout")
             try:
                 type_, data = await asyncio.wait_for(
-                    q.get(), timeout=min(remaining, 15.0))
+                    q.get(), timeout=min(remaining, WAIT_REREAD_S))
             except asyncio.TimeoutError:
                 # Periodic re-read covers missed publishes (no LOOP / race).
                 pub = attempt_public(_require(attempt_id))

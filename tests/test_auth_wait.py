@@ -268,7 +268,8 @@ def test_wait_safe_after_restart_style_reread():
         await task
         return out
 
-    out = _run(go())
+    with mock.patch.object(auth_attempts, "WAIT_REREAD_S", 0.1):
+        out = _run(go())
     assert out["changed"] is True
     assert out["attempt"]["status"] == "cancelled"
 
