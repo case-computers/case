@@ -3,6 +3,8 @@
 // Pure-unit checks for the rate-limit retry. Run: node web/web-ui/test_rate_retry.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { isRateLimited, rateWaitS, withRateRetry } from './case-tools.mjs';
 
 // --- what counts as "too fast" -------------------------------------------
@@ -20,6 +22,13 @@ assert.ok(!isRateLimited(undefined));
 assert.equal(rateWaitS({ message: 'try again in 12s' }, 0), 12.5);
 assert.equal(rateWaitS({ headers: { 'retry-after': '9' } }, 0), 9.5);
 assert.equal(rateWaitS({ response: { headers: new Map([['retry-after', '4']]) } }, 0), 4.5);
+// what the SDKs actually throw: APIError.headers is a fetch Headers object
+{
+  const h = new Headers({ 'retry-after': '30' });
+  assert.equal(rateWaitS(Anthropic.APIError.generate(429, { error: { type: 'rate_limit_error', message: 'slow' } }, 'slow', h), 0), 30.5);
+  assert.equal(rateWaitS(OpenAI.APIError.generate(429, { message: 'slow' }, 'slow', h), 0), 30.5);
+  assert.equal(rateWaitS({ status: 429, headers: new Headers() }, 1), 2.5, 'no header: exponential');
+}
 // no hint: exponential in the attempt number
 assert.equal(rateWaitS({ status: 429 }, 0), 1.5);
 assert.equal(rateWaitS({ status: 429 }, 3), 8.5);

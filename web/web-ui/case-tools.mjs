@@ -386,8 +386,9 @@ export function isRateLimited(err) {
  * or retry-after) if it gave one, else exponential. Padded, clamped to 1..60s. */
 export function rateWaitS(err, a) {
   const m = /try again in ([\d.]+)s/i.exec(err?.message || '');
-  const hdr = Number(err?.headers?.['retry-after']
-    ?? err?.response?.headers?.get?.('retry-after'));
+  // Both SDKs' APIError.headers is a fetch Headers; plain objects still pass.
+  const header = (h) => (typeof h?.get === 'function' ? h.get('retry-after') : h?.['retry-after']) ?? undefined;
+  const hdr = Number(header(err?.headers) ?? header(err?.response?.headers));
   const wait = m ? Number(m[1]) : Number.isFinite(hdr) && hdr > 0 ? hdr : 2 ** a;
   return Math.min(Math.max(wait + 0.5, 1), 60);
 }
