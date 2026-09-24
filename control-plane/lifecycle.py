@@ -38,6 +38,9 @@ TRANSITIONS = {
 _GUARD = threading.Lock()        # guards the two maps below
 _IN_FLIGHT = {}                  # cid -> operations in progress
 _LOCKS = {}                      # cid -> RLock, dropped with its last operation
+# admit() and the write that makes the new desktop count (insert as creating, claim
+# as waking) happen as one step, or two concurrent creates both fit under the cap.
+_ADMIT = threading.Lock()
 
 
 @contextmanager
@@ -161,17 +164,18 @@ def admit(ram_mb):
 
 def provision(name=None, cpus=1, ram_mb=2048):
     cpus, ram_mb = float(cpus), int(ram_mb)
-    admit(ram_mb)
     cid = "c_" + secrets.token_hex(5)
     name = str(name or cid)
     token = secrets.token_hex(16)
     volume = f"case-{cid}"
     with _in_flight(cid, serialize=False):
-        return _provision(cid, name, cpus, ram_mb, volume, token)
+        with _ADMIT:
+            admit(ram_mb)
+            store.insert_computer(cid, name, IMAGE, cpus, ram_mb, volume, token)
+        return _provision(cid, cpus, ram_mb, volume, token)
 
 
-def _provision(cid, name, cpus, ram_mb, volume, token):
-    store.insert_computer(cid, name, IMAGE, cpus, ram_mb, volume, token)
+def _provision(cid, cpus, ram_mb, volume, token):
     try:
         dockerd.create_volume(volume)
         container = dockerd.create_container(cid, cpus, ram_mb, volume, token)
@@ -260,10 +264,13 @@ def do_wake(cid):
     t0 = time.monotonic()
     # Asleep computers don't count against the budget; waking one must, same as create.
     # (create already checks; wake used to bypass the cap and OOM a small box.)
-    if row["state"] == "asleep":
-        admit(row["ram_mb"])
-    if not set_state(cid, "waking"):
-        return  # lost a race (concurrent sleep/delete), don't build infra on a stale row
+    with _ADMIT:
+        if row["state"] == "asleep":
+            admit(row["ram_mb"])
+        if row["state"] == "waking":
+            raise ApiError(409, "waking", "computer is already waking; retry shortly")
+        if not set_state(cid, "waking"):
+            return  # lost a race (concurrent sleep/delete), don't build infra on a stale row
     try:
         try:
             dockerd.start_container(cid)

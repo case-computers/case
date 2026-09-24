@@ -73,6 +73,63 @@ def test_wake_respects_max_running():
         store.delete_computer(other)
 
 
+def test_concurrent_creates_cannot_both_fit_under_the_cap():
+    # admit() then insert was two steps: with MAX_RUNNING=1 two creates in the same
+    # moment both passed the check and both came up.
+    import threading
+    import time as _time
+    from unittest import mock
+    import deskclient
+    import dockerd
+    import lifecycle
+    for r in store.all_non_deleted():
+        store.delete_computer(r["id"])
+    real_admit, out = lifecycle.admit, []
+
+    def slow_admit(ram_mb):
+        real_admit(ram_mb)
+        _time.sleep(0.2)                           # widen the check-then-insert window
+
+    def create():
+        try:
+            out.append(lifecycle.provision("x")["state"])
+        except ApiError as e:
+            out.append(e.code)
+
+    with mock.patch.object(lifecycle, "MAX_RUNNING", 1), \
+         mock.patch.object(lifecycle, "admit", slow_admit), \
+         mock.patch.object(dockerd, "create_volume"), \
+         mock.patch.object(dockerd, "create_container"), \
+         mock.patch.object(dockerd, "container_ports", lambda c, deadline=10: (1, 2)), \
+         mock.patch.object(deskclient, "wait_desk"):
+        ts = [threading.Thread(target=create) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+    try:
+        assert sorted(out) == ["running", "too_many_running"], out
+    finally:
+        for r in store.all_non_deleted():
+            store.delete_computer(r["id"])
+
+
+def test_a_second_wake_does_not_take_over_a_waking_row():
+    from unittest import mock
+    import dockerd
+    import lifecycle
+    cid = "c_unittest_waking_claim"
+    _asleep_row(cid)
+    store.set_state(cid, "waking")
+    try:
+        with mock.patch.object(dockerd, "container_up", return_value=False), \
+             mock.patch.object(dockerd, "start_container") as start:
+            _raises(lambda: lifecycle.do_wake(cid), "waking")
+        start.assert_not_called()
+    finally:
+        store.delete_computer(cid)
+
+
 def test_sleep_blocked_when_auth_attempt_active():
     # POST …/sleep → 409 auth_in_progress while a non-terminal AuthAttempt exists.
     cid = "c_unittest_sleep_pin"
