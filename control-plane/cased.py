@@ -899,7 +899,8 @@ async def live_ws(ws: WebSocket, cid: str):
         await ws.close(code=1008)
         return
     try:
-        base, headers = live_upstream(lifecycle.ensure_running(cid, False))
+        row = await asyncio.to_thread(lifecycle.ensure_running, cid, False)
+        base, headers = live_upstream(row)
     except ApiError:
         await ws.close(code=1011)
         return
