@@ -277,7 +277,9 @@ Set `CASE_TOKEN` to that value in `.env`. Add your proxy hostname to
 `CASE_TOKEN` protects Drive and the REST API. Open Drive through the HTTPS proxy
 with `?token=<your-token>` on the first visit. MCP on port 8788 has no built-in
 client authentication: keep it local or configure authentication at its proxy.
-Setting `CASE_TOKEN` alone does not protect the MCP endpoint.
+Setting `CASE_TOKEN` alone does not protect the MCP endpoint. MCP checks `Host`
+against the same list as cased and Drive, so a proxy in front of it needs its
+hostname in `CASE_ALLOWED_HOSTS` too.
 
 For ntfy Assist links and approval buttons, set `CASE_PUBLIC_HOST` to the public
 hostname of your cased proxy, without a scheme. That hostname is allowed without
