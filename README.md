@@ -217,6 +217,8 @@ to the same topic. It marks its own posts so it does not read them as new tasks.
 
 When one handoff is waiting, your next message answers it. If several are
 waiting, prefix the answer with its handoff ID, such as `h_ab12 483920`.
+An approval takes only `approve` or `deny`; any other reply is refused and the
+handoff keeps waiting.
 With no handoff waiting, a message steers the current Phone task or starts a
 new task on the first computer returned by cased. Create a computer before
 sending your first task.
