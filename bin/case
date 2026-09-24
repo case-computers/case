@@ -2,18 +2,19 @@
 # SPDX-License-Identifier: MIT
 # case — tiny CLI, thin curl wrappers over cased.
 set -euo pipefail
-[ -f ~/.case/env ] && . ~/.case/env   # ntfy, CASE_TOKEN, …
+# ntfy, CASE_TOKEN, … — exported (set -a) so nohup cased and cred add's python see it
+if [ -f ~/.case/env ]; then set -a; . ~/.case/env; set +a; fi
 BASE="${CASE_URL:-http://127.0.0.1:8787/v1}"
 pp() { python3 -m json.tool 2>/dev/null || cat; }
 auth=()
 [ -n "${CASE_TOKEN:-}" ] && auth=(-H "Authorization: Bearer ${CASE_TOKEN}")
-c() { curl -sf "${auth[@]}" "$@"; }
+# ${a[@]+…}: bash 3.2 (macOS) calls an empty array unbound under set -u
+c() { curl -sf ${auth[@]+"${auth[@]}"} "$@"; }
 
 case "${1:-help}" in
   up)     # boot the substrate: colima VM (Darwin) or native docker (Linux) + cased.
           # Idempotent. CASE_CPU/CASE_MEM override 4/4. If cased is systemd-managed
           # let systemd own it — don't spawn a rival process.
-          [ -f ~/.case/env ] && . ~/.case/env   # ntfy topics etc.
           if [ "$(uname)" = Darwin ]; then
             colima status >/dev/null 2>&1 || colima start --cpu "${CASE_CPU:-4}" --memory "${CASE_MEM:-4}"
           else
