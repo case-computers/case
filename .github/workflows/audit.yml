@@ -11,6 +11,7 @@ on:
   pull_request:
     paths:
       - requirements*.txt
+      - image/requirements.txt
       - web/package*.json
       - .github/workflows/audit.yml
 
@@ -34,7 +35,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install pip-audit==2.10.1
-          .venv/bin/pip-audit -r requirements-dev.txt
+          .venv/bin/pip-audit -r requirements-dev.txt -r image/requirements.txt
 
       - name: Drive
         run: npm --prefix web audit --omit=dev
