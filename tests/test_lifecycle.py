@@ -27,15 +27,6 @@ def test_illegal_edges_rejected():
         assert not can_transition(a, b), (a, b)
 
 
-def _raises(fn, code):
-    try:
-        fn()
-    except ApiError as e:
-        assert e.code == code, e.code
-        return
-    assert False, f"expected ApiError {code}"
-
-
 def test_creating_computer_is_not_actionable():
     # a computer mid-provision: ensure_running must give coherent guidance (not "wake it"),
     # and do_sleep must reject BEFORE stopping the half-built container (M2).
@@ -43,8 +34,8 @@ def test_creating_computer_is_not_actionable():
     store.delete_computer(cid)
     store.insert_computer(cid, "t", "img", 1, 512, "vol", "tok")   # state=creating
     try:
-        _raises(lambda: ensure_running(cid, wake=True), "provisioning")
-        _raises(lambda: do_sleep(cid), "illegal_transition")       # raises before any docker call
+        _helpers.raises(lambda: ensure_running(cid, wake=True), "provisioning")
+        _helpers.raises(lambda: do_sleep(cid), "illegal_transition")  # raises before any docker call
     finally:
         store.delete_computer(cid)
 
@@ -64,7 +55,7 @@ def test_wake_respects_max_running():
         store.insert_computer(cid, "asleep", "img", 1, 512, "vol-a", "tok-a")
         store.set_state(cid, "asleep")
         from lifecycle import do_wake
-        _raises(lambda: do_wake(cid), "too_many_running")  # before any docker call
+        _helpers.raises(lambda: do_wake(cid), "too_many_running")  # before any docker call
     finally:
         lifecycle.MAX_RUNNING = old
         store.delete_computer(cid)
@@ -122,7 +113,7 @@ def test_a_second_wake_does_not_take_over_a_waking_row():
     try:
         with mock.patch.object(dockerd, "container_up", return_value=False), \
              mock.patch.object(dockerd, "start_container") as start:
-            _raises(lambda: lifecycle.do_wake(cid), "waking")
+            _helpers.raises(lambda: lifecycle.do_wake(cid), "waking")
         start.assert_not_called()
     finally:
         store.delete_computer(cid)
@@ -139,7 +130,7 @@ def test_sleep_blocked_when_auth_attempt_active():
         "a_unittest_pin", cid, "github", "https://example.com/login",
         status="awaiting_human")
     try:
-        _raises(lambda: do_sleep(cid), "auth_in_progress")  # before any docker call
+        _helpers.raises(lambda: do_sleep(cid), "auth_in_progress")  # before any docker call
         assert store.get_computer(cid)["state"] == "running"
     finally:
         store.q("DELETE FROM auth_attempts WHERE computer_id=?", (cid,))
@@ -162,7 +153,7 @@ def test_wake_respects_ram_budget():
         store.set_state(cid, "asleep")
         assert store.active_ram_mb() == 3072
         from lifecycle import do_wake
-        _raises(lambda: do_wake(cid), "not_enough_ram")            # 3072 + 2048 > 4096
+        _helpers.raises(lambda: do_wake(cid), "not_enough_ram")  # 3072 + 2048 > 4096
         lifecycle.MAX_RAM_MB = 8192                                # budget raised: admitted
         lifecycle.admit(2048)
     finally:
@@ -477,7 +468,7 @@ def test_create_rejects_nonsense_sizing():
     import cased
     for body in ({"ram_mb": 0}, {"ram_mb": "banana"}, {"cpus": 0},
                  {"cpus": 999}, {"ram_mb": 10 ** 9}):
-        _raises(lambda b=body: cased.create_computer(b), "bad_request")
+        _helpers.raises(lambda b=body: cased.create_computer(b), "bad_request")
     # blank/absent means "the default", not "invalid"
     assert cased._num(None, 2048, 512, 65536, "ram_mb") == 2048
     assert cased._num("", 1, 0.25, 32, "cpus") == 1

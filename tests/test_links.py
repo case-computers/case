@@ -12,22 +12,6 @@ def _cleanup():
     store.q("DELETE FROM links")
 
 
-def _running_computer(cid):
-    store.q("DELETE FROM computers WHERE id=?", (cid,))
-    store.insert_computer(cid, "ava", "case-desk:0.1", 1, 2048, "vol", "tok")
-    store.set_state(cid, "running")
-
-
-def _desk_check_ep(uri, cookie):
-    from starlette.requests import Request
-    import cased
-    scope = {"type": "http", "headers": [
-        (b"x-forwarded-uri", uri.encode()),
-        (b"cookie", cookie.encode()),
-    ], "method": "GET", "path": "/v1/desk/check", "query_string": b""}
-    return cased.desk_check_ep(Request(scope))
-
-
 def test_mint_fill_returns_fill_path_and_stores_row():
     _cleanup()
     out = links.mint("c_1", "fill")
@@ -152,10 +136,10 @@ def test_assist_cookie_opens_desk_but_not_fill():
                          continuation="verify_page")
     raw, _ = assist.mint_assist_token("h_link_assist")
     session, _ = assist.exchange(raw)
-    _running_computer("c_assist")
+    _helpers.running_computer("c_assist")
 
     assert links.desk_check("/desk/vnc.html", f"case_assist={session}") == (None, None)
-    resp = _desk_check_ep("/desk/vnc.html", f"case_assist={session}")
+    resp = _helpers.desk_check_ep("/desk/vnc.html", f"case_assist={session}")
     assert resp.status_code == 200, resp.status_code
 
     # negatives: assist session is not a fill/vnc link token
@@ -165,11 +149,11 @@ def test_assist_cookie_opens_desk_but_not_fill():
     fill = links.mint("c_assist", "fill")["token"]
     assert links.desk_check(f"/x?token={fill}", "")[0] is None
     # assist cookie still authorizes desk via desk_check_ep even when fill token is in query
-    assert _desk_check_ep(f"/x?token={fill}", f"case_assist={session}").status_code == 200
+    assert _helpers.desk_check_ep(f"/x?token={fill}", f"case_assist={session}").status_code == 200
 
     store.set_handoff_status("h_link_assist", "completed")
     assert links.desk_check("/desk/", f"case_assist={session}") == (None, None)
-    assert _desk_check_ep("/desk/", f"case_assist={session}").status_code == 401
+    assert _helpers.desk_check_ep("/desk/", f"case_assist={session}").status_code == 401
     store.delete_handoff("h_link_assist")
     store.q("DELETE FROM assist_tokens WHERE handoff_id=?", ("h_link_assist",))
 

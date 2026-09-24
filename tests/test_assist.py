@@ -32,21 +32,6 @@ def _cleanup():
     handoffs.LOGIN_CTX.clear()
 
 
-def _running_computer(cid="c_1"):
-    store.q("DELETE FROM computers WHERE id=?", (cid,))
-    store.insert_computer(cid, "ava", "case-desk:0.1", 1, 2048, "vol", "tok")
-    store.set_state(cid, "running")
-
-
-def _desk_check_ep(uri, cookie):
-    from starlette.requests import Request
-    scope = {"type": "http", "headers": [
-        (b"x-forwarded-uri", uri.encode()),
-        (b"cookie", cookie.encode()),
-    ], "method": "GET", "path": "/v1/desk/check", "query_string": b""}
-    return cased.desk_check_ep(Request(scope))
-
-
 def _hash(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -166,9 +151,9 @@ def test_desk_check_accepts_assist_cookie_for_bound_computer():
     _pending("h_cap", "captcha")
     raw, _ = assist.mint_assist_token("h_cap")
     session, _ = assist.exchange(raw)
-    _running_computer("c_1")
+    _helpers.running_computer("c_1")
     assert links.desk_check("/desk/vnc.html", f"case_assist={session}") == (None, None)
-    assert _desk_check_ep("/desk/vnc.html", f"case_assist={session}").status_code == 200
+    assert _helpers.desk_check_ep("/desk/vnc.html", f"case_assist={session}").status_code == 200
 
 
 def test_assist_cookie_does_not_unlock_fill_or_console():
@@ -194,7 +179,7 @@ def test_otp_submit_via_assist_completes_without_login_ctx():
     # desk access dies once handoff is terminal
     assert assist.valid_session(session) is None
     assert links.desk_check("/desk/", f"case_assist={session}") == (None, None)
-    assert _desk_check_ep("/desk/", f"case_assist={session}").status_code == 401
+    assert _helpers.desk_check_ep("/desk/", f"case_assist={session}").status_code == 401
     assert store.get_handoff("h_otp")["answer"] is None
 
 
@@ -329,9 +314,9 @@ def test_attempt_scoped_session_follows_current_handoff():
     assert view["continuation"] == "submit_value"
     assert "submit_value" in view["allowed_actions"]
     # desk still unlocks for the computer
-    _running_computer("c_1")
+    _helpers.running_computer("c_1")
     assert links.desk_check("/desk/", f"case_assist={session}") == (None, None)
-    assert _desk_check_ep("/desk/", f"case_assist={session}").status_code == 200
+    assert _helpers.desk_check_ep("/desk/", f"case_assist={session}").status_code == 200
 
 
 def test_proving_state_has_no_actions():

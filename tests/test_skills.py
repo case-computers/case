@@ -1,22 +1,9 @@
 # SPDX-License-Identifier: MIT
 """case_skill — name validation, secret screening, and call shapes.
 Pure: HTTP mocked. Run: .venv/bin/python tests/test_skills.py"""
-import importlib
-import os
-import sys
 from unittest import mock
 
 import _helpers
-
-ROOT = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, os.path.join(ROOT, "mcp"))
-
-
-def _load():
-    for k in ("CASE_MCP_HTTP", "CASE_MCP_PORT", "CASE_MCP_SCHEDULES"):
-        os.environ.pop(k, None)
-    mod = importlib.import_module("case_mcp")
-    return importlib.reload(mod)
 
 
 def _ok(payload=None, content=b""):
@@ -46,7 +33,7 @@ metadata:
 
 
 def test_skill_name_rules():
-    m = _load()
+    m = _helpers.load_case_mcp()
     assert m.skill_name_ok("coupa-ap-aging")
     assert m.skill_name_ok("x2")
     assert not m.skill_name_ok("")
@@ -57,7 +44,7 @@ def test_skill_name_rules():
 
 
 def test_secret_screen_catches_secret_shapes():
-    m = _load()
+    m = _helpers.load_case_mcp()
     assert m.skill_content_risky("password: hunter2secret")
     assert m.skill_content_risky("API_KEY=sk-abcdef123456")
     assert m.skill_content_risky("otp: 123456")
@@ -69,7 +56,7 @@ def test_secret_screen_catches_secret_shapes():
 
 
 def test_save_rejects_secrets_and_bad_names():
-    m = _load()
+    m = _helpers.load_case_mcp()
     with mock.patch.object(m, "call") as call:
         for bad in (("Bad Name", SKILL), ("ok-name", "token: abc123XYZplenty")):
             try:
@@ -81,7 +68,7 @@ def test_save_rejects_secrets_and_bad_names():
 
 
 def test_save_writes_file_then_logbook():
-    m = _load()
+    m = _helpers.load_case_mcp()
     with mock.patch.object(m, "call", return_value=_ok({})) as call:
         out = m.case_skill("c_1", "save", name="coupa-ap-aging", content=SKILL)
     assert out["saved"].endswith("/skills/coupa-ap-aging/SKILL.md")
@@ -93,7 +80,7 @@ def test_save_writes_file_then_logbook():
 
 
 def test_list_returns_index_text():
-    m = _load()
+    m = _helpers.load_case_mcp()
     with mock.patch.object(m, "call", return_value=_ok(
             {"stdout": "## /home/agent/skills/coupa-ap-aging/SKILL.md\nname: coupa-ap-aging\n"})) as call:
         out = m.case_skill("c_1", "list")
@@ -103,14 +90,14 @@ def test_list_returns_index_text():
 
 
 def test_read_returns_utf8():
-    m = _load()
+    m = _helpers.load_case_mcp()
     with mock.patch.object(m, "call", return_value=_ok(content=SKILL.encode())):
         out = m.case_skill("c_1", "read", name="coupa-ap-aging")
     assert out["content"].startswith("---\nname: coupa-ap-aging")
 
 
 def test_tool_registered():
-    m = _load()
+    m = _helpers.load_case_mcp()
     assert "case_skill" in list(m.mcp._tool_manager._tools)
 
 

@@ -29,15 +29,6 @@ def _cleanup():
     handoffs.LOGIN_CTX.clear()
 
 
-def _raises(fn, code):
-    try:
-        fn()
-    except ApiError as e:
-        assert e.code == code, (e.code, e.message)
-        return e
-    assert False, f"expected ApiError {code}"
-
-
 def _obs(**kwargs):
     base = {
         "href": "https://example.com/login",
@@ -118,7 +109,7 @@ def test_one_active_attempt_per_computer():
     auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
     assert store.active_attempt_exists("c_1")
     assert store.get_active_auth_attempt("c_1") is not None
-    _raises(lambda: auth_attempts.start_attempt(
+    _helpers.raises(lambda: auth_attempts.start_attempt(
         "c_1", "github", "https://example.com/login", idempotency_key="other"),
             "auth_in_progress")
     # different computer is fine
@@ -133,7 +124,7 @@ def test_cas_revision_conflict():
     assert n == 1
     assert store.get_auth_attempt(a["id"])["revision"] == 1
     # stale revision on cancel
-    _raises(lambda: auth_attempts.cancel_attempt(a["id"], expected_revision=0),
+    _helpers.raises(lambda: auth_attempts.cancel_attempt(a["id"], expected_revision=0),
             "revision_conflict")
     # store-level CAS
     n = store.cas_auth_attempt_status(a["id"], "advancing", "proving", 0)
@@ -177,7 +168,7 @@ def test_raise_challenge_while_proving_creates_no_handoff():
     a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
     store.cas_auth_attempt_status(a["id"], "created", "proving", 0)
     with mock.patch("handoffs.create_handoff") as create:
-        _raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
+        _helpers.raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
                 "illegal_transition")
     create.assert_not_called()
 
@@ -195,7 +186,7 @@ def test_raise_challenge_losing_to_a_cancel_leaves_no_pending_child():
     with mock.patch("lifecycle.get_computer", return_value=COMP), \
          mock.patch("deskclient.screenshot_b64", return_value=None), \
          mock.patch("handoffs.create_handoff", side_effect=create_then_cancel):
-        _raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
+        _helpers.raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
                 "revision_conflict")
     rows = store.all("SELECT id, status FROM handoffs")
     assert [r["status"] for r in rows] == ["failed"], [dict(r) for r in rows]
@@ -228,9 +219,9 @@ def test_claim_challenge_cas():
     assert claimed["revision"] == 1
     assert "answer" not in claimed
     # stale / wrong status
-    _raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=0),
+    _helpers.raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=0),
             "revision_conflict")
-    _raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=1),
+    _helpers.raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=1),
             "revision_conflict")
 
 
