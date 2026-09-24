@@ -838,10 +838,12 @@ function navHtml(){
   if(!kids.length)return '<div class="navnote">No tasks yet. Type one below.</div>';
   return '<div class="threads"><div>'+kids.map(threadRowHtml).join('')+'</div></div>';
 }
+let navDrawn=null;
 function paint(){
   $('hostLabel').textContent=boxHost||'no box';
   $('compName').textContent=(comp&&comp.name)||(pickLost?'computer gone':'no computer');
-  $('navlist').innerHTML=navHtml();
+  const nav=navHtml();
+  if(nav!==navDrawn){navDrawn=nav;$('navlist').innerHTML=nav;}   // the 8s refresh mostly changes nothing
   $('keyBtn').textContent=currentKey()?'KEY ON':'KEY';
   $('keyBtn').classList.toggle('on',!!currentKey());
   $('keyBtnM').textContent=$('keyBtn').textContent;
@@ -1507,7 +1509,10 @@ async function sendPrompt(t,files){
   let raw='';
   let mark=null;   // render state when the provider round began; round_reset returns to it
   const caret=caretEl();
-  const setText=t=>{raw=t;pEl.innerHTML=md(raw);pEl.appendChild(caret);};  // machine types
+  let textFrame=0;
+  const drawText=()=>{textFrame=0;const was=nearBottom();pEl.innerHTML=md(raw);pEl.appendChild(caret);stick(was);};
+  // machine types; the markdown is re-parsed once a frame, not once per streamed delta
+  const setText=t=>{raw=t;if(!textFrame)textFrame=requestAnimationFrame(drawText);};
   const addText=t=>setText(raw+t);
   const pretty=v=>{if(v==null)return'';if(typeof v==='string')return v;try{return JSON.stringify(v,null,2);}catch{return String(v);}};
   const toolRow=ev=>{
@@ -1623,6 +1628,7 @@ async function sendPrompt(t,files){
   }finally{
     chatCtl=null;
     $('stopBtn').hidden=true;
+    if(textFrame){cancelAnimationFrame(textFrame);drawText();}
     caret.remove();
     if(activeTid==='__pending')activeTid=''; // stream died before the thread was born
     const ran=runTid!=='__pending'?runTid:'';
