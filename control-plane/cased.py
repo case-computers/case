@@ -76,7 +76,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="cased", lifespan=lifespan)
-BLOCKER_SEEN = {}           # computer_id -> fingerprint
+BLOCKER_SEEN = {}           # computer_id -> (fingerprint, handoff id)
 
 
 # ---------- error handling ----------
@@ -1139,22 +1139,38 @@ def blocker_poller():
     while True:
         time.sleep(3)
         try:
-            for row in store.running_rows():
-                try:
-                    b = desk_json(row, "GET", "/blocker", timeout=5).get("blocker")
-                except ApiError:
-                    continue
-                cid = row["id"]
-                if not b:
-                    BLOCKER_SEEN.pop(cid, None)
-                    continue
-                if BLOCKER_SEEN.get(cid) == b["fingerprint"]:
-                    continue
-                if login_flow._route_blocker(row, b):
-                    # Record only after routing succeeds, so transient errors retry.
-                    BLOCKER_SEEN[cid] = b["fingerprint"]
+            rows = store.running_rows()
         except Exception:
             log.exception("blocker poller")
+            continue
+        for cid in set(BLOCKER_SEEN) - {r["id"] for r in rows}:   # slept or deleted
+            BLOCKER_SEEN.pop(cid, None)
+        for row in rows:
+            try:
+                _poll_blocker(row)
+            except Exception:
+                log.exception("blocker poller: %s", row["id"])
+
+
+def _poll_blocker(row):
+    try:
+        b = desk_json(row, "GET", "/blocker", timeout=5).get("blocker")
+    except ApiError:
+        return
+    cid = row["id"]
+    if not b:
+        BLOCKER_SEEN.pop(cid, None)
+        return
+    seen = BLOCKER_SEEN.get(cid)
+    if seen and seen[0] == b["fingerprint"]:
+        # still the same challenge: raise it again only once its handoff timed out
+        h = store.get_handoff(seen[1])
+        if h and h["status"] != "expired":
+            return
+    hid = login_flow._route_blocker(row, b)
+    if hid:
+        # Record only after routing succeeds, so transient errors retry.
+        BLOCKER_SEEN[cid] = (b["fingerprint"], hid)
 
 
 if __name__ == "__main__":

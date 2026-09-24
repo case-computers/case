@@ -122,6 +122,61 @@ def test_store_fingerprint_lookup_ignores_terminal_handoffs():
         store.delete_handoff("h_fp")
 
 
+class _Stop(Exception):
+    pass
+
+
+def _one_pass(rows, desk):
+    """Run blocker_poller for exactly one sweep over `rows`."""
+    with mock.patch.object(cased.time, "sleep", side_effect=[None, _Stop()]), \
+         mock.patch.object(store, "running_rows", return_value=rows), \
+         mock.patch.object(cased, "desk_json", side_effect=desk):
+        try:
+            cased.blocker_poller()
+        except _Stop:
+            pass
+
+
+def test_expired_handoff_is_raised_again_while_the_page_still_blocks():
+    store.delete_handoff("h_seen")
+    cased.BLOCKER_SEEN.clear()
+    try:
+        store.insert_handoff("h_seen", "c_1", "otp", "code", None, None,
+                             challenge_fingerprint=BLOCKER["fingerprint"])
+        cased.BLOCKER_SEEN["c_1"] = (BLOCKER["fingerprint"], "h_seen")
+        desk = lambda row, *a, **k: {"blocker": BLOCKER}
+        with mock.patch.object(login_flow, "_route_blocker", return_value="h_new") as route:
+            _one_pass([ROW], desk)
+            route.assert_not_called()               # its handoff is still open
+            store.set_handoff_status("h_seen", "expired")
+            _one_pass([ROW], desk)
+            route.assert_called_once()
+        assert cased.BLOCKER_SEEN["c_1"] == (BLOCKER["fingerprint"], "h_new")
+    finally:
+        store.delete_handoff("h_seen")
+        cased.BLOCKER_SEEN.clear()
+
+
+def test_poller_forgets_computers_that_left_running_and_survives_a_bad_desk():
+    cased.BLOCKER_SEEN.clear()
+    cased.BLOCKER_SEEN["c_slept"] = ("fp", "h_x")
+    other = {"id": "c_2", "name": "bo", "state": "running"}
+
+    def desk(row, *a, **k):
+        if row["id"] == "c_1":
+            raise RuntimeError("desk went sideways")
+        return {"blocker": BLOCKER}
+
+    try:
+        with mock.patch.object(login_flow, "_route_blocker", return_value="h_2") as route:
+            _one_pass([ROW, other], desk)
+        assert route.call_args.args[0]["id"] == "c_2"   # c_1's error did not skip c_2
+        assert "c_slept" not in cased.BLOCKER_SEEN
+        assert cased.BLOCKER_SEEN["c_2"] == (BLOCKER["fingerprint"], "h_2")
+    finally:
+        cased.BLOCKER_SEEN.clear()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().copy().items()):
         if name.startswith("test_") and callable(fn):
