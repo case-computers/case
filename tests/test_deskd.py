@@ -760,7 +760,8 @@ def test_overlapping_injections_keep_the_gate_closed():
         resume.start()
         try:
             assert started.wait(5)
-            assert deskd.auth_submit_challenge({"kind": "approval"}) == {"ok": True}
+            # every injecting route refuses to type alongside another
+            assert deskd.auth_submit_challenge({"kind": "approval"}).status_code == 409
             r = _client().post("/exec", headers=H, json={"command": "echo leaked"})
             assert r.status_code == 423, r.text
             again = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
@@ -770,6 +771,20 @@ def test_overlapping_injections_keep_the_gate_closed():
             release.set()
             resume.join()
     assert deskd.state["injecting"] is False and deskd.state["injections"] == 0
+
+
+def test_resume_refused_during_an_injection_keeps_the_held_login():
+    held = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    deskd.state["login"] = held
+    assert deskd.inject_begin()
+    try:
+        r = deskd.login_resume({"value": "123456"})
+        assert r.status_code == 409
+        assert deskd.state["login"] is held
+    finally:
+        deskd.inject_end()
+        deskd.state["login"] = None
+    assert deskd.state["injections"] == 0
 
 
 class SlowEvalTab(RecordingTab):

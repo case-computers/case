@@ -836,11 +836,14 @@ def login_resume(b: dict = Body(...)):
     if "value" not in b:
         return err(400, "bad_request", "body needs 'value'")
     value = str(b["value"])
-    ctx = state["login"]
-    if not ctx:
+    if not state["login"]:
         return err(409, "no_pending_login", "no login is waiting on a handoff")
-    state["login"] = None
-    inject_begin()
+    if not inject_begin(alone=True):
+        return err(409, "injection_running", "another credential injection is running")
+    ctx, state["login"] = state["login"], None
+    if not ctx:
+        inject_end()
+        return err(409, "no_pending_login", "no login is waiting on a handoff")
     try:
         tab = Tab()
         try:
@@ -900,8 +903,9 @@ def auth_submit_challenge(b: dict = Body(...)):
     if str(kind).lower() in ("otp", "code") and (
             not isinstance(b.get("domains"), list) or not b["domains"]):
         return err(400, "bad_request", "body needs 'domains' for otp/code")
+    if not inject_begin(alone=True):
+        return err(409, "injection_running", "another credential injection is running")
     state["in_login"] = True
-    inject_begin()
     try:
         tab = Tab()
         try:
