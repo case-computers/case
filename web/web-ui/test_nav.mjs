@@ -50,14 +50,14 @@ fs.writeFileSync(mod, `
   ${grab('drainQ')}
   ${grab('orphanQueued')}
   // the real openThread, against a fetch that fails
-  let threadGen = 0, fetchFails = false;
+  let threadGen = 0, fetchFails = false, failStatus = 404;
   const inner = { innerHTML: '', appendChild() {} }, log = {}, md = (x) => x, paint = () => {};
-  const fetch = async () => { if (fetchFails) throw new Error('down'); return { ok: false, json: async () => ({ error: 'gone' }) }; };
+  const fetch = async () => { if (fetchFails) throw new Error('down'); return { ok: false, status: failStatus, json: async () => ({ error: 'gone' }) }; };
   async ${grab('openThread').replace('function openThread(', 'function realOpenThread(')}
   export const fake = { promptQ, calls, drainQ, view: (t) => { activeTid = t; loadingTid = ''; },
                         loading: (t) => { activeTid = loadingTid = t; },
                         open: realOpenThread, state: () => ({ activeTid, loadingTid }),
-                        down: (v) => { fetchFails = v; } };
+                        down: (v) => { fetchFails = v; }, status: (v) => { failStatus = v; } };
   export const set = (s) => {
     apiUp = s.apiUp ?? true;
     comps = s.comps || [];
@@ -165,6 +165,15 @@ await fake.open('t7');
 assert(fake.calls.join() === 'send orphan to new',
   'a prompt for a deleted thread starts a new task instead of blocking the queue');
 assert(fake.promptQ.length === 1 && fake.promptQ[0].text === 'next', 'and the rest stay queued in order');
+fake.calls.length = 0;
+fake.promptQ.length = 0;
+fake.view('t1');
+fake.status(401);                                  // the thread exists; this tab just lost its token
+fake.promptQ.push({ text: 'keep', files: [], tid: 't8' });
+await fake.open('t8');
+assert(fake.calls.length === 0 && fake.promptQ[0].tid === 't8',
+  'an unauthorized load keeps the prompt queued for its own thread');
+fake.status(404);
 fake.calls.length = 0;
 fake.promptQ.length = 0;
 fake.view('t2');

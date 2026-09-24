@@ -912,7 +912,7 @@ async function openThread(tid){
     // a thread that never loaded is not open: clicking it (or a queued prompt) retries
     if(!r.ok){
       activeTid='';paint();inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';
-      orphanQueued(tid);drainQ('');
+      if(r.status===404){orphanQueued(tid);drainQ('');}   // gone; a 401 or 5xx is retried
       return;
     }
     // Deliberately does NOT follow j.agent: moving you to another computer
