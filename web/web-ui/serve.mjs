@@ -20,7 +20,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRetryable } from './case-tools.mjs';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRetryable, clip } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
 import * as telegram from './telegram.mjs';
@@ -949,16 +949,6 @@ export function migrateShots(items, dir = shotsDir()) {
     return stashShot(m[1], dir);
   });
   return changed ? next : items;
-}
-
-export function clip(v, n = 8000) {
-  const s = typeof v === 'string' ? v : JSON.stringify(v);
-  if (s.length <= n) return s;
-  // Head+tail, not a tail-drop: a 150-element snapshot overruns n, and a blind cut
-  // throws away the very fields that say so (count, truncated) along with the
-  // closing brace, so the model gets mid-JSON garbage with no signal it was cut.
-  const half = Math.floor((n - 40) / 2);
-  return `${s.slice(0, half)}\n…${s.length - 2 * half} chars elided…\n${s.slice(-half)}`;
 }
 
 /** A re-snapshot after a click that changed nothing repeats the whole element list.

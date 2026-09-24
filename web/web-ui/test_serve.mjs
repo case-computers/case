@@ -10,12 +10,12 @@ import { fileURLToPath } from 'node:url';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
-  histToAnthropicMessages, anthropicThinkingFor, caseToolPlan,
+  histToAnthropicMessages, anthropicThinkingFor, caseToolPlan, clip,
 } from './case-tools.mjs';
 
 // serve.mjs loads threads.json at import and rewrites it; never the developer's own.
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
-const { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
+const { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 assert.match(html, /x-anthropic-key/);
@@ -440,6 +440,9 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
 {
   const src = fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8');
   assert.match(src, /content\.push\(\{ type: 'image', source: \{ type: 'base64', media_type: 'image\/png', data: image_b64 \} \}\)/);
+  // live tool_result and persisted history are cut by the same head+tail clip
+  assert.match(src, /\{ type: 'text', text: clip\(rest\) \}/);
+  assert.ok(!/clipJson/.test(src));
   const items = [];
   const shots = new Set();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'case-dedupe-'));

@@ -367,9 +367,14 @@ export function anthropicThinkingFor(messages) {
   return hasThinking ? { type: 'adaptive' } : { type: 'disabled' };
 }
 
-function clipJson(v, n = 8000) {
+export function clip(v, n = 8000) {
   const s = typeof v === 'string' ? v : JSON.stringify(v);
-  return s.length > n ? s.slice(0, n) + '…' : s;
+  if (s.length <= n) return s;
+  // Head+tail, not a tail-drop: a 150-element snapshot overruns n, and a blind cut
+  // throws away the very fields that say so (count, truncated) along with the
+  // closing brace, so the model gets mid-JSON garbage with no signal it was cut.
+  const half = Math.floor((n - 40) / 2);
+  return `${s.slice(0, half)}\n…${s.length - 2 * half} chars elided…\n${s.slice(-half)}`;
 }
 
 /** Is this the provider saying "too fast" rather than "bad request"? Callers with
@@ -537,10 +542,10 @@ export async function anthropicToolLoop({
         call_id: call.call_id,
         act: toolResult.act || act,
         ok: !!toolResult.ok,
-        detail: clipJson(toolResult.error || toolResult.result || toolResult, 400),
+        detail: clip(toolResult.error || toolResult.result || toolResult, 400),
       });
       const { image_b64, ...rest } = toolResult;
-      const content = [{ type: 'text', text: clipJson(rest) }];
+      const content = [{ type: 'text', text: clip(rest) }];
       if (image_b64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image_b64 } });
       results.push({ type: 'tool_result', tool_use_id: call.call_id || call.id, content });
     }
