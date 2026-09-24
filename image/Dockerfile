@@ -64,9 +64,13 @@ RUN useradd -m -u 1000 -s /bin/bash agent \
 RUN apt-get update && apt-get install -y --no-install-recommends thunar xfdesktop4 \
     && rm -rf /var/lib/apt/lists/*
 
+# Unlock PEP-668 so pip works. Non-root pip defaults to --user (~/.local),
+# which lives on the volume — pip installs survive container recreation.
+RUN printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
+
 # Desktop look: wallpaper, single-bar panel config, Greybird theme, and a custom
 # cursor theme ("case", left_ptr in 24/32/48px). Per-user configs are seeded from
-# /usr/share/case by start.sh only when missing, so user changes survive.
+# /usr/share/case by start.sh: only when missing, except once after each LOOK bump.
 COPY assets/wallpaper.png /usr/share/backgrounds/case.png
 COPY assets/cursor-left_ptr /usr/share/icons/case/cursors/left_ptr
 RUN printf '[Icon Theme]\nName=case\n' > /usr/share/icons/case/index.theme
@@ -75,9 +79,6 @@ COPY assets/gtk-settings.ini assets/xfce4-panel.xml assets/xfwm4.xml assets/xfce
 COPY deskd.py /opt/deskd/deskd.py
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
-# Unlock PEP-668 so pip works. Non-root pip defaults to --user (~/.local),
-# which lives on the volume — pip installs survive container recreation.
-RUN printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
 
 USER agent
 WORKDIR /home/agent
