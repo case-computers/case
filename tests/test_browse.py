@@ -526,6 +526,18 @@ def test_locate_script_prefers_stored_handle_then_heal():
     assert "healed" in src
 
 
+def test_locate_fast_path_names_elements_like_the_walk():
+    # a submit input's value, an image's alt or a title never matched the stored
+    # handle's own shorter name, so those clicks always fell back to a re-walk
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": True, "name": "x", "tag": "a", "x": 1, "y": 1}})
+    browse.desk_json = fake_desk({"ok": True})
+    browse.click_element(ROW, 0, name="x", snapshot_after=False)
+    src = browse.eval_js.calls[0]
+    assert "const nm=__name(stored)" in src and "const name=__name(el)" in src
+    assert src.count("el.alt") == 1, src
+
+
 def test_click_activates_a_new_tab():
     listing0 = '[{"type":"page","id":"AA11","title":"One","url":"https://a"}]'
     listing1 = ('[{"type":"page","id":"BB22","title":"Two","url":"https://b"},'

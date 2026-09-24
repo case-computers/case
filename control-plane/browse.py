@@ -73,6 +73,12 @@ const __occluded=el=>{
   if(!hit)return false;
   return hit!==el&&!el.contains(hit)&&!hit.contains(el);
 };
+const __name=el=>{
+  const tag=el.tagName.toLowerCase();
+  return (el.getAttribute('aria-label')||el.placeholder||
+    ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
+    el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
+};
 const __contained=r=>__boxes.some(b=>r.x>=b.x&&r.x+r.w<=b.x+b.w&&r.y>=b.y&&r.y+r.h<=b.y+b.h);
 const __topRect=el=>{
   let r=el.getBoundingClientRect(),x=r.left,y=r.top;
@@ -92,9 +98,7 @@ const __push=(el,where)=>{
   __seen.add(el);
   __boxes.push(tr);
   const tag=el.tagName.toLowerCase();
-  const name=(el.getAttribute('aria-label')||el.placeholder||
-    ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
-    el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
+  const name=__name(el);
   const bx=(window.outerWidth-window.innerWidth)/2;
   __els.push({el,tag,type:(el.type||el.getAttribute('role')||''),name,
     value:('value'in el&&!__secretish(el)&&tag!=='button')?String(el.value).slice(0,40):'',
@@ -177,7 +181,7 @@ const __coords=(el,nm,tag,healed,oldI,newI)=>{
 const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
 if(stored&&stored.isConnected){
   const tag=stored.tagName.toLowerCase();
-  const nm=(stored.getAttribute('aria-label')||stored.placeholder||stored.innerText||'').trim().replace(/\\s+/g,' ').slice(0,80);
+  const nm=__name(stored);
   if(__nameOk(nm))return __coords(stored,nm,tag,false,__i,__i);
 }
 if(__i>=0&&__i<__els.length){
