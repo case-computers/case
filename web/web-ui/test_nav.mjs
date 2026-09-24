@@ -48,6 +48,7 @@ fs.writeFileSync(mod, `
   const sendPrompt = (n) => calls.push('send ' + n.text + ' to ' + (activeTid || 'new'));
   const openThread = (t) => { calls.push('open ' + t); activeTid = loadingTid = t; };
   ${grab('drainQ')}
+  ${grab('orphanQueued')}
   // the real openThread, against a fetch that fails
   let threadGen = 0, fetchFails = false;
   const inner = { innerHTML: '', appendChild() {} }, log = {}, md = (x) => x, paint = () => {};
@@ -155,6 +156,18 @@ assert(fake.calls.join() === 'open t6' && fake.promptQ.length === 1,
   'a queued prompt for it retries the load instead of sending');
 fake.calls.length = 0;
 fake.promptQ.length = 0;
+// A thread that is gone for good hands its queued prompts to a new task, and the
+// prompts behind them are no longer stuck.
+fake.view('t1');
+fake.down(false);
+fake.promptQ.push({ text: 'orphan', files: [], tid: 't7' }, { text: 'next', files: [], tid: 't1' });
+await fake.open('t7');
+assert(fake.calls.join() === 'send orphan to new',
+  'a prompt for a deleted thread starts a new task instead of blocking the queue');
+assert(fake.promptQ.length === 1 && fake.promptQ[0].text === 'next', 'and the rest stay queued in order');
+fake.calls.length = 0;
+fake.promptQ.length = 0;
+fake.view('t2');
 fake.promptQ.push({ text: 'fresh', files: [], tid: '' });
 fake.drainQ('t2');
 assert(fake.calls.join() === 'new,send fresh to new', 'a prompt typed into a new task starts one');

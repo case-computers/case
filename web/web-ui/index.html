@@ -884,6 +884,7 @@ async function deleteThread(tid){
   if(row)row.classList.add('gone');
   fetch('/api/threads?id='+encodeURIComponent(tid),{method:'DELETE'}).catch(()=>{});
   threads=threads.filter(t=>t.id!==tid);
+  orphanQueued(tid);
   const finish=()=>{
     if(activeTid===tid){activeTid='';showEmpty();}
     paint();
@@ -909,7 +910,11 @@ async function openThread(tid){
     if(gen!==threadGen)return;   // clicked on to another thread meanwhile
     loadingTid='';
     // a thread that never loaded is not open: clicking it (or a queued prompt) retries
-    if(!r.ok){activeTid='';paint();inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';return;}
+    if(!r.ok){
+      activeTid='';paint();inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';
+      orphanQueued(tid);drainQ('');
+      return;
+    }
     // Deliberately does NOT follow j.agent: moving you to another computer
     // behind a click means another set of logins. Deploy owns the seat.
     inner.innerHTML='';
@@ -1479,6 +1484,11 @@ function drainQ(ran){
   const n=promptQ.shift();paintQ();
   if(!to&&activeTid)newTask();
   sendPrompt(n);
+}
+/* Prompts queued for a thread that is gone start a new task instead, so they are
+   neither lost nor left blocking the prompts queued behind them. */
+function orphanQueued(tid){
+  for(const p of promptQ)if(p&&typeof p==='object'&&p.tid===tid)p.tid='';
 }
 /* Mid-turn message: try to inject into the running turn; fall back to the
    local queue if the turn just ended (409) or the server is unreachable. */
