@@ -497,6 +497,7 @@ FOCUS_PASS = (f"(()=>{{{VIS}const p=[...document.querySelectorAll('input[type=\"
 FOCUS_CODE = (f"(()=>{{{VIS}const c=[...document.querySelectorAll('{CODE_SEL}')].find(vis);"
               "if(!c)return false; c.focus(); if(c.select)c.select(); return true;})()")
 PAGE_TEXT = "(document.body ? document.body.innerText.slice(0, 5000) : '')"
+WATCH_JS = "[(document.body ? document.body.innerText.slice(0, 3000) : ''), location.href]"
 CLEAR_PASS = "[...document.querySelectorAll('input[type=\"password\"]')].forEach(p=>{p.value=''})"
 
 # Generic auth observation — no website names. The JS only collects raw material
@@ -1164,8 +1165,7 @@ def watchdog():
         try:
             tab = Tab()
             try:
-                text = (tab.js(PAGE_TEXT) or "")[:3000]
-                href = tab.js("location.href") or ""
+                text, href = tab.js(WATCH_JS) or ("", "")
             finally:
                 tab.close()
             # text only, and only once the page has painted. Matching the href raised a
