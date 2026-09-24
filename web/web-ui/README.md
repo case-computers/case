@@ -25,4 +25,5 @@ network and never dials a desktop itself.
 Run: `node web/web-ui/serve.mjs` → http://127.0.0.1:4174/  and  /deploy
 (or `docker compose up` from the repo root)
 
-Tests: `node web/web-ui/test_serve.mjs`, `test_nav.mjs`, `test_deploy.mjs`
+Tests: `npm --prefix web test` runs every `web-ui/test_*.mjs`, each in its own
+node process.
