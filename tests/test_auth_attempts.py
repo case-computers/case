@@ -429,6 +429,40 @@ def test_login_result_compat_shape():
     assert "revision" in lr
 
 
+def test_fail_reason_is_kept_and_exposed():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    assert a["fail_reason"] is None
+    auth_attempts.fail_attempt(a["id"], reason="handoff_expired")
+    got = auth_attempts.get_attempt(a["id"])
+    assert got["fail_reason"] == "handoff_expired", got
+    assert got["login_result"]["reason"] == "authentication_failed", got
+    assert got["login_result"]["fail_reason"] == "handoff_expired", got
+    waited = auth_attempts._wait_payload(auth_attempts.attempt_public(
+        store.get_auth_attempt(a["id"])), changed=True)
+    assert waited["login_result"]["fail_reason"] == "handoff_expired", waited
+
+
+def test_fail_reason_column_is_migrated_onto_an_old_db():
+    import sqlite3
+    from store import Store
+    home = tempfile.mkdtemp(prefix="case-auth-attempts-old-")
+    try:
+        db = sqlite3.connect(os.path.join(home, "case.db"))
+        db.execute("CREATE TABLE auth_attempts (id TEXT PRIMARY KEY, computer_id TEXT NOT NULL, "
+                   "credential TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL "
+                   "DEFAULT 0, target_url TEXT, proof_spec TEXT, idempotency_key TEXT, "
+                   "current_handoff_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        db.commit()
+        db.close()
+        old = Store(home)
+        cols = {r["name"] for r in old.db.execute("PRAGMA table_info(auth_attempts)")}
+        old.db.close()
+        assert "fail_reason" in cols, cols
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_malformed_proof_spec_never_authenticates():
     """Unknown keys / empty predicates must not count as configured success."""
     for i, bad in enumerate(

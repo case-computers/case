@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS auth_attempts (
   idempotency_key TEXT,
   current_handoff_id TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  fail_reason TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_idempotency
   ON auth_attempts(computer_id, idempotency_key)
@@ -148,6 +149,7 @@ class Store:
         ("credentials", "proof_spec", "TEXT"),
         ("credentials", "verification_hosts", "TEXT"),
         ("schedules", "tz", "TEXT"),
+        ("auth_attempts", "fail_reason", "TEXT"),
     ]
 
     def _migrate(self):
@@ -461,12 +463,13 @@ class Store:
             "SELECT * FROM auth_attempts WHERE computer_id=? AND idempotency_key=?",
             (computer_id, idempotency_key))
 
-    def cas_auth_attempt_status(self, aid, from_status, to_status, revision_expect):
+    def cas_auth_attempt_status(self, aid, from_status, to_status, revision_expect,
+                                fail_reason=None):
         """Compare-and-set status + bump revision. rowcount 1 = this caller won."""
         return self.q(
-            "UPDATE auth_attempts SET status=?, revision=revision+1, updated_at=? "
-            "WHERE id=? AND status=? AND revision=?",
-            (to_status, now(), aid, from_status, revision_expect)).rowcount
+            "UPDATE auth_attempts SET status=?, revision=revision+1, updated_at=?, "
+            "fail_reason=COALESCE(?, fail_reason) WHERE id=? AND status=? AND revision=?",
+            (to_status, now(), fail_reason, aid, from_status, revision_expect)).rowcount
 
     def set_attempt_handoff(self, aid, handoff_id):
         return self.q(

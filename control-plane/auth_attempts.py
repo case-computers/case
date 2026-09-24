@@ -94,6 +94,7 @@ def attempt_public(row):
         "proof_level": _proof_level(proof_spec),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "fail_reason": row_get(row, "fail_reason"),
     }
 
 
@@ -114,7 +115,8 @@ def login_result(attempt, reason=None):
                 "reason": reason or "proof_missing_or_failed"}
     if st == "failed":
         return {**base, "status": "failed",
-                "reason": reason or "authentication_failed"}
+                "reason": reason or "authentication_failed",
+                "fail_reason": attempt.get("fail_reason")}
     if st == "cancelled":
         return {**base, "status": "failed", "reason": reason or "cancelled"}
     if st == "expired":
@@ -144,8 +146,9 @@ def _publish_updated(pub):
     })
 
 
-def _cas_or_conflict(aid, from_status, to_status, revision_expect):
-    n = store.cas_auth_attempt_status(aid, from_status, to_status, revision_expect)
+def _cas_or_conflict(aid, from_status, to_status, revision_expect, fail_reason=None):
+    n = store.cas_auth_attempt_status(aid, from_status, to_status, revision_expect,
+                                      fail_reason=fail_reason)
     if n != 1:
         raise ApiError(409, "revision_conflict",
                        "auth attempt revision or status changed")
@@ -446,16 +449,13 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
 
 
 def fail_attempt(attempt_id, reason=None, expected_revision=None):
-    """Terminal failure; updates credential last_status=failed.
-
-    `reason` is for callers building a LoginResult; not stored on the attempt row.
-    """
-    _ = reason
+    """Terminal failure; updates credential last_status=failed and keeps `reason`
+    as the attempt's fail_reason."""
     row = _require(attempt_id)
     if row["status"] in AUTH_ATTEMPT_TERMINAL:
         return attempt_public(row)
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
-    pub = _cas_or_conflict(attempt_id, row["status"], "failed", rev)
+    pub = _cas_or_conflict(attempt_id, row["status"], "failed", rev, fail_reason=reason)
     store.record_credential_result(row["computer_id"], row["credential"], "failed")
     from events import emit
     emit("login_completed", {
