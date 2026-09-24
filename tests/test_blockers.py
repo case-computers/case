@@ -35,6 +35,21 @@ def test_late_challenge_probe_matches_path_not_full_url():
     assert result["status"] == "handoff_pending", result
 
 
+def test_late_check_your_email_wall_is_a_device_challenge():
+    # deskd tags this page email_verify, which advance_attempt raises as device.
+    for probe_out, kind in (({"otp": False, "email": True, "text": "Check your email"}, "device"),
+                            ({"otp": True, "email": True, "text": "Enter the code"}, "otp")):
+        with mock.patch.object(login_flow, "eval_value", return_value=probe_out), \
+             mock.patch.object(login_flow, "screenshot_b64", return_value=None), \
+             mock.patch.object(cased.auth_attempts, "raise_challenge",
+                               return_value={"id": "a_1", "revision": 2,
+                                             "status": "awaiting_human",
+                                             "current_handoff_id": "h_1"}) as raise_:
+            login_flow._post_login_challenge(
+                ROW, "c_1", "instagram.com", "https://instagram.com/", attempt_id="a_1")
+        assert raise_.call_args.args[1] == kind, (probe_out, raise_.call_args)
+
+
 def test_active_attempt_reuses_its_pending_handoff():
     active = {"id": "a_1", "current_handoff_id": "h_live"}
     live = {"id": "h_live", "status": "pending"}

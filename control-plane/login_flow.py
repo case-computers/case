@@ -80,23 +80,24 @@ def _post_login_challenge(row, cid, name, url, attempt_id=None):
         "const challengePath=path.split('/').some("
         "p=>/^(codeentry|challenge|checkpoint)$/i.test(p));"
         "const otp=/two.?factor|\\b2fa\\b|one.?time|verification code|authentication code|"
-        "enter the code|\\b\\d\\s?-?\\s?digit code|check your email/i.test(text)"
-        "||challengePath;"
-        "return {href, text:text.slice(0,240), otp};"
+        "enter the code|\\b\\d\\s?-?\\s?digit code/i.test(text)||challengePath;"
+        "const email=/check your email/i.test(text);"
+        "return {href, text:text.slice(0,240), otp, email};"
         "})()"
     )
     deadline = time.time() + 12.0
     while time.time() < deadline:
         v = eval_value(row, probe, timeout_s=8)
         v = v if isinstance(v, dict) else {}
-        if v.get("otp"):
+        if v.get("otp") or v.get("email"):
             prompt = f"{links.normalize_domain(url)}: {str(v.get('text') or 'enter the code')[:160]}"
             try:
                 shot = screenshot_b64(row)
             except Exception:
                 shot = None
+            # An email-only wall is deskd's email_verify: a live-desk (device) challenge.
             pub = auth_attempts.raise_challenge(
-                attempt_id, "otp", prompt, screenshot=shot,
+                attempt_id, "otp" if v.get("otp") else "device", prompt, screenshot=shot,
                 domain=links.normalize_domain(url))
             return auth_attempts.login_result(pub)
         time.sleep(0.8)
