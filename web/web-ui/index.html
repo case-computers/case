@@ -778,6 +778,7 @@ let pickLost=false;   // picked a computer, it is not on the box any more
 let comps=[];
 let threads=[];
 let activeTid='';
+let loadingTid='';  // activeTid while openThread is still fetching it
 let runTid='';     // thread of the turn in flight; activeTid is only the one on screen
 let threadGen=0;
 const EMPTY_HTML='<div class="empty" id="emptyState"><div class="h">DRIVE</div><p class="say">Tell it what to do. Watch if you want.</p><div class="ex" id="exPrompt">“<b>open x.com and tell me what\'s on the home feed</b>”</div></div>';
@@ -865,7 +866,7 @@ function claimThread(tid,agentId){
 }
 function newTask(){
   threadGen++;
-  activeTid='';
+  activeTid=loadingTid='';
   showEmpty();
   paint();
   $('q').focus();
@@ -900,12 +901,13 @@ $('newAgent').addEventListener('click',()=>newTask());
 async function openThread(tid){
   if(tid===activeTid)return;
   const gen=++threadGen;
-  activeTid=tid;
+  activeTid=loadingTid=tid;
   paint();
   try{
     const r=await fetch('/api/threads?id='+encodeURIComponent(tid));
     const j=await r.json();
     if(gen!==threadGen)return;   // clicked on to another thread meanwhile
+    loadingTid='';
     if(!r.ok){inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';return;}
     // Deliberately does NOT follow j.agent: moving you to another computer
     // behind a click means another set of logins. Deploy owns the seat.
@@ -931,7 +933,7 @@ async function openThread(tid){
     log.scrollTop=log.scrollHeight;
     if(promptQ.length&&queuedThread(promptQ[0],'')===tid)drainQ(tid);
   }catch{
-    if(gen===threadGen)inner.innerHTML='<div class="empty">cannot reach the drive server</div>';
+    if(gen===threadGen){loadingTid='';inner.innerHTML='<div class="empty">cannot reach the drive server</div>';}
   }
 }
 
@@ -1455,6 +1457,7 @@ $('go').addEventListener('submit',e=>{
     if(files.length){promptQ.push({text:t,files,tid:activeTid});paintQ();return;}
     steerPrompt(t);return;
   }
+  if(loadingTid&&loadingTid===activeTid){promptQ.push({text:t,files,tid:activeTid});paintQ();return;}
   sendPrompt(t,files);
 });
 /* A message typed mid-turn steers the running turn only while that turn is on
@@ -1471,6 +1474,7 @@ function drainQ(ran){
   if(chatCtl||!promptQ.length)return;
   const to=queuedThread(promptQ[0],ran);
   if(to&&to!==activeTid){openThread(to);return;}
+  if(to&&loadingTid===to)return;   // sent into a view the load is about to replace
   const n=promptQ.shift();paintQ();
   if(!to&&activeTid)newTask();
   sendPrompt(n);

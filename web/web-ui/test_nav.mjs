@@ -41,14 +41,15 @@ fs.writeFileSync(mod, `
   ${grab('steerTarget')}
   ${grab('queuedThread')}
   // drainQ against a fake page: opening a thread is recorded, not loaded
-  let chatCtl = null;
+  let chatCtl = null, loadingTid = '';
   const promptQ = [], calls = [];
   const paintQ = () => {};
   const newTask = () => { calls.push('new'); activeTid = ''; };
   const sendPrompt = (n) => calls.push('send ' + n.text + ' to ' + (activeTid || 'new'));
-  const openThread = (t) => { calls.push('open ' + t); activeTid = t; };
+  const openThread = (t) => { calls.push('open ' + t); activeTid = loadingTid = t; };
   ${grab('drainQ')}
-  export const fake = { promptQ, calls, drainQ, view: (t) => { activeTid = t; } };
+  export const fake = { promptQ, calls, drainQ, view: (t) => { activeTid = t; loadingTid = ''; },
+                        loading: (t) => { activeTid = loadingTid = t; } };
   export const set = (s) => {
     apiUp = s.apiUp ?? true;
     comps = s.comps || [];
@@ -121,6 +122,15 @@ assert(fake.promptQ.length === 1, 'and does not send while that thread is not on
 fake.view('t2');                                   // t2 finished loading: openThread drains
 fake.drainQ('t2');
 assert(fake.calls.join() === 'open t2,send hi to t2', 'it goes to t2 once t2 is up');
+fake.calls.length = 0;
+fake.loading('t5');                                // a turn ends while t5 is still loading
+fake.promptQ.push({ text: 'later', files: [], tid: 't5' });
+fake.drainQ('t4');
+assert(fake.calls.length === 0 && fake.promptQ.length === 1,
+  'a prompt for a thread still loading waits for the load');
+fake.view('t5');
+fake.drainQ('t5');
+assert(fake.calls.join() === 'send later to t5', 'and is sent once it has loaded');
 fake.calls.length = 0;
 fake.promptQ.push({ text: 'fresh', files: [], tid: '' });
 fake.drainQ('t2');
