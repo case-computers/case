@@ -1291,7 +1291,7 @@ async function loadSchedules(){
   try{
     const r=await fetch('/api/schedules?'+compQ());
     const j=await r.json().catch(()=>[]);
-    if(!r.ok){$('schedList').innerHTML='<div class="sched-empty">'+(apiErr(j)||'could not load')+'</div>';return;}
+    if(!r.ok){$('schedList').innerHTML='<div class="sched-empty">'+esc(apiErr(j)||'could not load')+'</div>';return;}
     paintSchedList(Array.isArray(j)?j:[]);
   }catch{$('schedList').innerHTML='<div class="sched-empty">cased unreachable</div>';}
 }

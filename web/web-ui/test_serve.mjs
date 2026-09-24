@@ -31,6 +31,7 @@ assert.match(html, /id="schedBtn"/);
 assert.match(html, /id="schedBtnM"/);
 assert.match(html, /Intl\.supportedValuesOf/);
 assert.match(html, /brain_key/);
+for (const m of html.matchAll(/innerHTML=[^\n]*apiErr\(j\)[^\n]*/g)) assert.match(m[0], /esc\(apiErr\(j\)/, 'error text is escaped before innerHTML');
 for (const m of html.matchAll(/'\/api\/(fs|file|creds|schedules|teach-tick)[^;]*/g)) {
   assert.match(m[0], /compQ\(\)/, `${m[1]} names the picked computer: ${m[0]}`);
 }
