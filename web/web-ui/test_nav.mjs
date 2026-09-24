@@ -49,10 +49,15 @@ fs.writeFileSync(mod, `
   const openThread = (t) => { calls.push('open ' + t); activeTid = loadingTid = t; };
   ${grab('drainQ')}
   ${grab('orphanQueued')}
+  ${grab('holdQueued')}
   // the real openThread, against a fetch that fails
   let threadGen = 0, fetchFails = false, failStatus = 404;
   const inner = { innerHTML: '', appendChild() {} }, log = {}, md = (x) => x, paint = () => {};
-  const fetch = async () => { if (fetchFails) throw new Error('down'); return { ok: false, status: failStatus, json: async () => ({ error: 'gone' }) }; };
+  const fetch = async () => {
+    if (fetchFails) throw new Error('down');
+    if (failStatus === 200) return { ok: true, status: 200, json: async () => ({ turns: [] }) };
+    return { ok: false, status: failStatus, json: async () => ({ error: 'gone' }) };
+  };
   async ${grab('openThread').replace('function openThread(', 'function realOpenThread(')}
   export const fake = { promptQ, calls, drainQ, view: (t) => { activeTid = t; loadingTid = ''; },
                         loading: (t) => { activeTid = loadingTid = t; },
@@ -169,10 +174,18 @@ fake.calls.length = 0;
 fake.promptQ.length = 0;
 fake.view('t1');
 fake.status(401);                                  // the thread exists; this tab just lost its token
-fake.promptQ.push({ text: 'keep', files: [], tid: 't8' });
+fake.promptQ.push({ text: 'keep', files: [], tid: 't8' }, { text: 'behind', files: [], tid: '' });
 await fake.open('t8');
-assert(fake.calls.length === 0 && fake.promptQ[0].tid === 't8',
-  'an unauthorized load keeps the prompt queued for its own thread');
+assert(fake.promptQ.length === 1 && fake.promptQ[0].tid === 't8' && fake.promptQ[0].held,
+  'an unauthorized load holds the prompt for its own thread');
+assert(fake.calls.join() === 'send behind to new', 'and the prompts behind it are not stuck');
+fake.calls.length = 0;
+fake.drainQ('');
+assert(fake.calls.length === 0, 'a held prompt does not keep retrying its thread on every drain');
+fake.status(200);                                  // access is back and the user opens t8
+await fake.open('t8');
+assert(fake.calls.join() === 'send keep to t8' && fake.promptQ.length === 0,
+  'it goes out once its thread loads');
 fake.status(404);
 fake.calls.length = 0;
 fake.promptQ.length = 0;

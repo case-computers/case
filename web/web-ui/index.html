@@ -912,7 +912,8 @@ async function openThread(tid){
     // a thread that never loaded is not open: clicking it (or a queued prompt) retries
     if(!r.ok){
       activeTid='';paint();inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';
-      if(r.status===404){orphanQueued(tid);drainQ('');}   // gone; a 401 or 5xx is retried
+      if(r.status===404)orphanQueued(tid);else holdQueued(tid,true);   // gone, or retried on the next open
+      drainQ('');
       return;
     }
     // Deliberately does NOT follow j.agent: moving you to another computer
@@ -937,9 +938,13 @@ async function openThread(tid){
       inner.appendChild(art);
     }
     log.scrollTop=log.scrollHeight;
-    if(promptQ.length&&queuedThread(promptQ[0],'')===tid)drainQ(tid);
+    holdQueued(tid,false);
+    if(promptQ.some(p=>queuedThread(p,'')===tid))drainQ(tid);
   }catch{
-    if(gen===threadGen){activeTid=loadingTid='';paint();inner.innerHTML='<div class="empty">cannot reach the drive server</div>';}
+    if(gen===threadGen){
+      activeTid=loadingTid='';paint();inner.innerHTML='<div class="empty">cannot reach the drive server</div>';
+      holdQueued(tid,true);drainQ('');
+    }
   }
 }
 
@@ -1428,6 +1433,7 @@ const paintQ=()=>{
     chip.className='qchip';
     chip.innerHTML='<span class="qtxt"></span><button type="button" class="qx" aria-label="Remove queued prompt">×</button>';
     chip.querySelector('.qtxt').textContent=item.text||((item.files[0]&&item.files[0].name)||'queued');
+    if(p&&p.held)chip.title='Waits for its task to open';
     chip.querySelector('.qx').addEventListener('click',()=>{promptQ.splice(i,1);paintQ();});
     ql.appendChild(chip);
   });
@@ -1475,20 +1481,30 @@ function queuedThread(item,ran){
 }
 /* Send the next queued prompt to the thread it was typed into, never to whatever is
    on screen. A thread that has to load first drains from openThread once it is up;
-   pick another meanwhile and the prompt stays queued until its thread is opened. */
+   pick another meanwhile and the prompt stays queued until its thread is opened.
+   Prompts for the thread already on screen go first, so draining never pulls the
+   view away from it. A prompt whose thread failed to load is held, not retried on
+   a timer (that would switch the view unasked): the rest of the queue moves on and
+   it goes out when its thread next loads. */
 function drainQ(ran){
-  if(chatCtl||!promptQ.length)return;
-  const to=queuedThread(promptQ[0],ran);
+  if(chatCtl)return;
+  const live=promptQ.filter(p=>!(p&&p.held));
+  if(!live.length)return;
+  const n=live.find(p=>activeTid&&queuedThread(p,ran)===activeTid)||live[0];
+  const to=queuedThread(n,ran);
   if(to&&to!==activeTid){openThread(to);return;}
   if(to&&loadingTid===to)return;   // sent into a view the load is about to replace
-  const n=promptQ.shift();paintQ();
+  promptQ.splice(promptQ.indexOf(n),1);paintQ();
   if(!to&&activeTid)newTask();
   sendPrompt(n);
 }
 /* Prompts queued for a thread that is gone start a new task instead, so they are
    neither lost nor left blocking the prompts queued behind them. */
 function orphanQueued(tid){
-  for(const p of promptQ)if(p&&typeof p==='object'&&p.tid===tid)p.tid='';
+  for(const p of promptQ)if(p&&typeof p==='object'&&p.tid===tid){p.tid='';delete p.held;}
+}
+function holdQueued(tid,held){
+  for(const p of promptQ)if(p&&typeof p==='object'&&p.tid===tid){if(held)p.held=true;else delete p.held;}
 }
 /* Mid-turn message: try to inject into the running turn; fall back to the
    local queue if the turn just ended (409) or the server is unreachable. */
