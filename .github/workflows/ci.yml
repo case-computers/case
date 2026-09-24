@@ -60,7 +60,7 @@ jobs:
           npm --prefix web test
 
       - name: Shell scripts
-        run: shellcheck -e SC1090 image/start.sh bin/case   # SC1090: ~/.case/env is the user's
+        run: .venv/bin/shellcheck -e SC1090 image/start.sh bin/case   # SC1090: ~/.case/env is the user's
 
       - name: Compose file
         run: docker compose config -q

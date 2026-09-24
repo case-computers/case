@@ -43,7 +43,7 @@ case "${1:-help}" in
             systemctl stop cased; exit 0        # else systemd just restarts it in 3s
           fi
           pkill -f '[c]ased.py' 2>/dev/null || true
-          [ "$(uname)" = Darwin ] && colima stop || true ;;
+          if [ "$(uname)" = Darwin ]; then colima stop || true; fi ;;
   new)    c -X POST "$BASE/computers" -H 'Content-Type: application/json' \
             -d "$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1]}))' "${2:-}")" | pp ;;
   ls)     c "$BASE/computers" | pp ;;
