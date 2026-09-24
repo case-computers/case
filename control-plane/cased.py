@@ -1142,6 +1142,7 @@ def _prune_history():
     unlink_run_artifacts(store.prune_old_runs(keep=1000))
     prune_old_audit_files()
     store.prune_terminal_handoffs(cutoff)
+    store.prune_terminal_auth_attempts(cutoff)
 
 
 def sweeper():
