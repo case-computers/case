@@ -7,3 +7,5 @@ requests==2.34.2
 mcp==1.28.1
 Pillow==12.3.0
 websockets==15.0.1
+# zoneinfo data for named schedule timezones when the base image has none
+tzdata==2026.4
