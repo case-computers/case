@@ -145,21 +145,6 @@ class Store:
             cols = [r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")]
             if col not in cols:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
-        # Indexes are also in SCHEMA; re-assert for DBs created before they existed.
-        self.db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_idempotency "
-            "ON auth_attempts(computer_id, idempotency_key) "
-            "WHERE idempotency_key IS NOT NULL")
-        self.db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_one_active "
-            "ON auth_attempts(computer_id) "
-            "WHERE status IN ('created','advancing','awaiting_human','proving')")
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_handoffs_computer_status "
-            "ON handoffs(computer_id, status)")
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_handoffs_status_created "
-            "ON handoffs(status, created_at)")
         # Pre-migration handoff rows: treat missing revision as 0.
         self.db.execute("UPDATE handoffs SET revision=0 WHERE revision IS NULL")
         self.db.commit()
