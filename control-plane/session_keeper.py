@@ -29,9 +29,9 @@ from store import store
 from util import now, row_get
 
 # Default: every 6 hours per computer, not every 20s sweeper tick.
-INTERVAL_S = max(60, int(os.environ.get("CASE_SESSION_KEEPER_INTERVAL_S", "21600")))
+INTERVAL_S = max(60, int(os.environ.get("CASE_SESSION_KEEPER_INTERVAL_S") or 21600))
 # Skip probing a running computer the agent/human touched this recently.
-BUSY_S = max(0, int(os.environ.get("CASE_SESSION_KEEPER_BUSY_S", "900")))
+BUSY_S = max(0, int(os.environ.get("CASE_SESSION_KEEPER_BUSY_S") or 900))
 
 # computer_id → monotonic timestamp of last completed probe pass for that box
 _last_probe_at = {}

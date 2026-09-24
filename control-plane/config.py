@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s
 log = logging.getLogger("cased")
 
 IMAGE = os.environ.get("CASE_IMAGE", "case-desk:0.1")
-MAX_RUNNING = int(os.environ.get("CASE_MAX_RUNNING", "8"))
+MAX_RUNNING = int(os.environ.get("CASE_MAX_RUNNING") or 8)
 
 
 def _host_ram_budget_mb():
@@ -73,7 +73,7 @@ BRAIN_URL = os.environ.get("CASE_BRAIN_URL", "")
 MCP_CONFIG = os.environ.get(
     "CASE_MCP_CONFIG",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "case-mcp.json"))
-BRAIN_TIMEOUT = int(os.environ.get("CASE_BRAIN_TIMEOUT", "1800"))
+BRAIN_TIMEOUT = int(os.environ.get("CASE_BRAIN_TIMEOUT") or 1800)
 
 CASE_HOME = os.environ.get("CASE_HOME", os.path.expanduser("~/.case"))
 RUNS_DIR = os.path.join(CASE_HOME, "runs")   # per-run screenshot artifacts (host side)

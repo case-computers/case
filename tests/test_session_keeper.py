@@ -304,6 +304,30 @@ def test_tick_respects_cadence_and_skips_recent_live_session():
     assert wakes == [], wakes
 
 
+def test_empty_env_lines_fall_back_to_defaults():
+    # bin/case sources ~/.case/env, where `CASE_MAX_RUNNING=` is an empty string,
+    # not an unset one: int("") crashed cased at import.
+    import importlib
+    import config
+    keys = ("CASE_MAX_RUNNING", "CASE_BRAIN_TIMEOUT",
+            "CASE_SESSION_KEEPER_INTERVAL_S", "CASE_SESSION_KEEPER_BUSY_S")
+    try:
+        for k in keys:
+            os.environ[k] = ""
+        importlib.reload(config)
+        importlib.reload(session_keeper)
+        assert (config.MAX_RUNNING, config.BRAIN_TIMEOUT) == (8, 1800)
+        assert (session_keeper.INTERVAL_S, session_keeper.BUSY_S) == (21600, 900)
+        os.environ["CASE_SESSION_KEEPER_BUSY_S"] = "0"      # an explicit 0 still means off
+        importlib.reload(session_keeper)
+        assert session_keeper.BUSY_S == 0
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+        importlib.reload(config)
+        importlib.reload(session_keeper)
+
+
 def test_tick_is_not_reentrant():
     session_keeper._TICK.acquire()
     try:
