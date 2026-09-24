@@ -228,15 +228,7 @@ def _try_captcha_auto(row, cid, name, resume=True, record=True):
         # Settle then verify BEFORE resume, resume would clear state["login"].
         _settle_after_inject(row, seconds=9.0)
         verify = eval_js(row, captcha.VERIFY_JS, timeout_s=15)
-        v = (verify or {}).get("value") if isinstance(verify, dict) else None
-        page_blob = ""
-        has_password = False
-        if isinstance(v, dict):
-            page_blob = v.get("text") if isinstance(v.get("text"), str) else ""
-            has_password = bool(v.get("hasPassword"))
-        elif isinstance(v, str):
-            page_blob = v
-        if captcha.still_challenge(page_blob, has_password):
+        if captcha.verify_still_challenged(verify):
             log.info("captcha_auto=fail reason=still_present")
             if captcha_id:
                 captcha.report(captcha_id)

@@ -386,6 +386,15 @@ def still_challenge(page_text: str, has_password: bool = False) -> bool:
     return bool(RE_VERIFY.search(blob) or RE_FAIL_VERIFY.search(blob))
 
 
+def verify_still_challenged(verify) -> bool:
+    """still_challenge over a VERIFY_JS eval answer ({value: {text, hasPassword}})."""
+    v = verify.get("value") if isinstance(verify, dict) else None
+    if isinstance(v, dict):
+        text = v.get("text") if isinstance(v.get("text"), str) else ""
+        return still_challenge(text, bool(v.get("hasPassword")))
+    return still_challenge(v if isinstance(v, str) else "")
+
+
 class SolveResult(TypedDict):
     id: str
     token: str
