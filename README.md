@@ -338,11 +338,10 @@ runs directly on macOS, set `CASE_MAX_RAM_MB` explicitly; its automatic memory
 budget requires Linux's `/proc/meminfo`.
 
 A few settings only apply here. `CASE_PORT` moves cased off 8787.
-`CASE_VNC_PORT` pins every desktop's noVNC to one host port for a reverse
-proxy. `CASE_BRAIN_BIN`
-points the scheduler at a `claude` binary that is not on `PATH`, and
-`CASE_MCP_CONFIG` replaces `case-mcp.json`. On macOS, `CASE_CPU` and `CASE_MEM`
-size the Colima VM that `bin/case up` starts (default 4 CPUs, 4 GB).
+`CASE_VNC_PORT` pins every desktop's noVNC to one host port for a reverse proxy.
+`CASE_BRAIN_BIN` points the scheduler at a `claude` binary that is not on `PATH`,
+and `CASE_MCP_CONFIG` replaces `case-mcp.json`. On macOS, `CASE_CPU` and
+`CASE_MEM` size the Colima VM that `bin/case up` starts (default 4 CPUs, 4 GB).
 
 For a client that uses stdio MCP, [case-mcp.json](case-mcp.json) starts
 `mcp/case_mcp.py` with Python. It needs the installed Python dependencies and
