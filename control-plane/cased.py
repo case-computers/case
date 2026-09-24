@@ -1110,29 +1110,37 @@ def _spawn(fn, arg):
     threading.Thread(target=fn, args=(arg,), daemon=True).start()
 
 
+def _step(fn, *args):
+    """One sweeper step; its failure must not starve the steps after it."""
+    try:
+        fn(*args)
+    except Exception:
+        log.exception("sweeper: %s", getattr(fn, "__name__", fn))
+
+
+def _prune_history():
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    unlink_run_artifacts(store.prune_old_runs(keep=1000))
+    prune_old_audit_files()
+    store.prune_terminal_handoffs(cutoff)
+
+
 def sweeper():
     tick = 0
     while True:
         time.sleep(20)
         tick += 1
-        try:
-            lifecycle.reconcile()      # re-align DB with Docker if the daemon restarted
-            handoffs.expire_stale()
-            store.prune_expired_links()
-            store.prune_expired_assist_tokens()
-            if tick % 180 == 0:
-                cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-                unlink_run_artifacts(store.prune_old_runs(keep=1000))
-                prune_old_audit_files()
-                store.prune_terminal_handoffs(cutoff)
-            scheduler.fire_due_schedules(_spawn)
-            telemetry.heartbeat_if_due()   # at most one event per UTC day
-            # preflight persistent session health: it drives desks over the network,
-            # and a hung one must not stall reconcile or the schedule fire loop
-            threading.Thread(target=session_keeper.tick, daemon=True).start()
-        except Exception:
-            log.exception("sweeper")
+        _step(lifecycle.reconcile)      # re-align DB with Docker if the daemon restarted
+        _step(handoffs.expire_stale)
+        _step(store.prune_expired_links)
+        _step(store.prune_expired_assist_tokens)
+        if tick % 180 == 0:
+            _step(_prune_history)
+        _step(scheduler.fire_due_schedules, _spawn)
+        _step(telemetry.heartbeat_if_due)   # at most one event per UTC day
+        # preflight persistent session health: it drives desks over the network,
+        # and a hung one must not stall reconcile or the schedule fire loop
+        _step(threading.Thread(target=session_keeper.tick, daemon=True).start)
 
 
 def blocker_poller():
