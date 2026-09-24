@@ -496,6 +496,11 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(loopFn, /if \(!stopped\(\)\) emit\(\{ type: 'error'/);
   assert.match(html, /\/api\/chat\/steer/);
   assert.match(html, /steerPrompt/);
+  // switching threads mid-turn: a slow reopen never paints over a newer pick, and
+  // what is typed still steers the running turn, not the thread on screen
+  assert.match(html, /if\(gen!==threadGen\)return;/);
+  assert.match(html, /const tid=runTid&&runTid!=='__pending'\?runTid:'';/);
+  assert.ok(!/const tid=activeTid/.test(html));
   assert.match(html, /ev\.type==='round'\)\{mark=/, 'the UI marks where each provider round began');
   assert.match(html, /ev\.type==='round_reset'&&mark/, 'and drops a failed round\'s partial output on replay');
   assert.match(caseToolsSrc, /emit\(\{ type: 'round_reset' \}\);\n      result = await withRateRetry\(\(\) => round\(rest\)/,

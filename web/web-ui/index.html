@@ -777,6 +777,8 @@ let pickLost=false;   // picked a computer, it is not on the box any more
 let comps=[];
 let threads=[];
 let activeTid='';
+let runTid='';     // thread of the turn in flight; activeTid is only the one on screen
+let threadGen=0;
 const EMPTY_HTML='<div class="empty" id="emptyState"><div class="h">DRIVE</div><p class="say">Tell it what to do. Watch if you want.</p><div class="ex" id="exPrompt">“<b>open x.com and tell me what\'s on the home feed</b>”</div></div>';
 function showEmpty(){
   $('loginner').innerHTML=EMPTY_HTML;
@@ -859,6 +861,7 @@ function claimThread(tid,agentId){
   paint();
 }
 function newTask(){
+  threadGen++;
   activeTid='';
   showEmpty();
   paint();
@@ -893,11 +896,13 @@ async function deleteThread(tid){
 $('newAgent').addEventListener('click',()=>newTask());
 async function openThread(tid){
   if(tid===activeTid)return;
+  const gen=++threadGen;
   activeTid=tid;
   paint();
   try{
     const r=await fetch('/api/threads?id='+encodeURIComponent(tid));
     const j=await r.json();
+    if(gen!==threadGen)return;   // clicked on to another thread meanwhile
     if(!r.ok){inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';return;}
     // Deliberately does NOT follow j.agent: moving you to another computer
     // behind a click means another set of logins. Deploy owns the seat.
@@ -922,7 +927,7 @@ async function openThread(tid){
     }
     log.scrollTop=log.scrollHeight;
   }catch{
-    inner.innerHTML='<div class="empty">cannot reach the drive server</div>';
+    if(gen===threadGen)inner.innerHTML='<div class="empty">cannot reach the drive server</div>';
   }
 }
 
@@ -1451,11 +1456,12 @@ $('go').addEventListener('submit',e=>{
 /* Mid-turn message: try to inject into the running turn; fall back to the
    local queue if the turn just ended (409) or the server is unreachable. */
 async function steerPrompt(t){
-  const tid=activeTid&&activeTid!=='__pending'?activeTid:'';
+  const tid=runTid&&runTid!=='__pending'?runTid:'';
   if(!tid){promptQ.push(t);paintQ();return;}
   try{
     const r=await fetch('/api/chat/steer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread_id:tid,input:t})});
     if(!r.ok){promptQ.push(t);paintQ();return;}
+    if(activeTid!==tid)return;   // on screen is another thread; reopening this one shows it
     const art=document.createElement('article');
     art.className='turn you';
     art.innerHTML='<div class="k">YOU</div><p></p>';
@@ -1481,6 +1487,7 @@ async function sendPrompt(t,files){
     const th=threads.find(x=>x.id===activeTid);
     if(th){th.updated=Date.now();th.pending=true;paint();}
   }
+  runTid=activeTid;
   const art=document.createElement('article');
   art.className='turn you';
   art.innerHTML='<div class="k">YOU</div><p></p>';
@@ -1577,6 +1584,7 @@ async function sendPrompt(t,files){
             for(const el of $('navlist').querySelectorAll('[data-t="__pending"]')) el.dataset.t=ev.thread_id;
           }
           if(activeTid==='__pending')activeTid=ev.thread_id;
+          if(runTid==='__pending')runTid=ev.thread_id;
         }
         else if(ev.type==='claim'&&ev.thread_id){claimThread(ev.thread_id,ev.agent);}
         else if(ev.type==='round'){mark={raw,think:thinkEl.textContent,tools:toolsEl.children.length};}
@@ -1617,8 +1625,16 @@ async function sendPrompt(t,files){
     $('stopBtn').hidden=true;
     caret.remove();
     if(activeTid==='__pending')activeTid=''; // stream died before the thread was born
+    const ran=runTid!=='__pending'?runTid:'';
+    runTid='';
     refresh(); // state may have changed (wake on first tool); threads re-sync too
-    if(promptQ.length){const n=promptQ.shift();paintQ();sendPrompt(n);}
+    // Queued prompts were typed into the turn that just ended: they continue its
+    // thread, even if another one is on screen now.
+    if(promptQ.length){
+      const n=promptQ.shift();paintQ();
+      if(ran&&ran!==activeTid)openThread(ran).then(()=>{if(chatCtl){promptQ.unshift(n);paintQ();}else sendPrompt(n);});
+      else sendPrompt(n);
+    }
   }
 }
 
