@@ -125,7 +125,7 @@ def test_cas_revision_conflict():
     assert store.get_auth_attempt(a["id"])["revision"] == 1
     # stale revision on cancel
     _helpers.raises(lambda: auth_attempts.cancel_attempt(a["id"], expected_revision=0),
-            "revision_conflict")
+                    "revision_conflict")
     # store-level CAS
     n = store.cas_auth_attempt_status(a["id"], "advancing", "proving", 0)
     assert n == 0
@@ -169,7 +169,7 @@ def test_raise_challenge_while_proving_creates_no_handoff():
     store.cas_auth_attempt_status(a["id"], "created", "proving", 0)
     with mock.patch("handoffs.create_handoff") as create:
         _helpers.raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
-                "illegal_transition")
+                        "illegal_transition")
     create.assert_not_called()
 
 
@@ -187,7 +187,7 @@ def test_raise_challenge_losing_to_a_cancel_leaves_no_pending_child():
          mock.patch("deskclient.screenshot_b64", return_value=None), \
          mock.patch("handoffs.create_handoff", side_effect=create_then_cancel):
         _helpers.raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
-                "revision_conflict")
+                        "revision_conflict")
     rows = store.all("SELECT id, status FROM handoffs")
     assert [r["status"] for r in rows] == ["failed"], [dict(r) for r in rows]
     assert not handoffs.LOGIN_CTX, handoffs.LOGIN_CTX
@@ -220,9 +220,9 @@ def test_claim_challenge_cas():
     assert "answer" not in claimed
     # stale / wrong status
     _helpers.raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=0),
-            "revision_conflict")
+                    "revision_conflict")
     _helpers.raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=1),
-            "revision_conflict")
+                    "revision_conflict")
 
 
 def test_missing_proof_spec_ends_unverified():
@@ -241,6 +241,8 @@ def test_missing_proof_spec_ends_unverified():
         out = auth_attempts.advance_attempt(a["id"])
     assert out["status"] == "unverified", out
     rec.assert_called_with("c_1", "github", "unverified")
+    emit.assert_any_call("login_completed", {"computer_id": "c_1", "credential": "github",
+                                             "status": "unverified", "attempt_id": a["id"]})
     # never authenticated
     assert store.get_auth_attempt(a["id"])["status"] == "unverified"
 

@@ -153,7 +153,7 @@ def test_wake_respects_ram_budget():
         store.set_state(cid, "asleep")
         assert store.active_ram_mb() == 3072
         from lifecycle import do_wake
-        _helpers.raises(lambda: do_wake(cid), "not_enough_ram")  # 3072 + 2048 > 4096
+        _helpers.raises(lambda: do_wake(cid), "not_enough_ram")   # 3072 + 2048 > 4096
         lifecycle.MAX_RAM_MB = 8192                                # budget raised: admitted
         lifecycle.admit(2048)
     finally:

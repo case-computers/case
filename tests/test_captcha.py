@@ -463,7 +463,6 @@ def _detect_ok():
 def test_try_captcha_auto_solve_none_falls_through():
     """solve_if_capable returns None → helper None so login creates handoff."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
 
@@ -484,7 +483,6 @@ def test_try_captcha_auto_solve_none_falls_through():
 def test_try_captcha_auto_still_present_reports_and_falls_through():
     """Verify fails (captcha phrases) → report + None; NEVER resume."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
 
@@ -493,10 +491,6 @@ def test_try_captcha_auto_still_present_reports_and_falls_through():
             return _detect_ok()
         if expr == "location.href":
             return {"ok": True, "value": "https://x"}
-        if "setRecaptchaFields" in expr or "TOKEN_PLACEHOLDER" in expr or "tok" in expr \
-                or "recaptcha_form" in expr or "family" in (expr[:80] if False else "") \
-                or "INJECT" in expr:
-            pass
         if expr == captcha.SETTLE_JS or "readyState" in expr:
             return {"ok": True, "value": {"href": "https://x", "ready": "complete"}}
         if expr == captcha.VERIFY_JS:
@@ -561,7 +555,6 @@ def test_try_captcha_auto_verify_eval_error_no_resume():
 def test_try_captcha_auto_otp_phrase_no_resume():
     """OTP/verification-code page after inject → fail, no resume."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
 
@@ -593,7 +586,6 @@ def test_try_captcha_auto_otp_phrase_no_resume():
 def test_try_captcha_auto_password_still_present_no_resume():
     """Visible password field after inject → fail, no resume."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
 
@@ -623,7 +615,6 @@ def test_try_captcha_auto_password_still_present_no_resume():
 
 def test_try_captcha_auto_no_callback_skips_without_resume():
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
     with mock.patch("login_flow.captcha.enabled", return_value=True), \
@@ -642,7 +633,6 @@ def test_try_captcha_auto_no_callback_skips_without_resume():
 
 def test_try_captcha_auto_verified_success_resumes_only_then():
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
     calls = []
@@ -686,7 +676,6 @@ def test_try_captcha_auto_verified_success_resumes_only_then():
 def test_try_captcha_auto_resume_failed_returns_failed_not_none():
     """Verify ok but resume failed → return failed status (no dead handoff)."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
 
@@ -751,7 +740,6 @@ def test_try_captcha_auto_no_pending_login_takes_the_gate_path():
 
 def _seed_login_computer(cid="c_1"):
     """Durable login needs a store computer (raise_challenge → get_computer)."""
-    from store import store
     store.q("DELETE FROM auth_attempts WHERE computer_id=?", (cid,))
     store.q("DELETE FROM handoffs WHERE computer_id=?", (cid,))
     store.delete_computer(cid)
@@ -761,7 +749,6 @@ def _seed_login_computer(cid="c_1"):
 
 def test_login_challenge_without_dbc_still_creates_handoff():
     """Integration-ish: login path with captcha challenge and DBC off → handoff."""
-    import login_flow
     import cased
 
     _seed_login_computer()
@@ -792,7 +779,6 @@ def test_login_challenge_without_dbc_still_creates_handoff():
 
 def test_login_creates_handoff_when_auto_returns_none():
     """Bad solve → helper None → login still creates handoff."""
-    import login_flow
     import cased
 
     _seed_login_computer()
@@ -840,7 +826,6 @@ def test_gate_js_covers_checkpoint_url_and_iframes():
 def test_post_login_gate_returns_none_when_not_gated():
     """Clean feed page after login → gate path must not interfere."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "name": "ava", "desk_port": 1, "desk_token": "t"}
     with mock.patch("login_flow.captcha.enabled", return_value=True), \
@@ -857,7 +842,6 @@ def test_post_login_gate_returns_none_when_not_gated():
 def test_post_login_gate_runs_auto_without_resume():
     """Gate open → auto-solve invoked with resume=False (deskd holds no login)."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "name": "ava", "desk_port": 1, "desk_token": "t"}
     with mock.patch("login_flow.captcha.enabled", return_value=True), \
@@ -879,7 +863,6 @@ def test_post_login_gate_failure_creates_handoff_without_login_ctx():
     """CRITICAL: the fallback handoff must carry no login_credential — deskd already
     cleared state["login"], so answering one would 409 on /login/resume."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "name": "ava", "desk_port": 1, "desk_token": "t"}
     with mock.patch("login_flow.captcha.enabled", return_value=True), \
@@ -904,7 +887,6 @@ def test_post_login_gate_dbc_off_still_creates_typed_captcha_handoff():
     """Human fallback: gate open + DBC unavailable → verify_page captcha handoff,
     never silent success."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "name": "ava", "desk_port": 1, "desk_token": "t"}
     with mock.patch("login_flow.captcha.enabled", return_value=False), \
@@ -928,7 +910,6 @@ def test_post_login_gate_dbc_off_still_creates_typed_captcha_handoff():
 
 def test_post_login_gate_handoff_survives_screenshot_failure():
     import login_flow
-    import cased
 
     row = {"id": "c_1", "name": "ava", "desk_port": 1, "desk_token": "t"}
     with mock.patch("login_flow.captcha.enabled", return_value=True), \
@@ -947,7 +928,6 @@ def test_post_login_gate_handoff_survives_screenshot_failure():
 def test_gate_info_survives_eval_failure():
     """Unreadable tab → {} → not gated → normal success path (no false handoff)."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
     with mock.patch("login_flow.eval_value", return_value=None):
@@ -957,7 +937,6 @@ def test_gate_info_survives_eval_failure():
 def test_auto_no_resume_requires_gate_closed():
     """resume=False path: verify clean but gate still open → fail, report, no success."""
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
 
@@ -991,7 +970,6 @@ def test_auto_no_resume_requires_gate_closed():
 
 def test_auto_no_resume_success_never_calls_resume():
     import login_flow
-    import cased
 
     row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
 
@@ -1027,7 +1005,6 @@ def test_auto_no_resume_success_never_calls_resume():
 
 def test_login_success_checks_gate():
     """deskd success + open gate → login() returns the gate path's result."""
-    import login_flow
     import cased
 
     _seed_login_computer()
@@ -1050,7 +1027,6 @@ def test_login_success_checks_gate():
 
 def test_login_success_ungated_reports_success():
     """deskd success + closed gate + positive proof_spec → authenticated."""
-    import login_flow
     import cased
 
     _seed_login_computer()
