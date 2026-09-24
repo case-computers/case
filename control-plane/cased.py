@@ -684,13 +684,8 @@ async def fill_submit(token: str, request: Request):
 
 # ---------- Assist door (public /assist/*, token is the auth; no MCP bearer) ----------
 
-def _cookie_value(cookie_header, name):
-    return dict(p.strip().split("=", 1)
-                for p in (cookie_header or "").split(";") if "=" in p).get(name, "")
-
-
 def _assist_cookie(request):
-    return _cookie_value(request.headers.get("cookie"), assist.COOKIE)
+    return links.cookie(request.headers.get("cookie"), assist.COOKIE)
 
 
 def _assist_set_cookie(set_sess):
@@ -844,7 +839,7 @@ def desk_check_ep(request: Request):
     cookie = request.headers.get("cookie", "")
     link, set_tok = links.desk_check(uri, cookie)
     if not link:
-        handoff = assist.valid_session(_cookie_value(cookie, assist.COOKIE))
+        handoff = assist.valid_session(links.cookie(cookie, assist.COOKIE))
         if handoff:
             link, set_tok = {"computer_id": handoff["computer_id"], "kind": "assist",
                              "expires_at": None, "token": None}, None

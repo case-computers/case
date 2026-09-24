@@ -135,6 +135,12 @@ def strip_token(uri, prefix="/desk/"):
     return path + ("?" + urlencode(q) if q else "")
 
 
+def cookie(cookie_header, name):
+    """One cookie's value from a raw Cookie header, "" when absent."""
+    return dict(p.strip().split("=", 1)
+                for p in (cookie_header or "").split(";") if "=" in p).get(name, "")
+
+
 def desk_check(forwarded_uri, cookie_header):
     """Forward-auth contract for /desk/*: returns (link_row|None, set_cookie_token|None).
 
@@ -148,8 +154,7 @@ def desk_check(forwarded_uri, cookie_header):
     row = valid(q, "vnc") if q else None
     if row:
         return row, q
-    cookies = dict(p.strip().split("=", 1) for p in (cookie_header or "").split(";") if "=" in p)
-    tok = cookies.get("case_desk", "")
+    tok = cookie(cookie_header, "case_desk")
     if tok:
         v = valid(tok, "vnc")
         if v:

@@ -26,10 +26,6 @@ def _hash(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _cookies(cookie_header):
-    return dict(p.strip().split("=", 1) for p in (cookie_header or "").split(";") if "=" in p)
-
-
 def _attempt_id_of(handoff):
     return row_get(handoff, "attempt_id")
 
@@ -144,8 +140,8 @@ def resolve_view(raw_token, cookie_header=""):
     view_dict keys: bound, handoff, attempt, status, revision, kind, continuation,
     instructions, allowed_actions.
     """
-    cookies = _cookies(cookie_header)
-    sess = cookies.get(COOKIE, "")
+    import links
+    sess = links.cookie(cookie_header, COOKIE)
     th = _hash(raw_token)
     row = store.get_assist_by_token_hash(th)
     set_sess = None
