@@ -552,9 +552,9 @@ def check_proof(computer, proof_spec, observation=None):
             return False
 
     if "selector" in predicates:
-        sel = predicates["selector"].replace("\\", "\\\\").replace("'", "\\'")
+        sel = json.dumps(predicates["selector"])
         try:
-            out = eval_js(computer, f"!!document.querySelector('{sel}')", timeout_s=10)
+            out = eval_js(computer, f"!!document.querySelector({sel})", timeout_s=10)
             val = (out or {}).get("value") if isinstance(out, dict) else out
             if not val:
                 return False

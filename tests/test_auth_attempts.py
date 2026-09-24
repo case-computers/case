@@ -273,6 +273,14 @@ def test_prove_with_proof_spec_authenticated():
     rec.assert_called_with("c_1", "github", "success")
 
 
+def test_proof_selector_is_json_quoted_into_the_expression():
+    sel = "a[title='x\ny']"
+    with mock.patch("deskclient.eval_value", return_value="https://example.com/home"), \
+         mock.patch("deskclient.eval_js", return_value={"ok": True, "value": True}) as ev:
+        assert auth_attempts.check_proof(COMP, {"selector": sel}) is True
+    assert ev.call_args.args[1] == f"!!document.querySelector({json.dumps(sel)})", ev.call_args
+
+
 def test_captcha_then_otp_one_attempt():
     """Two advances on one attempt: captcha handoff, then otp handoff, then prove."""
     _cleanup()
