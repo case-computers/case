@@ -38,6 +38,9 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install -r requirements-dev.txt
 
+      - name: Lint
+        run: .venv/bin/ruff check --select F,E9 control-plane mcp image tests
+
       - name: Unit tests (no Docker)
         run: |
           # Everything except the acceptance suite, which needs a real desktop
