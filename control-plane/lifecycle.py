@@ -12,6 +12,7 @@ import functools
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 from config import DESK_H, DESK_W, IMAGE, MAX_RAM_MB, MAX_RUNNING, log
@@ -242,15 +243,19 @@ def sleep_all():
     otherwise leave them running with a DB that still says "running". Data is
     safe either way (start.sh traps SIGTERM and quiesces Chromium); this just
     makes the graceful path the default one."""
-    slept = []
-    for row in store.list_computers():
-        if row["state"] not in ("running", "waking"):
-            continue
+    def one(cid):
         try:
-            do_sleep(row["id"])
-            slept.append(row["id"])
+            do_sleep(cid)
+            return cid
         except Exception as e:      # a login mid-flight, a dead container, a race
-            log.warning("shutdown: %s did not sleep cleanly (%s)", row["id"], e)
+            log.warning("shutdown: %s did not sleep cleanly (%s)", cid, e)
+
+    awake = [r["id"] for r in store.list_computers() if r["state"] in ("running", "waking")]
+    slept = []
+    if awake:
+        # each stop can take its full 10s; in series a full box can outrun the stop grace
+        with ThreadPoolExecutor(max_workers=min(len(awake), 8)) as pool:
+            slept = [cid for cid in pool.map(one, awake) if cid]
     if slept:
         log.info("shutdown: slept %d computer(s): %s", len(slept), ", ".join(slept))
     return slept
