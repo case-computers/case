@@ -697,6 +697,16 @@ def _assist_set_cookie(set_sess):
     return headers
 
 
+def _assist_static(html, status_code=200):
+    """A GONE or DONE page: never cached, and its URL (the token) never sent on."""
+    return HTMLResponse(html, status_code=status_code,
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+def _assist_done(title, body):
+    return _assist_static(assist.DONE_HTML.replace("{title}", title).replace("{body}", body))
+
+
 @app.get("/assist/static/assist.js")
 def assist_static_js():
     """Same-origin poll script, served as a file so the page carries no inline JS."""
@@ -709,8 +719,7 @@ def assist_get(token: str, request: Request):
     try:
         view, set_sess = assist.resolve_view(token, request.headers.get("cookie", ""))
     except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410,
-                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        return _assist_static(assist.GONE_HTML, status_code=410)
     body = assist.render_page(view, token)
     return HTMLResponse(body, headers=_assist_set_cookie(set_sess))
 
@@ -736,8 +745,7 @@ async def _assist_form(token, request):
     or the HTMLResponse to send back instead."""
     if not assist.check_same_origin(request):
         raise ApiError(403, "csrf", "missing or mismatched Origin")
-    gone = HTMLResponse(assist.GONE_HTML, status_code=410,
-                        headers={"Cache-Control": "no-store"})
+    gone = _assist_static(assist.GONE_HTML, status_code=410)
     sess = _assist_cookie(request)
     if not sess:
         return gone
@@ -762,13 +770,9 @@ async def assist_open(token: str, request: Request):
                                 (form.get("url") or "").strip(), expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
-            return HTMLResponse(assist.GONE_HTML, status_code=410,
-                                headers={"Cache-Control": "no-store"})
+            return _assist_static(assist.GONE_HTML, status_code=410)
         raise
-    return HTMLResponse(
-        assist.DONE_HTML.replace("{title}", "Opened").replace(
-            "{body}", "The computer opened the link. Finish there, then return here."),
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+    return _assist_done("Opened", "The computer opened the link. Finish there, then return here.")
 
 
 @app.post("/assist/{token}/submit")
@@ -779,9 +783,7 @@ async def assist_submit(token: str, request: Request):
         return got
     sess, view, form, expected = got
     if "submit_value" not in view["allowed_actions"]:
-        return HTMLResponse(
-            assist.render_page(view, token),
-            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        return HTMLResponse(assist.render_page(view, token), headers=_assist_set_cookie(None))
     value = (form.get("value") or "").strip()
     if not value:
         raise ApiError(400, "bad_request", "value is required")
@@ -790,7 +792,7 @@ async def assist_submit(token: str, request: Request):
                                       expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
-            return HTMLResponse(assist.GONE_HTML, status_code=410)
+            return _assist_static(assist.GONE_HTML, status_code=410)
         raise
     st = row["status"]
     if view["kind"] == "approval" and st != "pending":
@@ -803,7 +805,7 @@ async def assist_submit(token: str, request: Request):
     else:
         title, body = "Not yet", ("That code did not clear the challenge. "
                                   "Reopen the link and try again.")
-    return HTMLResponse(assist.DONE_HTML.replace("{title}", title).replace("{body}", body))
+    return _assist_done(title, body)
 
 
 @app.post("/assist/{token}/done")
@@ -818,7 +820,7 @@ async def assist_done(token: str, request: Request):
                                       expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
-            return HTMLResponse(assist.GONE_HTML, status_code=410)
+            return _assist_static(assist.GONE_HTML, status_code=410)
         raise
     st = row["status"]
     if st == "completed" or st == "answered":
@@ -828,7 +830,7 @@ async def assist_done(token: str, request: Request):
     else:
         title, body = "Still open", ("The challenge still looks present. "
                                      "Finish it on the desktop, then click I'm done again.")
-    return HTMLResponse(assist.DONE_HTML.replace("{title}", title).replace("{body}", body))
+    return _assist_done(title, body)
 
 
 @app.get("/v1/desk/check")
