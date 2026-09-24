@@ -3,7 +3,7 @@
 
 Leaf-ish module: depends only on config + requests (never handoffs, no cycle).
 Local detection + verification stay authoritative (DETECT_JS, still_challenge,
-gate_open). Auto-solve is quarantined behind a capability adapter; Death By
+gate_open). Auto-solve is quarantined behind a capability check; Death By
 Captcha is the only vendor this release, and only for declared capabilities.
 
 Off unless CASE_DBC_* credentials are set. Only sitekey/publickey + pageurl
@@ -23,7 +23,7 @@ import json
 import os
 import re
 import time
-from typing import Protocol, TypedDict
+from typing import TypedDict
 import requests
 
 from config import log
@@ -400,15 +400,6 @@ class SolveResult(TypedDict):
     token: str
 
 
-class Solver(Protocol):
-    """Optional auto-solver. Only declared capabilities may leave the box."""
-
-    capabilities: frozenset[str]
-
-    def solve(self, capability: str, pageurl: str, key: str, *,
-              timeout_s: float = DBC_POLL_CAP_S) -> SolveResult | None: ...
-
-
 def capability_for(family: str, *, enterprise: bool = False) -> str | None:
     """Map detect-family (+ enterprise flag) → declared capability name, or None."""
     if family == "recaptcha":
@@ -429,19 +420,12 @@ def _dbc_solve(capability: str, pageurl: str, key: str, *,
     """Upload to DBC and poll until solved, refused, or the wall-clock budget is spent.
 
     Terminal answers (is_correct=false, service-overload) return immediately, no long
-    poll that delays the human handoff. Never logs token/password.
+    poll that delays the human handoff. Never logs token/password. solve_if_capable
+    has already checked enabled(), the capability and the enterprise proxy.
     """
-    if capability not in DBC_CAPABILITIES or not pageurl or not key:
-        return None
-    if not enabled():
-        return None
-
     deadline = time.time() + max(1.0, float(timeout_s))
     proxy = _proxy_fields()
     if capability == "recaptcha_enterprise":
-        if not proxy:
-            log.warning("captcha_auto=fail dbc_enterprise_needs_proxy")
-            return None
         # Try type 25 first; FAQ #18 allows type 4 for some Enterprise keys on
         # non-terminal upload failure. Overload itself is terminal (no fallback poll).
         payload = {"googlekey": key, "pageurl": pageurl, **proxy}
@@ -521,25 +505,9 @@ def _dbc_solve(capability: str, pageurl: str, key: str, *,
     return None
 
 
-class DbcSolver:
-    """Death By Captcha, the only Solver implementation this release."""
-
-    capabilities = DBC_CAPABILITIES
-
-    def solve(self, capability: str, pageurl: str, key: str, *,
-              timeout_s: float = DBC_POLL_CAP_S) -> SolveResult | None:
-        if capability not in self.capabilities:
-            return None
-        return _dbc_solve(capability, pageurl, key, timeout_s=timeout_s)
-
-
-_DEFAULT_SOLVER = DbcSolver()
-
-
 def solve_if_capable(family: str, pageurl: str, key: str, *, enterprise: bool = False,
-                     timeout_s: float = DBC_POLL_CAP_S,
-                     solver: Solver | None = None) -> SolveResult | None:
-    """Capability boundary: solve only when the adapter declares the family.
+                     timeout_s: float = DBC_POLL_CAP_S) -> SolveResult | None:
+    """Capability boundary: solve only when DBC declares the family.
 
     Returns None immediately (no DBC HTTP, no long poll) when disabled, the family
     is unsupported, or enterprise lacks a configured proxy, caller creates email
@@ -550,14 +518,13 @@ def solve_if_capable(family: str, pageurl: str, key: str, *, enterprise: bool = 
     if not pageurl or not key:
         return None
     cap = capability_for(family, enterprise=enterprise)
-    impl = solver if solver is not None else _DEFAULT_SOLVER
-    if cap is None or cap not in impl.capabilities:
+    if cap is None or cap not in DBC_CAPABILITIES:
         log.info("captcha_auto=skip reason=unsupported_capability family=%s", family)
         return None
     if cap == "recaptcha_enterprise" and not _proxy_fields():
         log.warning("captcha_auto=fail dbc_enterprise_needs_proxy")
         return None
-    return impl.solve(cap, pageurl, key, timeout_s=timeout_s)
+    return _dbc_solve(cap, pageurl, key, timeout_s=timeout_s)
 
 
 def report(captcha_id) -> None:
