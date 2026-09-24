@@ -20,7 +20,20 @@ from cryptography.fernet import Fernet
 from config import CASE_HOME
 from util import now, row_get
 
-SCHEMA = """
+# Status vocabularies. The one definition: callers import these, and the SQL
+# below is built from them.
+AUTH_ATTEMPT_ACTIVE = ("created", "advancing", "awaiting_human", "proving")
+AUTH_ATTEMPT_TERMINAL = ("authenticated", "unverified", "failed", "expired", "cancelled")
+HANDOFF_LIVE = ("pending", "validating")
+# Terminal handoff statuses; transition_handoff never moves a row out of one.
+HANDOFF_TERMINAL = ("completed", "answered", "failed", "expired")
+
+
+def _sql_in(values):
+    return "(" + ",".join(f"'{v}'" for v in values) + ")"
+
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS computers (
   id TEXT PRIMARY KEY, name TEXT, state TEXT, image TEXT,
   created_at TEXT, last_active_at TEXT,
@@ -60,7 +73,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_idempotency
   WHERE idempotency_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_one_active
   ON auth_attempts(computer_id)
-  WHERE status IN ('created','advancing','awaiting_human','proving');
+  WHERE status IN {_sql_in(AUTH_ATTEMPT_ACTIVE)};
 CREATE INDEX IF NOT EXISTS idx_handoffs_computer_status ON handoffs(computer_id, status);
 CREATE INDEX IF NOT EXISTS idx_handoffs_status_created ON handoffs(status, created_at);
 CREATE TABLE IF NOT EXISTS schedules (
@@ -135,10 +148,6 @@ class Store:
         ("credentials", "verification_hosts", "TEXT"),
         ("schedules", "tz", "TEXT"),
     ]
-
-    # Active (non-terminal) auth-attempt statuses, kept here so the partial unique
-    # index and get_active_* share one definition with auth_attempts.ACTIVE_STATUSES.
-    AUTH_ATTEMPT_ACTIVE = ("created", "advancing", "awaiting_human", "proving")
 
     def _migrate(self):
         for table, col, typ in self.MIGRATIONS:
@@ -335,7 +344,7 @@ class Store:
 
     def pending_login_handoffs(self):
         # pending + validating: a restart mid-verify must still recover LOGIN_CTX
-        return self.all("SELECT * FROM handoffs WHERE status IN ('pending','validating') "
+        return self.all(f"SELECT * FROM handoffs WHERE status IN {_sql_in(HANDOFF_LIVE)} "
                         "AND login_credential IS NOT NULL")
 
     def get_handoff(self, hid):
@@ -344,7 +353,7 @@ class Store:
     def get_open_handoff_by_fingerprint(self, cid, fingerprint):
         return self.one(
             "SELECT * FROM handoffs WHERE computer_id=? AND challenge_fingerprint=? "
-            "AND status IN ('pending','validating') ORDER BY created_at DESC LIMIT 1",
+            f"AND status IN {_sql_in(HANDOFF_LIVE)} ORDER BY created_at DESC LIMIT 1",
             (cid, fingerprint))
 
     def list_handoffs(self, status=None):
@@ -369,16 +378,13 @@ class Store:
     def stale_pending_handoffs(self, cutoff):
         """Open handoffs older than `cutoff`, for the TTL sweeper.
         validating that never finished (restart mid-verify) also ages out."""
-        return self.all("SELECT * FROM handoffs WHERE status IN ('pending','validating') "
+        return self.all(f"SELECT * FROM handoffs WHERE status IN {_sql_in(HANDOFF_LIVE)} "
                         "AND created_at < ?", (cutoff,))
 
     def delete_handoff(self, hid):
         self.q("DELETE FROM handoffs WHERE id=?", (hid,))
 
     _ANSWER_UNCHANGED = object()
-
-    # Terminal handoff statuses; transition_handoff never moves a row out of one.
-    HANDOFF_TERMINAL = ("completed", "answered", "failed", "expired")
 
     def set_handoff_status(self, hid, status, answer=_ANSWER_UNCHANGED):
         """Raw status write, no guard and no revision bump. Test fixtures only —
@@ -396,7 +402,7 @@ class Store:
         or None when the row is gone, already terminal, or another writer won —
         callers must do side effects (events, credential health) only on a row."""
         row = self.get_handoff(hid)
-        if not row or row["status"] in self.HANDOFF_TERMINAL:
+        if not row or row["status"] in HANDOFF_TERMINAL:
             return None
         n = self.cas_handoff_status(hid, row["status"], to,
                                     int(row["revision"] or 0), answer=answer)
@@ -436,16 +442,16 @@ class Store:
     def get_active_auth_attempt(self, computer_id):
         """The newest non-terminal attempt on this computer, or None. At most one
         should exist — login 409s while one is active."""
-        qs = ",".join("?" * len(self.AUTH_ATTEMPT_ACTIVE))
+        qs = ",".join("?" * len(AUTH_ATTEMPT_ACTIVE))
         return self.one(
             f"SELECT * FROM auth_attempts WHERE computer_id=? AND status IN ({qs}) "
             "ORDER BY created_at DESC LIMIT 1",
-            (computer_id, *self.AUTH_ATTEMPT_ACTIVE))
+            (computer_id, *AUTH_ATTEMPT_ACTIVE))
 
     def stale_active_auth_attempts(self, cutoff):
-        qs = ",".join("?" * len(self.AUTH_ATTEMPT_ACTIVE))
+        qs = ",".join("?" * len(AUTH_ATTEMPT_ACTIVE))
         return self.all(f"SELECT * FROM auth_attempts WHERE status IN ({qs}) AND updated_at < ?",
-                        (*self.AUTH_ATTEMPT_ACTIVE, cutoff))
+                        (*AUTH_ATTEMPT_ACTIVE, cutoff))
 
     def get_auth_attempt_by_idempotency(self, computer_id, idempotency_key):
         if not idempotency_key:
@@ -618,10 +624,9 @@ class Store:
 
     def prune_terminal_handoffs(self, cutoff):
         self.q("UPDATE handoffs SET screenshot=NULL WHERE screenshot IS NOT NULL "
-               "AND status IN ('completed','answered','failed','expired')")
-        return self.q("DELETE FROM handoffs WHERE status IN "
-                      "('completed','answered','failed','expired') AND created_at < ?",
-                      (cutoff,)).rowcount
+               f"AND status IN {_sql_in(HANDOFF_TERMINAL)}")
+        return self.q(f"DELETE FROM handoffs WHERE status IN {_sql_in(HANDOFF_TERMINAL)} "
+                      "AND created_at < ?", (cutoff,)).rowcount
 
     def prune_old_runs(self, keep=1000):
         """Cap run history. Returns artifact_path values of deleted rows."""

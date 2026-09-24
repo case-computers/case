@@ -46,7 +46,7 @@ from deskclient import desk_bytes, desk_json, navigate
 from errors import ApiError
 from events import sse_gen
 from notify import notifier
-from store import store
+from store import AUTH_ATTEMPT_TERMINAL, store
 from util import now, row_get
 
 @asynccontextmanager
@@ -996,7 +996,7 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
     # Idempotent replay, never re-inject; agents poll GET /auth-attempts/{id}.
     if attempt["status"] == "awaiting_human":
         return auth_attempts.login_result(attempt)
-    if attempt["status"] in auth_attempts.TERMINAL_STATUSES:
+    if attempt["status"] in AUTH_ATTEMPT_TERMINAL:
         return auth_attempts.login_result(attempt)
     if attempt["status"] in ("advancing", "proving"):
         advanced = auth_attempts.advance_attempt(attempt["id"])

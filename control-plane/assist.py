@@ -14,17 +14,12 @@ import secrets
 from urllib.parse import parse_qs, urlsplit
 
 from errors import ApiError
-from store import store
+from store import AUTH_ATTEMPT_ACTIVE, AUTH_ATTEMPT_TERMINAL, HANDOFF_LIVE, store
 from util import iso_in, now, row_get
 
 COOKIE = "case_assist"
 EXCHANGE_TTL_S = 900    # 15 minutes, the emailed link
 SESSION_TTL_S = 1800    # 30 minutes, or until attempt/handoff is gone
-LIVE_STATUSES = frozenset({"pending", "validating"})
-_ATTEMPT_TERMINAL = frozenset({
-    "authenticated", "unverified", "failed", "expired", "cancelled",
-})
-_ATTEMPT_ACTIVE = frozenset({"created", "advancing", "awaiting_human", "proving"})
 
 
 def _hash(raw):
@@ -59,7 +54,7 @@ def exchange(raw_token):
     if row["expires_at"] <= now():
         raise ApiError(410, "gone", "assist link expired")
     handoff = store.get_handoff(row["handoff_id"])
-    if not handoff or handoff["status"] not in LIVE_STATUSES:
+    if not handoff or handoff["status"] not in HANDOFF_LIVE:
         # Attempt-scoped: allow exchange while the attempt still needs a human,
         # even if this mint's handoff row already moved on (rare race).
         aid = _attempt_id_of(handoff) if handoff else None
@@ -99,7 +94,7 @@ def session_view(raw_session):
     aid = _attempt_id_of(bound)
     attempt = store.get_auth_attempt(aid) if aid else None
 
-    if bound["status"] in LIVE_STATUSES and not attempt:
+    if bound["status"] in HANDOFF_LIVE and not attempt:
         return bound, bound, None
 
     if attempt:
@@ -107,16 +102,16 @@ def session_view(raw_session):
         cur_id = attempt["current_handoff_id"]
         if cur_id:
             current = store.get_handoff(cur_id)
-            if current and current["status"] not in LIVE_STATUSES:
+            if current and current["status"] not in HANDOFF_LIVE:
                 # Stale pointer, ignore for action; keep for attempt terminal view.
-                if attempt["status"] in _ATTEMPT_ACTIVE:
+                if attempt["status"] in AUTH_ATTEMPT_ACTIVE:
                     current = None
-        if current and current["status"] in LIVE_STATUSES:
+        if current and current["status"] in HANDOFF_LIVE:
             return bound, current, attempt
         # proving / terminal / between challenges, still viewable
         return bound, current, attempt
 
-    if bound["status"] in LIVE_STATUSES:
+    if bound["status"] in HANDOFF_LIVE:
         return bound, bound, attempt
     return None
 
@@ -127,7 +122,7 @@ def valid_session(raw_session):
     if not view:
         return None
     _bound, current, _attempt = view
-    if current and current["status"] in LIVE_STATUSES:
+    if current and current["status"] in HANDOFF_LIVE:
         return current
     return None
 
@@ -178,11 +173,11 @@ def continuation_of(handoff):
 
 def allowed_actions_for(handoff, attempt):
     """Typed Assist actions for the current phase, never implies secrets."""
-    if attempt and attempt["status"] in _ATTEMPT_TERMINAL:
+    if attempt and attempt["status"] in AUTH_ATTEMPT_TERMINAL:
         return []
     if attempt and attempt["status"] == "proving":
         return []
-    if not handoff or handoff["status"] not in LIVE_STATUSES:
+    if not handoff or handoff["status"] not in HANDOFF_LIVE:
         return []
     cont = continuation_of(handoff)
     if cont == "submit_value":
@@ -209,7 +204,7 @@ def build_view(bound, current, attempt):
             "instructions": "Verifying your login…",
             "allowed_actions": [],
         }
-    if attempt and attempt["status"] in _ATTEMPT_TERMINAL:
+    if attempt and attempt["status"] in AUTH_ATTEMPT_TERMINAL:
         st = attempt["status"]
         instructions = {
             "authenticated": "You're signed in. You can close this page.",
@@ -235,7 +230,7 @@ def build_view(bound, current, attempt):
     # Map legacy answered → completed for Assist surfaces.
     if status == "answered":
         status = "completed"
-    cont = continuation_of(handoff) if handoff and status in LIVE_STATUSES else None
+    cont = continuation_of(handoff) if handoff and status in HANDOFF_LIVE else None
     kind = handoff["kind"] if handoff else None
     instructions = (handoff["prompt"] or "") if handoff else ""
     revision = int(row_get(handoff, "revision", 0) or 0) if handoff else 0
@@ -329,7 +324,7 @@ def open_with_session(raw_session, url, expected_revision=None):
         raise ApiError(410, "gone", "assist session invalid or expired")
     bound, current, attempt = view
     handoff = current
-    if not handoff or handoff["status"] not in LIVE_STATUSES:
+    if not handoff or handoff["status"] not in HANDOFF_LIVE:
         raise ApiError(410, "gone", "no open challenge to navigate")
     built = build_view(bound, current, attempt)
     if "open_url" not in built["allowed_actions"]:
@@ -466,7 +461,7 @@ def render_page(view, token):
     tok = html_mod.escape(token)
     rev = int(view["revision"] or 0)
 
-    if st in _ATTEMPT_TERMINAL or st in ("completed", "failed", "expired"):
+    if st in AUTH_ATTEMPT_TERMINAL or st in ("completed", "failed", "expired"):
         title = {
             "authenticated": "Signed in",
             "unverified": "Unverified",

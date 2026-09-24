@@ -18,11 +18,8 @@ import struct
 import time
 
 from errors import ApiError
-from store import store
+from store import AUTH_ATTEMPT_TERMINAL, HANDOFF_LIVE, store
 from util import new_id, row_get
-
-ACTIVE_STATUSES = frozenset(store.AUTH_ATTEMPT_ACTIVE)
-TERMINAL_STATUSES = frozenset({"authenticated", "unverified", "failed", "expired", "cancelled"})
 
 # Long-poll ceiling stays under a typical reverse-proxy read timeout (300s)
 # and the MCP wait budget.
@@ -159,7 +156,7 @@ def _cas_or_conflict(aid, from_status, to_status, revision_expect):
 
 def _cursor_changed(pub, after_revision, after_handoff_id):
     """True when the attempt has moved past the client's last-seen cursor."""
-    if pub["status"] in TERMINAL_STATUSES:
+    if pub["status"] in AUTH_ATTEMPT_TERMINAL:
         return True
     if int(pub["revision"] or 0) > int(after_revision or 0):
         return True
@@ -173,7 +170,7 @@ def _wait_payload(pub, *, changed, wait_status=None):
     st = "changed" if changed else "timeout"
     if wait_status:
         st = wait_status
-    elif pub["status"] in TERMINAL_STATUSES:
+    elif pub["status"] in AUTH_ATTEMPT_TERMINAL:
         st = "terminal"
     # login_result on every payload: the MCP client relays it verbatim instead of
     # keeping its own copy of the status vocabulary.
@@ -190,14 +187,10 @@ def _totp(seed, at=None):
     return str((int.from_bytes(h[o:o + 4], "big") & 0x7FFFFFFF) % 10 ** 6).zfill(6)
 
 
-def _next_sequence(attempt_id):
-    return store.next_handoff_sequence(attempt_id)
-
-
 def _ensure_advancing(row, expected_revision=None):
     """CAS into advancing from created|awaiting_human; return (row, revision)."""
     status = row["status"]
-    if status in TERMINAL_STATUSES:
+    if status in AUTH_ATTEMPT_TERMINAL:
         raise ApiError(409, "illegal_transition",
                        f"attempt already terminal ({status})")
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
@@ -262,7 +255,7 @@ def get_attempt(attempt_id):
 
 def cancel_attempt(attempt_id, expected_revision=None):
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         if row["status"] == "cancelled":
             return attempt_public(row)
         raise ApiError(409, "illegal_transition",
@@ -273,7 +266,7 @@ def cancel_attempt(attempt_id, expected_revision=None):
     # Terminalize the open child so handoff_list cannot leave a stale pending pin.
     if hid:
         h = store.get_handoff(hid)
-        if h and h["status"] in ("pending", "validating"):
+        if h and h["status"] in HANDOFF_LIVE:
             store.transition_handoff(hid, "failed", answer=None)
             try:
                 import handoffs  # cycle: handoffs → auth_attempts on answer paths
@@ -315,7 +308,7 @@ def reobserve_if_solved(attempt_id):
     # The pending child is answered — the human did it on the desk itself.
     if hid and pub["status"] != "awaiting_human":
         h = store.get_handoff(hid)
-        if h and h["status"] in ("pending", "validating"):
+        if h and h["status"] in HANDOFF_LIVE:
             store.transition_handoff(hid, "completed", answer=None)
     return pub
 
@@ -421,7 +414,7 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
     # One pending/validating child at a time.
     if row["current_handoff_id"]:
         cur = store.get_handoff(row["current_handoff_id"])
-        if cur and cur["status"] in ("pending", "validating"):
+        if cur and cur["status"] in HANDOFF_LIVE:
             # Ensure status is awaiting_human if we somehow still hold a live child.
             if row["status"] == "advancing":
                 return _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
@@ -438,7 +431,7 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
             screenshot = screenshot_b64(computer)
         except Exception:
             screenshot = None
-    seq = _next_sequence(attempt_id)
+    seq = store.next_handoff_sequence(attempt_id)
     h = create_handoff(
         computer, kind, prompt, screenshot=screenshot,
         login_credential=row["credential"], domain=domain,
@@ -459,7 +452,7 @@ def fail_attempt(attempt_id, reason=None, expected_revision=None):
     """
     _ = reason
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         return attempt_public(row)
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
     pub = _cas_or_conflict(attempt_id, row["status"], "failed", rev)
@@ -563,7 +556,7 @@ def prove_attempt(attempt_id, expected_revision=None, observation=None):
     Only `authenticated` records credential success / login_completed(success).
     """
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         raise ApiError(409, "illegal_transition",
                        f"attempt already terminal ({row['status']})")
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
@@ -631,13 +624,13 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
                             expected_revision=expected_revision)
 
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         return attempt_public(row)
     row, rev = _ensure_advancing(row, expected_revision)
     # Clear finished child pointer while re-entering from awaiting_human.
     if row["current_handoff_id"]:
         cur = store.get_handoff(row["current_handoff_id"])
-        if cur and cur["status"] not in ("pending", "validating"):
+        if cur and cur["status"] not in HANDOFF_LIVE:
             store.set_attempt_handoff(attempt_id, None)
             row = store.get_auth_attempt(attempt_id)
 

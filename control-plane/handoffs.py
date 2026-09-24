@@ -31,7 +31,7 @@ from errors import ApiError
 from events import emit
 from lifecycle import get_computer
 from notify import notifier
-from store import store
+from store import HANDOFF_TERMINAL, store
 from util import new_id, row_get
 
 
@@ -57,9 +57,6 @@ VERIFY_DONE_VALUES = frozenset({"done", "approve", "i'm done", "im done", "i am 
 # The only answers an approval takes. ntfy and Telegram buttons and the Assist page
 # send these; anything else (a typed "no", an empty body) is refused, not approved.
 APPROVAL_VALUES = ("approve", "deny")
-
-TERMINAL_STATUSES = frozenset({"completed", "answered", "failed", "expired"})
-
 
 def continuation_for(kind, continuation=None):
     if continuation:
@@ -241,7 +238,7 @@ def _require_open_handoff(hid):
     status = row["status"]
     if status == "expired":
         raise ApiError(409, "handoff_expired", "handoff expired after 15 minutes")
-    if status in TERMINAL_STATUSES:
+    if status in HANDOFF_TERMINAL:
         raise ApiError(409, "already_answered", "handoff already answered")
     if status == "validating":
         raise ApiError(409, "validating", "handoff is already being validated")

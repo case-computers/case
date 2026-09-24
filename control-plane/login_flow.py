@@ -14,7 +14,7 @@ import handoffs
 import links
 from config import log
 from deskclient import desk_json, eval_js, eval_value, screenshot_b64
-from store import store
+from store import HANDOFF_LIVE, store
 from util import row_get
 
 
@@ -286,7 +286,7 @@ def _route_blocker(row, blocker):
         current_id = active["current_handoff_id"]
         if current_id:
             current = store.get_handoff(current_id)
-            if current and current["status"] in ("pending", "validating"):
+            if current and current["status"] in HANDOFF_LIVE:
                 return current_id
         if row_get(active, "status") == "proving":
             return None
