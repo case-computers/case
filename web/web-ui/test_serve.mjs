@@ -325,6 +325,10 @@ assert.equal(resolveChatModel('gpt-5.6-terra', 'anthropic'), 'claude-sonnet-4-6'
 {
   const tools = openaiToolsToAnthropic(CASE_TOOLS);
   assert.equal(tools[0].name, 'computer_navigate');
+  // caseToolPlan forwards button, so the schema has to let the model send it
+  const action = CASE_TOOLS.find((t) => t.name === 'computer_action').parameters.properties;
+  assert.deepEqual(action.button.enum, ['left', 'middle', 'right']);
+  assert.equal(caseToolPlan('computer_action', { type: 'click', x: 1, y: 2, button: 'right' }, 'c_1').json.button, 'right');
   assert.equal(tools[0].input_schema.required[0], 'url');
   assert.equal(tools[0].type, undefined);
 }
