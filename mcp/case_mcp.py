@@ -75,12 +75,11 @@ def tool(fn):
     return fn
 
 
-def _headers(**extra):
+def _headers():
     h = {"X-Case-Session": SESSION}
     tok = (os.environ.get("CASE_TOKEN") or "").strip()
     if tok:
         h["Authorization"] = "Bearer " + tok
-    h.update(extra)
     return h
 
 
@@ -579,17 +578,12 @@ def auth_attempt_wait(attempt_id: str, since_revision: int | None = None,
         if last.get("wait_status") == "timeout":
             continue
         # Intermediate advance (new challenge / proving) — keep waiting inside budget.
-        if attempt["status"] == "awaiting_human" and last.get("changed"):
-            # Still human-needed; continue waiting for the next Assist action unless
-            # budget is nearly gone — then surface handoff_pending so the agent can
-            # re-enter wait without asking the user.
-            if deadline - time.time() < 5:
-                return {"wait_status": "timeout", "changed": True, "attempt": attempt,
-                        "attempt_id": attempt["id"], "revision": attempt["revision"],
-                        **lr}
-            continue
-        # Non-terminal progress (advancing/proving) — keep polling.
-        continue
+        # Still human-needed with the budget nearly gone: surface handoff_pending so
+        # the agent can re-enter wait without asking the user.
+        if (attempt["status"] == "awaiting_human" and last.get("changed")
+                and deadline - time.time() < 5):
+            return {"wait_status": "timeout", "changed": True, "attempt": attempt,
+                    "attempt_id": attempt["id"], "revision": attempt["revision"], **lr}
 
 
 @tool
