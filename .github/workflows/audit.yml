@@ -35,7 +35,9 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install pip-audit==2.10.1
-          .venv/bin/pip-audit -r requirements-dev.txt -r image/requirements.txt
+          # separate runs: cased and deskd pin different fastapi, so one resolve fails
+          .venv/bin/pip-audit -r requirements-dev.txt
+          .venv/bin/pip-audit -r image/requirements.txt
 
       - name: Drive
         run: npm --prefix web audit --omit=dev
