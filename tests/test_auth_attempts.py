@@ -377,6 +377,30 @@ def test_challenge_completion_does_not_record_success_until_prove():
     adv.assert_called_once_with(a["id"])
 
 
+def test_one_transient_observe_error_is_retried():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    clean = {"ok": True, "observation": _obs(href="https://example.com/home")}
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.observe_auth", side_effect=[
+             ApiError(502, "observe_error", "Target closed"), clean]), \
+         mock.patch("auth_attempts.time.sleep"), \
+         mock.patch.object(store, "record_credential_result"):
+        out = auth_attempts.advance_attempt(a["id"])
+    assert out["status"] == "unverified", out
+
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.observe_auth",
+                    side_effect=ApiError(502, "observe_error", "Target closed")) as observe, \
+         mock.patch("auth_attempts.time.sleep"), \
+         mock.patch.object(store, "record_credential_result"):
+        out = auth_attempts.advance_attempt(a["id"])
+    assert out["status"] == "failed" and observe.call_count == 2, out
+    assert out["fail_reason"] == "observe_failed:ApiError", out
+
+
 def test_totp_submit_carries_credential_domains():
     _cleanup()
     store.upsert_credential("c_1", "cred", "u", "secret", "JBSWY3DPEHPK3PXP",

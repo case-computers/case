@@ -288,6 +288,15 @@ def cancel_attempt(attempt_id, expected_revision=None):
     return _cas_or_conflict(attempt_id, row["status"], "cancelled", rev)
 
 
+def _observation(resp):
+    """The observation inside a deskd /auth/observe answer, or None."""
+    if not isinstance(resp, dict):
+        return None
+    if resp.get("observation") is not None:
+        return resp["observation"]
+    return resp if "challenge_signals" in resp else None
+
+
 def reobserve_if_solved(attempt_id):
     """Humans can clear a challenge directly on the desk (the Drive UI has no
     Assist surface), which bumps nothing — the attempt would wait forever.
@@ -304,14 +313,19 @@ def reobserve_if_solved(attempt_id):
         computer = get_computer(row["computer_id"])
         if row_get(computer, "state") != "running":
             return None
-        resp = observe_auth(computer)
+        observation = _observation(observe_auth(computer))
     except Exception:
         return None
-    observation = (resp or {}).get("observation") if isinstance(resp, dict) else None
-    if observation is None and isinstance(resp, dict) and "challenge_signals" in resp:
-        observation = resp
     if observation is None or _classify_kind(observation):
         return None  # challenge still up (or unreadable) — keep waiting
+    child = store.get_handoff(row["current_handoff_id"]) if row["current_handoff_id"] else None
+    if child is not None and child["status"] in HANDOFF_LIVE:
+        import handoffs  # cycle: handoffs → auth_attempts on answer paths
+        # deskd's text signals miss iframe gates (LinkedIn's checkpoint captcha); a
+        # page-verify child needs the same page check its "I'm done" gets.
+        if handoffs._continuation_of(child) == "verify_page" and \
+                handoffs._page_still_challenged(computer):
+            return None
     try:
         return advance_attempt(attempt_id, observation=observation)
     except ApiError:
@@ -648,13 +662,16 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
 
     computer = get_computer(row["computer_id"])
     if observation is None:
-        try:
-            resp = observe_auth(computer)
-            observation = (resp or {}).get("observation") if isinstance(resp, dict) else None
-            if observation is None and isinstance(resp, dict) and "challenge_signals" in resp:
-                observation = resp
-        except Exception as e:
-            return fail_attempt(attempt_id, reason=f"observe_failed:{type(e).__name__}")
+        # One retry: right after a human finishes a challenge the page is still
+        # navigating (502) or deskd is mid-injection (423).
+        for retry in (True, False):
+            try:
+                observation = _observation(observe_auth(computer))
+                break
+            except Exception as e:
+                if not (retry and isinstance(e, ApiError) and e.status in (502, 423)):
+                    return fail_attempt(attempt_id, reason=f"observe_failed:{type(e).__name__}")
+                time.sleep(1.0)
 
     kind = _classify_kind(observation)
 

@@ -277,11 +277,11 @@ def test_wait_safe_after_restart_style_reread():
     assert out["attempt"]["status"] == "cancelled"
 
 
-def _awaiting_with_child(hid):
+def _awaiting_with_child(hid, kind="otp"):
     a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
     auth_attempts._cas_or_conflict(a["id"], "created", "advancing", 0)
     store.insert_handoff(
-        hid, "c_1", "otp", "enter code", None, "github",
+        hid, "c_1", kind, "enter code", None, "github",
         domain="example.com", attempt_id=a["id"], sequence=1, revision=1)
     store.set_attempt_handoff(a["id"], hid)
     auth_attempts._cas_or_conflict(a["id"], "advancing", "awaiting_human", 1)
@@ -332,6 +332,30 @@ def test_wait_timeout_settings_page_mentions_2fa_still_advances():
     assert out["changed"] is True, out
     assert out["attempt"]["status"] == "unverified", out
     assert store.get_handoff("h_settings_page")["status"] == "completed"
+
+
+def test_wait_timeout_page_verify_child_needs_the_gate_closed():
+    # deskd's text signals miss an iframe captcha gate; the page check must agree too.
+    _cleanup()
+    aid, rev = _awaiting_with_child("h_gate", kind="captcha")
+    clean = {"ok": True, "observation": {"challenge_signals": [], "visible_fields": {}}}
+
+    async def go(still_challenged):
+        events.set_loop(asyncio.get_running_loop())
+        with mock.patch("lifecycle.get_computer", return_value=COMP), \
+             mock.patch("deskclient.observe_auth", return_value=clean), \
+             mock.patch.object(handoffs, "_page_still_challenged",
+                               return_value=still_challenged):
+            return await auth_attempts.wait_attempt(
+                aid, after_revision=rev, timeout_s=1)
+
+    out = _run(go(True))
+    assert out["wait_status"] == "timeout", out
+    assert out["attempt"]["status"] == "awaiting_human", out
+    assert store.get_handoff("h_gate")["status"] == "pending"
+    out = _run(go(False))
+    assert out["attempt"]["status"] == "unverified", out
+    assert store.get_handoff("h_gate")["status"] == "completed"
 
 
 def test_wait_timeout_challenge_still_up_keeps_waiting():
