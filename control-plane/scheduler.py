@@ -38,6 +38,9 @@ _LOCK = threading.Lock()   # guards the check-then-add on SCHED_RUNNING (sweeper
 # computer_id -> [runs using it, whether one of them woke it]. Two schedules can share
 # a box, and the one that woke it must not sleep it under the other: the last one out does.
 _HOLDERS = {}
+# computer_id -> lock ordering a run's wake after the last run's sleep of that box, so
+# a run starting mid-sleep waits and wakes it; _LOCK itself is never held over Docker.
+_GATES = {}
 
 
 def _wall_exists(t, hh, mm):
@@ -232,11 +235,13 @@ def run_schedule(sid):
         woke_for_run = False
         with _LOCK:
             _HOLDERS.setdefault(cid, [0, False])[0] += 1
+            gate = _GATES.setdefault(cid, threading.Lock())
         try:
             if bad:
                 raise bad
-            was_asleep = get_computer(cid)["state"] == "asleep"
-            do_wake(cid)
+            with gate:
+                was_asleep = get_computer(cid)["state"] == "asleep"
+                do_wake(cid)
             woke_for_run = was_asleep
             code, summary = run_brain(cid, s["prompt"], name=s["name"])
             status = "ok" if code == 0 else "fail"
@@ -257,14 +262,19 @@ def run_schedule(sid):
             summary = f"{type(e).__name__}: {e}"
             log.exception("schedule %s run failed", sid)
         finally:
-            with _LOCK:            # held through the sleep: a run starting now waits, then wakes
+            with _LOCK:
                 held = _HOLDERS[cid]
                 held[0] -= 1
                 held[1] = held[1] or woke_for_run
-                if not held[0]:
-                    del _HOLDERS[cid]
+                last = not held[0]
+            if last:
+                with gate:
+                    with _LOCK:    # a run that joined since takes over the sleep
+                        last = _HOLDERS.get(cid) is held and not held[0]
+                        if last:
+                            del _HOLDERS[cid]
                     try:
-                        if held[1] and not store.active_attempt_exists(cid):
+                        if last and held[1] and not store.active_attempt_exists(cid):
                             do_sleep(cid)
                     except Exception:
                         log.exception("sleep after schedule %s", sid)

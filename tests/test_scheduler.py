@@ -456,6 +456,47 @@ def test_a_run_does_not_sleep_the_box_under_another_schedule():
     assert scheduler._HOLDERS == {}
 
 
+def test_a_slow_sleep_does_not_hold_up_another_computer():
+    # The last run out used to hold the scheduler's one lock while Docker stopped its
+    # box, so every other schedule waited on that stop.
+    import threading
+    import unittest.mock as mock
+    import scheduler
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    state = {"c_x": "asleep", "c_y": "running"}
+    store.insert_schedule("sch_X", "c_x", "sch_X", "p", "interval", "3600", 0,
+                          "2020-01-01T00:00:00Z")
+    store.insert_schedule("sch_Y", "c_y", "sch_Y", "p", "interval", "3600", 0,
+                          "2020-01-01T00:00:00Z")
+    sleeping, release, y_done = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_sleep(cid):
+        sleeping.set()
+        release.wait(5)
+        state[cid] = "asleep"
+
+    with mock.patch.object(scheduler, "get_computer", lambda cid: {"id": cid, "state": state[cid]}), \
+         mock.patch.object(scheduler, "do_wake", lambda cid: state.update({cid: "running"})), \
+         mock.patch.object(scheduler, "do_sleep", slow_sleep), \
+         mock.patch.object(scheduler, "run_brain", lambda cid, p, name="": (0, "ok")), \
+         mock.patch.object(scheduler, "capture_run_artifacts", lambda *a, **k: None), \
+         mock.patch.object(scheduler.notifier, "push"), \
+         mock.patch.object(scheduler, "emit"):
+        tx = threading.Thread(target=scheduler.run_schedule, args=("sch_X",))
+        tx.start()
+        try:
+            assert sleeping.wait(5)
+            ty = threading.Thread(target=lambda: (scheduler.run_schedule("sch_Y"), y_done.set()))
+            ty.start()
+            assert y_done.wait(2), "a run on another computer waited on c_x's sleep"
+        finally:
+            release.set()
+            tx.join(5)
+    assert state == {"c_x": "asleep", "c_y": "running"}, state
+    assert scheduler._HOLDERS == {}
+
+
 def test_ram_tight_box_is_a_skip_too():
     import scheduler
     from errors import ApiError
