@@ -1738,6 +1738,13 @@ function vncWs(req, socket, head) {
   const t = vncUpstream(req);
   if (!t) { socket.destroy(); return; }
   const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: 'GET', headers: liveHeaders(req, true) });
+  socket.on('error', () => up.destroy());
+  // cased refused the upgrade (asleep, gone, unauthorized): pass the status on, or
+  // the browser's socket waits for a 101 that never comes.
+  up.on('response', (upRes) => {
+    upRes.resume();
+    socket.end(`HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage || ''}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  });
   up.on('upgrade', (upRes, upSocket, upHead) => {
     const lines = ['HTTP/1.1 101 Switching Protocols'];
     for (const [k, v] of Object.entries(upRes.headers)) lines.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
@@ -1748,8 +1755,8 @@ function vncWs(req, socket, head) {
     for (const s of [socket, upSocket]) s.on('error', () => { socket.destroy(); upSocket.destroy(); });
   });
   up.on('error', () => socket.destroy());
-  up.end();
   if (head?.length) up.write(head);
+  up.end();
 }
 
 // Only the two pages are servable. Everything else in this directory —

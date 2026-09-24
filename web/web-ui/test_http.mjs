@@ -12,11 +12,17 @@ process.env.CASE_TOKEN = 'tok';
 delete process.env.CASE_DRIVE_API_KEY;
 delete process.env.CASE_DRIVE_PROVIDER;
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
-// cased is down: a port that was just free and is closed again.
-const dead = http.createServer();
-await new Promise((r) => dead.listen(0, '127.0.0.1', r));
-process.env.CASE_URL = `http://127.0.0.1:${dead.address().port}`;
-await new Promise((r) => dead.close(r));
+// cased is down for REST (every connection reset); its /live relay answers
+// websocket upgrades: c_asleep is refused, anything else is switched and echoed.
+const cased = http.createServer((req) => req.socket.destroy());
+cased.on('upgrade', (req, socket, head) => {
+  if (req.url.includes('/c_asleep/')) return socket.end('HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n');
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
+  if (head.length) socket.write(head);
+  socket.pipe(socket);
+});
+await new Promise((r) => cased.listen(0, '127.0.0.1', r));
+process.env.CASE_URL = `http://127.0.0.1:${cased.address().port}`;
 const serve = await import('./serve.mjs');
 const { server } = serve;
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -128,5 +134,29 @@ try {
   }
 }
 
+// /live websockets: a refused upgrade is answered, not left hanging, and bytes the
+// browser sent right behind its upgrade request reach the desk.
+{
+  const open = (cid, extra = '') => new Promise((resolve) => {
+    const c = net.connect(server.address().port, '127.0.0.1', () => {
+      c.write(`GET /live/${cid}/websockify HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer tok\r\n`
+        + 'Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n'
+        + `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n${extra}`);
+    });
+    let got = '';
+    c.on('data', (d) => {
+      got += d;
+      if (extra && got.endsWith(extra)) { c.destroy(); resolve(got); }
+    });
+    c.on('close', () => resolve(got));
+    c.setTimeout(2000, () => { c.destroy(); resolve(`timeout: ${got}`); });
+  });
+  assert.match(await open('c_asleep'), /^HTTP\/1\.1 409 /);
+  const up = await open('c_awake', 'first-frame');
+  assert.match(up, /^HTTP\/1\.1 101 /);
+  assert.ok(up.endsWith('first-frame'), up);
+}
+
+cased.close();
 server.close();
 console.log('test_http: ok');
