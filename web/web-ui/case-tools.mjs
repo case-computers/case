@@ -471,8 +471,11 @@ export async function anthropicToolLoop({
   };
   let text = '';
   let finished = false;
-  const spend = { in: 0, cached: 0, out: 0 };
-  const overBudget = () => Number(tokenBudget) > 0 && spend.in > tokenBudget;
+  // eff is billed input, the number the budget bounds (serve.mjs counts OpenAI's
+  // the same way): input_tokens excludes the cache, whose reads bill at 0.1x and
+  // writes at 1.25x. Raw input counts every cached re-send in full.
+  const spend = { in: 0, cached: 0, out: 0, eff: 0 };
+  const overBudget = () => Number(tokenBudget) > 0 && spend.eff > tokenBudget;
   const round = async (p) => {
     const ctx = newAnthropicStreamCtx();
     let thinkDelta = false;
@@ -503,7 +506,7 @@ export async function anthropicToolLoop({
   };
   for (let i = 0; i < rounds && !finished && !overBudget(); i++) {
     if (stopped?.()) break;
-    beforeRound?.(messages);
+    beforeRound?.(messages, { round: i, eff: spend.eff });
     let result;
     try {
       result = await withRateRetry(() => round(params), emit, 5, signal);
@@ -518,9 +521,11 @@ export async function anthropicToolLoop({
     }
     const { message, traces, textDelta } = result;
     const u = message.usage || {};
-    spend.in += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0)
-      + (u.cache_creation_input_tokens || 0);
-    spend.cached += u.cache_read_input_tokens || 0;
+    const read = u.cache_read_input_tokens || 0;
+    const wrote = u.cache_creation_input_tokens || 0;
+    spend.in += (u.input_tokens || 0) + read + wrote;
+    spend.cached += read;
+    spend.eff += (u.input_tokens || 0) + 1.25 * wrote + 0.1 * read;
     spend.out += u.output_tokens || 0;
     text = traces.texts.join('\n').trim();
     if (!traces.calls.length) {

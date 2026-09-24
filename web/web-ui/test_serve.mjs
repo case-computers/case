@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,8 @@ import {
 
 // serve.mjs loads threads.json at import and rewrites it; never the developer's own.
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
-const { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
+process.env.CASE_TURN_TOKENS = '10000';   // small enough for the scripted turns below to cross 80%
+const { runTurn, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 assert.match(html, /x-anthropic-key/);
@@ -643,6 +645,86 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
     { event: 'credential_added', data: { name: 'x' } },
   ]);
   assert.equal(rest, 'event: handoff_cre');
+}
+
+// ---- scripted turns: a fake cased and a fake provider behind global fetch ----
+async function fakeCased(routes) {
+  const hits = [];
+  const srv = http.createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    const hit = Object.entries(routes).find(([k]) => req.url.startsWith(k));
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(hit ? hit[1] : {}));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const was = process.env.CASE_URL;
+  process.env.CASE_URL = `http://127.0.0.1:${srv.address().port}/v1`;
+  return { hits, close: () => { process.env.CASE_URL = was; srv.close(); } };
+}
+/** One Messages SSE body per round: blocks are {text} or {tool, input}. */
+function anthropicSse({ blocks, usage = {} }) {
+  const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  let out = ev('message_start', { message: { id: 'msg', type: 'message', role: 'assistant', model: 'm', content: [],
+    stop_reason: null, usage: { input_tokens: 0, output_tokens: 1, ...usage } } });
+  blocks.forEach((b, index) => {
+    if (b.tool) {
+      out += ev('content_block_start', { index, content_block: { type: 'tool_use', id: b.id, name: b.tool, input: {} } });
+      out += ev('content_block_delta', { index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(b.input || {}) } });
+    } else {
+      out += ev('content_block_start', { index, content_block: { type: 'text', text: '' } });
+      out += ev('content_block_delta', { index, delta: { type: 'text_delta', text: b.text } });
+    }
+    out += ev('content_block_stop', { index });
+  });
+  const stop = blocks.some((b) => b.tool) ? 'tool_use' : 'end_turn';
+  return out + ev('message_delta', { delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 5 } })
+    + ev('message_stop', {});
+}
+async function withAnthropic(rounds, fn) {
+  const sent = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    sent.push(JSON.parse(init.body));
+    return new Response(anthropicSse(rounds.shift()), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  try { return await fn(sent); } finally { globalThis.fetch = orig; }
+}
+
+// Anthropic turns are bounded by billed input, not raw: 50k cache reads bill as
+// 5k. Past 80% of the budget the model gets BUDGET_WARN, and a re-snapshot of an
+// unchanged page is elided — the same as the OpenAI loop.
+{
+  const cased = await fakeCased({
+    '/v1/computers/c_1/page': { ok: true, url: 'https://x/', elements: ['[1] button "Go"'] },
+    '/v1/computers/c_1': { name: 'desk', credentials: [] },
+  });
+  const thread = { id: 't_budget', title: 't', agent: '', items: [], created: 0, updated: 0 };
+  const events = [];
+  try {
+    const result = await withAnthropic([
+      { usage: { input_tokens: 100, cache_read_input_tokens: 50000 }, blocks: [{ tool: 'computer_snapshot', id: 'tu_1' }] },
+      { usage: { input_tokens: 100, cache_read_input_tokens: 30000 }, blocks: [{ tool: 'computer_snapshot', id: 'tu_2' }] },
+      { usage: { input_tokens: 100 }, blocks: [{ text: 'done' }] },
+    ], async (sent) => {
+      const r = await runTurn({
+        thread, inputText: 'look', auth: { provider: 'anthropic', key: 'sk-ant' }, computerId: 'c_1',
+        model: 'claude-sonnet-4-6', emit: (e) => events.push(e),
+      });
+      assert.equal(sent.length, 3, 'raw input is over budget after round 1; billed (5.1k) is not');
+      const last = JSON.stringify(sent[2].messages.at(-1));
+      assert.ok(last.includes('Turn budget nearly spent'), 'round 3 carries the wrap-up warning');
+      assert.ok(last.includes('same elements as the previous snapshot'), 'the repeat snapshot is elided live');
+      return r;
+    });
+    assert.equal(result.finished, true);
+    assert.equal(result.text, 'done');
+    assert.ok(events.some((e) => e.type === 'think' && /80% of the turn budget/.test(e.text)));
+    const outs = thread.items.filter((it) => it.type === 'function_call_output');
+    assert.match(outs[1].output, /"unchanged":true/, 'history matches what the model saw');
+    assert.ok(!JSON.stringify(thread.items).includes('Turn budget nearly spent'), 'the warning is turn-scoped');
+  } finally {
+    cased.close();
+  }
 }
 
 console.log('web-ui serve: all checks pass');

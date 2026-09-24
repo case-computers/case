@@ -561,6 +561,15 @@ const ROUNDS = 200;
 const TURN_TOKEN_BUDGET = Number(process.env.CASE_TURN_TOKENS || 2_000_000);
 const BUDGET_WARN = 'Turn budget nearly spent — a few tool steps remain. Append your progress and the exact next step to a file under /home/agent/reports now, then stop and say where you stopped.';
 const isBudgetWarn = (it) => Array.isArray(it?.content) && it.content.some((c) => c?.text === BUDGET_WARN);
+/** Past 80% of the billed budget or of the rounds, queue BUDGET_WARN into history
+ *  and say so; returns which bound tripped, '' if neither. Both provider loops. */
+function budgetWarn(hist, emit, eff, round) {
+  const why = eff > 0.8 * TURN_TOKEN_BUDGET ? 'budget' : round >= 0.8 * ROUNDS ? 'rounds' : '';
+  if (!why) return '';
+  pushSteerItems(hist.items, [BUDGET_WARN]);
+  emit({ type: 'think', text: `[80% of the turn ${why} — told the model to wrap up]` });
+  return why;
+}
 // Window guard. OpenAI compacts server-side once the rendered context passes this
 // (opaque `compaction` item we carry forward); `truncation:'auto'` is the floor if a
 // model lacks compaction. 200k fits every window in the list (272k–1M). 0 = off.
@@ -1041,6 +1050,8 @@ export async function runTurn({
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
       const shots = new Set();
+      const snaps = { last: '' };
+      let warned = '';
       const { text: out, finished, spend, overBudget } = await anthropicToolLoop({
         key: auth.key,
         model,
@@ -1053,7 +1064,8 @@ export async function runTurn({
         tokenBudget: TURN_TOKEN_BUDGET,
         signal: gone.signal,
         stopped,
-        beforeRound: (msgs) => {
+        beforeRound: (msgs, { round, eff }) => {
+          if (!warned && (warned = budgetWarn(hist, emit, eff, round))) appendSteerToAnthropic(msgs, BUDGET_WARN);
           const nudges = takeSteers(thread.id);
           for (const n of nudges) {
             pushSteerItems(hist.items, [n]);
@@ -1075,16 +1087,17 @@ export async function runTurn({
             () => (eplan ? runExtra(eplan) : runCaseTool(name, args, id, null)),
             actFor(name, args || {}, id));
           const { image_b64, ...persist } = result;
-          hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(persist) });
+          const rest = snapshotElide(name, persist, snaps);
+          hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(rest) });
           if (image_b64) pushShot(hist.items, shots, image_b64);
-          return result;
+          return image_b64 ? { ...rest, image_b64 } : rest;
         },
       });
       let text = out;
       if (!finished && !stopped()) {
         text = (text ? text + '\n\n' : '')
           + (overBudget
-            ? `**Out of budget.** Stopped after ${spend.in.toLocaleString('en-US')} input tokens with the task unfinished. Say **continue** and I pick up from here.`
+            ? `**Out of budget.** Stopped after ${Math.round(spend.eff).toLocaleString('en-US')} billed input tokens with the task unfinished. Say **continue** and I pick up from here.`
             : `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`);
         emit({ type: 'text', text });
       } else if (text) {
@@ -1190,11 +1203,7 @@ export async function runTurn({
     let compactions = 0;
     let i = 0;
     for (; i < ROUNDS && !finished && !stopped() && !overBudget(); i++) {
-      if (!warned && (effSoFar() > 0.8 * TURN_TOKEN_BUDGET || i >= 0.8 * ROUNDS)) {
-        warned = effSoFar() > 0.8 * TURN_TOKEN_BUDGET ? 'budget' : 'rounds';
-        pushSteerItems(hist.items, [BUDGET_WARN]);
-        emit({ type: 'think', text: `[80% of the turn ${warned} — told the model to wrap up]` });
-      }
+      if (!warned) warned = budgetWarn(hist, emit, effSoFar(), i);
       const nudges = takeSteers(thread.id);
       if (nudges.length) {
         for (const n of nudges) {
