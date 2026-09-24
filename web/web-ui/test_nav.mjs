@@ -48,8 +48,15 @@ fs.writeFileSync(mod, `
   const sendPrompt = (n) => calls.push('send ' + n.text + ' to ' + (activeTid || 'new'));
   const openThread = (t) => { calls.push('open ' + t); activeTid = loadingTid = t; };
   ${grab('drainQ')}
+  // the real openThread, against a fetch that fails
+  let threadGen = 0, fetchFails = false;
+  const inner = { innerHTML: '', appendChild() {} }, log = {}, md = (x) => x, paint = () => {};
+  const fetch = async () => { if (fetchFails) throw new Error('down'); return { ok: false, json: async () => ({ error: 'gone' }) }; };
+  async ${grab('openThread').replace('function openThread(', 'function realOpenThread(')}
   export const fake = { promptQ, calls, drainQ, view: (t) => { activeTid = t; loadingTid = ''; },
-                        loading: (t) => { activeTid = loadingTid = t; } };
+                        loading: (t) => { activeTid = loadingTid = t; },
+                        open: realOpenThread, state: () => ({ activeTid, loadingTid }),
+                        down: (v) => { fetchFails = v; } };
   export const set = (s) => {
     apiUp = s.apiUp ?? true;
     comps = s.comps || [];
@@ -132,6 +139,22 @@ fake.view('t5');
 fake.drainQ('t5');
 assert(fake.calls.join() === 'send later to t5', 'and is sent once it has loaded');
 fake.calls.length = 0;
+fake.promptQ.length = 0;
+// A thread that fails to load is left unopened, so clicking it or draining retries.
+for (const down of [false, true]) {
+  fake.view('t1');
+  fake.down(down);
+  await fake.open('t6');
+  const st = fake.state();
+  assert(st.activeTid === '' && st.loadingTid === '',
+    (down ? 'an unreachable server' : 'a thread gone') + ' leaves no thread open to send into');
+}
+fake.promptQ.push({ text: 'retry', files: [], tid: 't6' });
+fake.drainQ('');
+assert(fake.calls.join() === 'open t6' && fake.promptQ.length === 1,
+  'a queued prompt for it retries the load instead of sending');
+fake.calls.length = 0;
+fake.promptQ.length = 0;
 fake.promptQ.push({ text: 'fresh', files: [], tid: '' });
 fake.drainQ('t2');
 assert(fake.calls.join() === 'new,send fresh to new', 'a prompt typed into a new task starts one');
