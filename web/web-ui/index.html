@@ -770,6 +770,7 @@ function caretEl(){const s=document.createElement('span');s.className='cur';retu
    computer than the one you picked would mean different logins, so a missing
    pick says so rather than quietly seating you somewhere else. */
 const PICK_KEY='case.drive.computer';
+const compQ=()=>'computer_id='+encodeURIComponent(comp&&comp.id||'');
 const readPick=()=>{try{return localStorage.getItem(PICK_KEY)||'';}catch{return '';}};
 const writePick=id=>{try{localStorage.setItem(PICK_KEY,id);}catch{/* private mode */}};
 let pickLost=false;   // picked a computer, it is not on the box any more
@@ -790,8 +791,13 @@ async function refresh(){
     const want=(comp&&comp.id)||readPick();
     const found=want?comps.find(c=>c.id===want):null;
     pickLost=!!(want&&!found&&comps.length);
+    const had=comp;
     comp=found||(want?null:(comps.find(c=>c.state==='awake')||comps[0]||null));
     if(comp&&comp.id!==readPick())writePick(comp.id);
+    if(comp&&!had){   // a pane opened before the pick was known asked for no computer
+      if(mode==='files'&&!entries)loadDir(cwd);
+      if(mode==='creds')loadCreds();
+    }
     try{
       const rt=await fetch('/api/threads');
       const jt=await rt.json();
@@ -1029,7 +1035,7 @@ async function loadDir(p){
   const list=$('flist');
   list.classList.add('loading');
   try{
-    const r=await fetch('/api/fs?path='+encodeURIComponent(p));
+    const r=await fetch('/api/fs?path='+encodeURIComponent(p)+'&'+compQ());
     const j=await r.json();
     if(gen!==dirGen)return;
     if(!r.ok){renderList([{err:j.error||('http '+r.status)}],p);return;}
@@ -1079,14 +1085,14 @@ async function openFile(p){
   prev.classList.add('has');
   $('fhName').textContent=name;
   $('fhMeta').textContent='';
-  $('fhOpen').href='/api/file?path='+encodeURIComponent(p);
+  $('fhOpen').href='/api/file?path='+encodeURIComponent(p)+'&'+compQ();
   const bodyEl=$('fbody');
   bodyEl.innerHTML='<pre style="color:var(--faint)">loading…</pre>';
   const ent=(entries||[]).find(e=>(cwd==='/'?'':cwd)+'/'+e.name===p);
   if(ent)$('fhMeta').textContent=fmtSize(ent.size);
   if(IMG_RE.test(name)){
     if(gen!==fileGen)return;
-    bodyEl.innerHTML='<img alt="'+esc(name)+'" src="/api/file?path='+encodeURIComponent(p)+'">';
+    bodyEl.innerHTML='<img alt="'+esc(name)+'" src="/api/file?path='+encodeURIComponent(p)+'&amp;'+compQ()+'">';
     return;
   }
   if(!TEXT_RE.test(name)||(ent&&ent.size>1048576)){
@@ -1094,7 +1100,7 @@ async function openFile(p){
     return;
   }
   try{
-    const r=await fetch('/api/file?path='+encodeURIComponent(p));
+    const r=await fetch('/api/file?path='+encodeURIComponent(p)+'&'+compQ());
     if(gen!==fileGen)return;
     if(!r.ok){
       const j=await r.json().catch(()=>({}));
@@ -1133,7 +1139,7 @@ function renderCreds(){
 }
 async function loadCreds(){
   try{
-    const r=await fetch('/api/creds');
+    const r=await fetch('/api/creds?'+compQ());
     const j=await r.json();
     credRows=r.ok?(j.credentials||[]):[];
     if(!r.ok)$('credErr').textContent=j.error||('http '+r.status);
@@ -1148,7 +1154,7 @@ $('credList').addEventListener('click',async e=>{
   if(!confirm('Delete "'+name+'" from the vault?'))return;
   btn.disabled=true;
   try{
-    const r=await fetch('/api/creds?name='+encodeURIComponent(name),{method:'DELETE'});
+    const r=await fetch('/api/creds?name='+encodeURIComponent(name)+'&'+compQ(),{method:'DELETE'});
     if(!r.ok){const j=await r.json().catch(()=>({}));$('credErr').textContent=j.error||'delete failed';}
   }catch{$('credErr').textContent='cased down';}
   loadCreds();
@@ -1166,7 +1172,7 @@ $('credForm').addEventListener('submit',async e=>{
   const save=$('credSave');
   save.disabled=true;save.textContent='SAVING…';
   try{
-    const r=await fetch('/api/creds',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+    const r=await fetch('/api/creds?'+compQ(),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok){err.textContent=j.error||('http '+r.status);}
     else{$('credForm').reset();loadCreds();}
@@ -1283,7 +1289,7 @@ function paintSchedList(rows){
 async function loadSchedules(){
   $('schedErr').textContent='';
   try{
-    const r=await fetch('/api/schedules');
+    const r=await fetch('/api/schedules?'+compQ());
     const j=await r.json().catch(()=>[]);
     if(!r.ok){$('schedList').innerHTML='<div class="sched-empty">'+(apiErr(j)||'could not load')+'</div>';return;}
     paintSchedList(Array.isArray(j)?j:[]);
@@ -1310,7 +1316,7 @@ $('schedList').addEventListener('click',async e=>{
   const id=row.dataset.id;
   if(e.target.classList.contains('sched-run')){
     try{
-      const r=await fetch('/api/schedules/run',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})});
+      const r=await fetch('/api/schedules/run?'+compQ(),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})});
       const j=await r.json().catch(()=>({}));
       $('schedErr').textContent=r.ok?'started':(apiErr(j)||'run failed');
     }catch{$('schedErr').textContent='cased unreachable';}
@@ -1318,7 +1324,7 @@ $('schedList').addEventListener('click',async e=>{
   }
   if(e.target.classList.contains('sched-del')){
     try{
-      const r=await fetch('/api/schedules?id='+encodeURIComponent(id),{method:'DELETE'});
+      const r=await fetch('/api/schedules?id='+encodeURIComponent(id)+'&'+compQ(),{method:'DELETE'});
       if(!r.ok){const j=await r.json().catch(()=>({}));$('schedErr').textContent=apiErr(j)||'delete failed';return;}
       loadSchedules();
     }catch{$('schedErr').textContent='cased unreachable';}
@@ -1356,7 +1362,7 @@ $('schedForm').addEventListener('submit',async e=>{
   if(name)body.name=name;
   $('schedErr').textContent='';
   try{
-    const r=await fetch('/api/schedules',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch('/api/schedules?'+compQ(),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok){$('schedErr').textContent=apiErr(j)||'save failed';return;}
     $('schedPrompt').value='';
@@ -1655,7 +1661,7 @@ $('teachStart').addEventListener('click',()=>{
 async function teachTick(){
   if(!teach.on)return;
   try{
-    const r=await fetch('/api/teach-tick',{method:'POST'});
+    const r=await fetch('/api/teach-tick?'+compQ(),{method:'POST'});
     const j=await r.json();
     if(!j.ok)return;
     if(j.gap){

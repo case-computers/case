@@ -90,8 +90,42 @@ try {
   }
   await new Promise((r) => setTimeout(r, 200));
   assert.equal((await get('/api/threads', auth)).status, 200, 'still serving after aborted bodies');
-  assert.equal((await get('/api/schedules', auth)).status, 502);
-  assert.equal((await post('/api/teach-tick', {}, auth)).status, 500);
+  assert.equal((await get('/api/schedules?computer_id=c_1', auth)).status, 502);
+  assert.equal((await post('/api/teach-tick?computer_id=c_1', {}, auth)).status, 500);
+}
+
+// Files, vault, schedules and teach act on the computer the page is sat at, not
+// on whichever one cased lists first; with no pick they refuse rather than guess.
+{
+  const auth = { authorization: 'Bearer tok' };
+  const hits = [];
+  const fake = http.createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/v1/computers') return res.end(JSON.stringify({ computers: [{ id: 'c_A' }, { id: 'c_B' }] }));
+    res.end(req.url.includes('/exec') ? '{"stdout":""}' : '{}');
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  const was = process.env.CASE_URL;
+  process.env.CASE_URL = `http://127.0.0.1:${fake.address().port}/v1`;
+  try {
+    for (const p of ['/api/fs?path=/home/agent', '/api/file?path=/home/agent/a.txt', '/api/creds', '/api/schedules']) {
+      assert.equal((await get(`${p}${p.includes('?') ? '&' : '?'}computer_id=c_B`, auth)).status, 200, p);
+    }
+    assert.equal((await post('/api/creds?computer_id=c_B', { domains: 'x.com', username: 'u', secret: 's' }, auth)).status, 200);
+    assert.equal((await post('/api/teach-tick?computer_id=c_B', {}, auth)).status, 200);
+    assert.equal(hits.length, 6);
+    assert.ok(hits.every((h) => h.includes('/computers/c_B/')), hits.join('\n'));
+    hits.length = 0;
+    for (const p of ['/api/fs?path=/home/agent', '/api/file?path=/home/agent/a.txt', '/api/creds', '/api/schedules']) {
+      assert.equal((await get(p, auth)).status, 409, p);
+    }
+    assert.equal((await post('/api/teach-tick', {}, auth)).status, 409);
+    assert.deepEqual(hits, [], 'no pick is refused, never rerouted');
+  } finally {
+    process.env.CASE_URL = was;
+    fake.close();
+  }
 }
 
 server.close();

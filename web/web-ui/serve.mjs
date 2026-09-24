@@ -179,6 +179,10 @@ function originHealth() {
 }
 
 let cachedCid = '';
+// The computer the page is sat at. Files, vault, schedules and teach act on
+// exactly that one: rerouting a missing pick to the first computer on the box
+// would show and change someone else's desk (web-ui/README.md, "One seat").
+const pickedCid = (url) => String(url.searchParams.get('computer_id') || '').trim();
 async function cid() {
   if (cachedCid) return cachedCid;
   const r = await api('GET', '/computers', { timeoutMs: 6000 });
@@ -261,8 +265,8 @@ async function fsList(res, url) {
   const p = url.searchParams.get('path') || '/home/agent';
   if (!pathOk(p)) return json(res, 400, { error: 'bad path' });
   try {
-    const id = await cid();
-    if (!id) return json(res, 409, { error: 'no computer on the box' });
+    const id = pickedCid(url);
+    if (!id) return json(res, 409, { error: 'no computer picked' });
     const cmd = `find ${shq(p)} -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T@\\t%f\\n' 2>&1 || true`;
     const r = await api('POST', `/computers/${encodeURIComponent(id)}/exec?wake=true`,
       { body: { command: cmd, timeout_s: 15 }, timeoutMs: 30000 });
@@ -282,8 +286,8 @@ async function fsFile(res, url) {
   const p = url.searchParams.get('path') || '';
   if (!pathOk(p)) return json(res, 400, { error: 'bad path' });
   try {
-    const id = await cid();
-    if (!id) return json(res, 409, { error: 'no computer on the box' });
+    const id = pickedCid(url);
+    if (!id) return json(res, 409, { error: 'no computer picked' });
     const r = await api('GET',
       `/computers/${encodeURIComponent(id)}/files?path=${encodeURIComponent(p)}&wake=true`,
       { timeoutMs: 60000, raw: true });
@@ -312,9 +316,8 @@ export function normHost(s) {
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h) ? h : '';
 }
 async function creds(req, res, url) {
-  let id = '';
-  try { id = await cid(); } catch { /* fall through */ }
-  if (!id) return json(res, 502, { error: 'no computer — create one first' });
+  const id = pickedCid(url);
+  if (!id) return json(res, 409, { error: 'no computer picked' });
   const base = `/computers/${encodeURIComponent(id)}/credentials`;
   try {
     if (req.method === 'GET') {
@@ -1303,8 +1306,8 @@ export const driveLoop = { turn: runTurn };
 export async function schedulesRoute(req, res, url) {
   const sid = String(url.searchParams.get('id') || '').trim();
   try {
-    const id = await cid();
-    if (!id) return json(res, 409, { error: 'no computer' });
+    const id = pickedCid(url);
+    if (!id) return json(res, 409, { error: 'no computer picked' });
     if (req.method === 'GET' && url.pathname === '/api/schedules') {
       const r = await api('GET', `/computers/${encodeURIComponent(id)}/schedules`);
       return json(res, r.status >= 400 ? r.status : 200, r.json || []);
@@ -1801,8 +1804,8 @@ export const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/chat/steer') return await steer(req, res);
     if (req.method === 'POST' && p === '/api/attach') return await attach(req, res);
     if (req.method === 'POST' && p === '/api/teach-tick') {
-      const id = await cid();
-      if (!id) return json(res, 409, { error: 'no computer' });
+      const id = pickedCid(url);
+      if (!id) return json(res, 409, { error: 'no computer picked' });
       const r = await api('POST', `/computers/${encodeURIComponent(id)}/teach-tick?wake=true`, { timeoutMs: 15000 });
       return json(res, r.status >= 400 ? r.status : 200, r.json || {});
     }

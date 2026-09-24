@@ -29,6 +29,9 @@ assert.match(html, /id="schedBtn"/);
 assert.match(html, /id="schedBtnM"/);
 assert.match(html, /Intl\.supportedValuesOf/);
 assert.match(html, /brain_key/);
+for (const m of html.matchAll(/'\/api\/(fs|file|creds|schedules|teach-tick)[^;]*/g)) {
+  assert.match(m[0], /compQ\(\)/, `${m[1]} names the picked computer: ${m[0]}`);
+}
 assert.match(fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8'), /schedulesRoute/);
 
 // threadTurns: reopening a thread shows text + tool calls; outputs and reasoning stay server-side
