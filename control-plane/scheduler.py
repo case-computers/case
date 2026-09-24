@@ -14,6 +14,7 @@ import random
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -152,13 +153,19 @@ def run_brain(cid, prompt, name=""):
         return 127, f"mcp config not found at {MCP_CONFIG} — set CASE_MCP_CONFIG"
     # BYOK: stock path forces the caller's logged-in/subscription auth by blanking the
     # key, UNLESS the operator explicitly set one (their key = their cost, still BYOK).
-    # Template path owns its env untouched.
-    env = os.environ
-    if not BRAIN_CMD and not os.environ.get("ANTHROPIC_API_KEY"):
-        env = {**os.environ, "ANTHROPIC_API_KEY": ""}
+    # Template path owns its env and cwd untouched.
+    env, cwd = os.environ, None
+    if not BRAIN_CMD:
+        # case-mcp.json says `python3 mcp/case_mcp.py`: run from the config's directory
+        # (the repo root) with this interpreter, which has the deps, first on PATH
+        env = {**os.environ, "PATH": os.pathsep.join(
+            [os.path.dirname(sys.executable), os.environ.get("PATH", "")])}
+        cwd = os.path.dirname(os.path.abspath(MCP_CONFIG))
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            env["ANTHROPIC_API_KEY"] = ""
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=BRAIN_TIMEOUT, env=env)
+                           timeout=BRAIN_TIMEOUT, env=env, cwd=cwd)
         return p.returncode, (p.stdout or p.stderr or "").strip()[-800:]
     except subprocess.TimeoutExpired:
         return -1, f"brain run timed out ({BRAIN_TIMEOUT}s)"

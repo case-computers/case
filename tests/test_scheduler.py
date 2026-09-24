@@ -246,6 +246,31 @@ def test_run_brain_malformed_template_is_clean_127():
         scheduler.BRAIN_CMD = old
 
 
+def test_stock_brain_resolves_case_mcp_json_from_anywhere():
+    # case-mcp.json runs `python3 mcp/case_mcp.py`, relative, with whatever python3 is
+    # on PATH: from any other cwd, or with a system python lacking the deps, the
+    # brain came up without its tools.
+    import tempfile
+    import scheduler
+    fake = os.path.join(tempfile.mkdtemp(), "claude")
+    with open(fake, "w") as f:
+        f.write("#!/bin/sh\npwd\ncommand -v python3\n")
+    os.chmod(fake, 0o755)
+    old = (scheduler.BRAIN_BIN, scheduler.BRAIN_CMD, scheduler.BRAIN_URL)
+    here = os.getcwd()
+    try:
+        scheduler.BRAIN_BIN, scheduler.BRAIN_CMD, scheduler.BRAIN_URL = fake, "", ""
+        os.chdir("/")
+        code, out = scheduler.run_brain("c_1", "hi")
+    finally:
+        os.chdir(here)
+        scheduler.BRAIN_BIN, scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old
+    cwd, py = out.splitlines()
+    assert code == 0, out
+    assert os.path.exists(os.path.join(cwd, "mcp", "case_mcp.py")), cwd
+    assert os.path.dirname(py) == os.path.dirname(sys.executable), py
+
+
 def test_busy_box_is_a_skip_not_a_raw_apierror():
     # a box at CASE_MAX_RUNNING=1: a busy box must report a plain-English skip
     # (never "ApiError: …") and must never sleep someone else's live session.
