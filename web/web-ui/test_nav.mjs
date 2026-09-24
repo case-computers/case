@@ -38,6 +38,8 @@ fs.writeFileSync(mod, `
   ${grab('threadRowHtml')}
   ${grab('myThreads')}
   ${grab('navHtml')}
+  ${grab('steerTarget')}
+  ${grab('queuedThread')}
   export const set = (s) => {
     apiUp = s.apiUp ?? true;
     comps = s.comps || [];
@@ -45,7 +47,7 @@ fs.writeFileSync(mod, `
     comp = s.comp || null;
     pickLost = !!s.pickLost;
   };
-  export { navHtml, myThreads };
+  export { navHtml, myThreads, steerTarget, queuedThread };
 `);
 
 const nav = await import('file://' + mod);
@@ -86,6 +88,17 @@ assert(html.includes('mine'), 'shows this computer\'s threads');
 assert(!html.includes('theirs'), 'hides another computer\'s threads');
 assert(html.includes('legacy'), 'adopts pre-single-seat threads that have no agent');
 assert(!html.includes('data-id='), 'sidebar lists no computers, only threads');
+
+// A message typed mid-turn steers only the turn on screen; typed anywhere else it
+// is queued for the thread it was typed into ('' is a new task).
+assert(nav.steerTarget('t1', 't1') === 't1', 'typing into the running thread steers it');
+assert(nav.steerTarget('t1', '') === '', 'typing into a new task does not steer the running turn');
+assert(nav.steerTarget('t1', 't2') === '', 'typing into another thread does not steer the running turn');
+assert(nav.steerTarget('__pending', '__pending') === '', 'a thread not yet born cannot be steered');
+assert(nav.queuedThread({ text: 'x', tid: '' }, 't1') === '', 'a prompt typed into a new task starts one');
+assert(nav.queuedThread({ text: 'x', tid: 't2' }, 't1') === 't2', 'a prompt typed into another thread goes there');
+assert(nav.queuedThread({ text: 'x', tid: '__pending' }, 't1') === 't1', 'typed while the thread was being born: the one that ran');
+assert(nav.queuedThread('x', 't1') === 't1', 'a queue item with no thread belongs to the turn that ran');
 
 if (failed) {
   console.error(`\n${failed} failed`);

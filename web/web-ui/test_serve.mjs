@@ -513,11 +513,10 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(html, /if\(textFrame\)\{cancelAnimationFrame\(textFrame\);drawText\(\);\}\n    caret\.remove\(\);/,
     'the last frame is drawn before the caret goes');
   assert.match(html, /if\(nav!==navDrawn\)/, 'refresh repaints the sidebar only when it changed');
-  // switching threads mid-turn: a slow reopen never paints over a newer pick, and
-  // what is typed still steers the running turn, not the thread on screen
+  // switching threads mid-turn: a slow reopen never paints over a newer pick
+  // (where typed messages go is covered in test_nav.mjs)
   assert.match(html, /if\(gen!==threadGen\)return;/);
-  assert.match(html, /const tid=runTid&&runTid!=='__pending'\?runTid:'';/);
-  assert.ok(!/const tid=activeTid/.test(html));
+  assert.match(html, /const tid=steerTarget\(runTid,activeTid\);/);
   assert.match(html, /ev\.type==='round'\)\{mark=/, 'the UI marks where each provider round began');
   assert.match(html, /ev\.type==='round_reset'&&mark/, 'and drops a failed round\'s partial output on replay');
   assert.match(caseToolsSrc, /emit\(\{ type: 'round_reset' \}\);\n      result = await withRateRetry\(\(\) => round\(rest\)/,

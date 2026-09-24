@@ -1451,19 +1451,26 @@ $('go').addEventListener('submit',e=>{
   q.value='';q.style.height='auto';
   pending.length=0;paintAline();
   if(chatCtl){
-    if(files.length){promptQ.push({text:t,files});paintQ();return;}
+    if(files.length){promptQ.push({text:t,files,tid:activeTid});paintQ();return;}
     steerPrompt(t);return;
   }
   sendPrompt(t,files);
 });
+/* A message typed mid-turn steers the running turn only while that turn is on
+   screen. Typed into another thread or a new task, it waits in the queue for
+   that thread; queue items without one belong to the turn that ran. */
+function steerTarget(run,active){return run&&run!=='__pending'&&run===active?run:'';}
+function queuedThread(item,ran){
+  return item&&typeof item==='object'&&typeof item.tid==='string'&&item.tid!=='__pending'?item.tid:ran;
+}
 /* Mid-turn message: try to inject into the running turn; fall back to the
    local queue if the turn just ended (409) or the server is unreachable. */
 async function steerPrompt(t){
-  const tid=runTid&&runTid!=='__pending'?runTid:'';
-  if(!tid){promptQ.push(t);paintQ();return;}
+  const tid=steerTarget(runTid,activeTid);
+  if(!tid){promptQ.push({text:t,files:[],tid:activeTid});paintQ();return;}
   try{
     const r=await fetch('/api/chat/steer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread_id:tid,input:t})});
-    if(!r.ok){promptQ.push(t);paintQ();return;}
+    if(!r.ok){promptQ.push({text:t,files:[],tid});paintQ();return;}
     if(activeTid!==tid)return;   // on screen is another thread; reopening this one shows it
     const art=document.createElement('article');
     art.className='turn you';
@@ -1471,7 +1478,7 @@ async function steerPrompt(t){
     art.querySelector('p').textContent=t;
     inner.appendChild(art);
     stick(true);
-  }catch{promptQ.push(t);paintQ();}
+  }catch{promptQ.push({text:t,files:[],tid});paintQ();}
 }
 async function sendPrompt(t,files){
   if(t&&typeof t==='object'&&!Array.isArray(t)){files=t.files||[];t=t.text||'';}
@@ -1635,12 +1642,13 @@ async function sendPrompt(t,files){
     const ran=runTid!=='__pending'?runTid:'';
     runTid='';
     refresh(); // state may have changed (wake on first tool); threads re-sync too
-    // Queued prompts were typed into the turn that just ended: they continue its
-    // thread, even if another one is on screen now.
+    // A queued prompt goes to the thread it was typed into, whatever is on screen now.
     if(promptQ.length){
       const n=promptQ.shift();paintQ();
-      if(ran&&ran!==activeTid)openThread(ran).then(()=>{if(chatCtl){promptQ.unshift(n);paintQ();}else sendPrompt(n);});
-      else sendPrompt(n);
+      const to=queuedThread(n,ran);
+      if(to===activeTid)sendPrompt(n);
+      else if(!to){newTask();sendPrompt(n);}
+      else openThread(to).then(()=>{if(chatCtl){promptQ.unshift(n);paintQ();}else sendPrompt(n);});
     }
   }
 }
