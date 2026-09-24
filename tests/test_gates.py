@@ -224,6 +224,15 @@ def test_live_socket_relays_for_allowed_browsers_and_bearers():
                                              headers=headers) as ws:
                 assert ws.receive_bytes() == b"RFB 003.008\n"
 
+    # a human on the live view is activity: the session keeper reads last_active_at
+    with mock.patch.dict(os.environ, {"CASE_TOKEN": "", "CASE_DOCKER_NETWORK": ""}), \
+         mock.patch.object(cased.lifecycle, "ensure_running", return_value=row), \
+         mock.patch.object(cased, "ws_connect", side_effect=connect), \
+         mock.patch.object(cased.store, "touch") as touch:
+        with _client().websocket_connect("ws://127.0.0.1/v1/computers/c_x/live/websockify") as ws:
+            ws.receive_bytes()
+    touch.assert_called_with("c_x")
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

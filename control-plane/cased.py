@@ -855,6 +855,7 @@ def desk_check_ep(request: Request):
     if VNC_PORT and comp["vnc_port"] != VNC_PORT:
         return HTMLResponse(links.NOTREADY_HTML.replace("{why}", links.STALE_PORT),
                             status_code=409)
+    store.touch(comp["id"])                   # a human on the desk is using the box
     if not set_tok:
         return Response(status_code=200)      # cookie already good, let the request through
     # First hit, token in the URL. forward-auth proxies only forward a NON-2xx auth
@@ -870,6 +871,9 @@ def desk_check_ep(request: Request):
 
 
 # ---------- live view (noVNC, relayed) ----------
+
+LIVE_TOUCH_S = 60   # well inside the session keeper's 15-minute busy window
+
 
 def live_upstream(row):
     """(base_url, headers) for a computer's noVNC: same dial deskclient uses for deskd."""
@@ -909,6 +913,14 @@ async def live_ws(ws: WebSocket, cid: str):
     async with ws_connect("ws" + base[4:] + "/websockify", additional_headers=headers,
                           subprotocols=subs or None, max_size=None) as up:
         await ws.accept(subprotocol=up.subprotocol)
+        # a human watching the live view is using the box; the session keeper must
+        # not navigate over them
+        await asyncio.to_thread(store.touch, cid)
+
+        async def keep_active():
+            while True:
+                await asyncio.sleep(LIVE_TOUCH_S)
+                await asyncio.to_thread(store.touch, cid)
 
         async def to_desk():
             try:
@@ -921,11 +933,13 @@ async def live_ws(ws: WebSocket, cid: str):
                 await up.close()
 
         pump = asyncio.create_task(to_desk())
+        active = asyncio.create_task(keep_active())
         try:
             async for msg in up:
                 await ws.send_bytes(msg if isinstance(msg, bytes) else msg.encode())
         finally:
             pump.cancel()
+            active.cancel()
             try:
                 await ws.close()
             except RuntimeError:
