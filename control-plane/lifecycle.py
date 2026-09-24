@@ -280,6 +280,12 @@ def do_wake(cid):
         log.info("wake %s: container %.2fs, deskd healthy %.2fs",
                  cid, t_container, time.monotonic() - t0)
     except Exception:
+        # a desk that never got healthy is still a running container; don't leave it
+        # up under a row that says asleep
+        try:
+            dockerd.stop_container(cid)
+        except Exception as e:
+            log.warning("wake %s: could not stop the container after a failed wake (%s)", cid, e)
         _try_set(cid, "asleep")   # tolerate a concurrent delete here too
         raise
     if not _try_set(cid, "running"):

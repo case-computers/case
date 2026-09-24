@@ -270,6 +270,25 @@ def test_sleep_from_another_thread_waits_for_the_wake():
         store.delete_computer(cid)
 
 
+def test_failed_wake_stops_the_container_it_started():
+    # deskd never got healthy: the row goes back to asleep, and so must the
+    # container, or the next reconcile flips the row to running behind everyone.
+    cid = "c_unittest_wake_fail"
+    _asleep_row(cid)
+
+    def unhealthy(c, st):
+        raise ApiError(504, "daemon_timeout", "deskd not healthy after 30s")
+
+    try:
+        st = _wake_harness(cid, unhealthy)
+        assert st["error"] == "daemon_timeout", st
+        assert st["stopped"] == [cid] and st["container"] == "exited", st
+        assert st["destroyed"] == [], st
+        assert store.get_computer(cid)["state"] == "asleep"
+    finally:
+        store.delete_computer(cid)
+
+
 def test_delete_landing_mid_wake_still_tears_down():
     import lifecycle
     cid = "c_unittest_wake_delete"
