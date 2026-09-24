@@ -727,4 +727,35 @@ async function withAnthropic(rounds, fn) {
   }
 }
 
+// A png inside a tool's JSON (handoff_get, click with screenshot:true) reaches the
+// model as an image, not as clipped base64 text.
+{
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const cased = await fakeCased({
+    '/v1/handoffs/h_1': { id: 'h_1', status: 'pending', screenshot_png_b64: png },
+    '/v1/computers/c_1': { name: 'desk', credentials: [] },
+  });
+  const thread = { id: 't_hshot', title: 't', agent: '', items: [], created: 0, updated: 0 };
+  try {
+    await withAnthropic([
+      { blocks: [{ tool: 'handoff_get', id: 'tu_1', input: { handoff_id: 'h_1' } }] },
+      { blocks: [{ text: 'seen' }] },
+    ], async (sent) => {
+      await runTurn({
+        thread, inputText: 'check', auth: { provider: 'anthropic', key: 'sk-ant' }, computerId: 'c_1',
+        model: 'claude-sonnet-4-6', emit: () => {},
+      });
+      const res = sent[1].messages.at(-1).content[0];
+      assert.equal(res.type, 'tool_result');
+      assert.ok(!res.content[0].text.includes(png), 'no base64 in the text');
+      assert.match(res.content[0].text, /"status":"pending"/);
+      assert.deepEqual(res.content[1], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } });
+    });
+    assert.ok(thread.items.some((it) => it.shot), 'history keeps the png as a screenshot item');
+    assert.ok(!JSON.stringify(thread.items).includes(png));
+  } finally {
+    cased.close();
+  }
+}
+
 console.log('web-ui serve: all checks pass');

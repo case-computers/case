@@ -541,6 +541,10 @@ async function runExtra(plan) {
     }
     const r = await api(plan.method, plan.rel, { body: plan.body, timeoutMs: plan.timeoutMs || 60000 });
     if (r.status >= 400) return { ok: false, status: r.status, error: r.json?.error || r.raw, act: plan.act };
+    // handoff_get and click(screenshot:true) carry a png inside the JSON. Left there it
+    // is clipped to base64 noise; popped, it takes the screenshot's image path.
+    const { screenshot_png_b64: png, ...rest } = r.json && typeof r.json === 'object' ? r.json : {};
+    if (png) return { ok: rest.ok !== false, act: plan.act, result: rest, image_b64: png };
     return { ok: r.json?.ok !== false, act: plan.act, result: r.json };
   } catch (err) {
     return { ok: false, error: err.message || 'cased unreachable', act: plan.act };
