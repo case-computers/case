@@ -618,7 +618,7 @@ class Store:
         may become a name, prompt, domain or username."""
         n = lambda sql, args=(): self.one(sql, args)["c"]
         return {
-            "computers": n("SELECT COUNT(*) c FROM computers"),
+            "computers": n("SELECT COUNT(*) c FROM computers WHERE state != 'deleted'"),
             "credentials": n("SELECT COUNT(*) c FROM credentials"),
             "schedules": n("SELECT COUNT(*) c FROM schedules"),
             "schedules_enabled": n("SELECT COUNT(*) c FROM schedules WHERE enabled=1"),

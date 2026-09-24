@@ -105,6 +105,19 @@ def test_counts_are_counts():
     assert all(type(v) is int for v in c.values()), c
 
 
+def test_deleted_computers_are_not_counted():
+    # destroy() keeps the row as a 'deleted' tombstone
+    for cid, state in (("c_tele_live", "asleep"), ("c_tele_gone", "deleted")):
+        store.delete_computer(cid)
+        store.insert_computer(cid, cid, "img", 1, 512, "vol", "tok")
+        store.set_state(cid, state)
+    try:
+        assert store.telemetry_counts("2000-01-01T00:00:00Z")["computers"] == 1
+    finally:
+        store.delete_computer("c_tele_live")
+        store.delete_computer("c_tele_gone")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
