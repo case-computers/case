@@ -149,6 +149,46 @@ def test_create_clears_a_name_stuck_in_removal_and_retries_once():
         dockerd._dc = old
 
 
+def test_destroy_names_a_volume_it_could_not_remove():
+    # NotFound is the normal "already gone"; a daemon that is down is not, and the
+    # volume it leaves behind holds a deleted computer's home.
+    import docker as dockerpy
+    from unittest import mock
+
+    class Gone:
+        def get(self, name):
+            raise dockerpy.errors.NotFound("gone")
+
+    class Down:
+        def get(self, name):
+            raise dockerpy.errors.DockerException("daemon unreachable")
+
+    old = dockerd._dc
+    try:
+        for vols, warned in ((Gone(), False), (Down(), True)):
+            dockerd._dc = type("DC", (), {"containers": Gone(), "volumes": vols,
+                                          "ping": lambda self: True})()
+            with mock.patch.object(dockerd.log, "warning") as warn:
+                dockerd.destroy_infra("c_ab", "case-c_ab")
+            assert warn.called is warned, (vols, warn.call_args_list)
+            if warned:
+                assert "case-c_ab" in warn.call_args.args[0] % warn.call_args.args[1:]
+    finally:
+        dockerd._dc = old
+
+
+def test_new_volumes_carry_the_cased_label():
+    from unittest import mock
+    vols = mock.Mock()
+    old = dockerd._dc
+    dockerd._dc = type("DC", (), {"volumes": vols, "ping": lambda self: True})()
+    try:
+        dockerd.create_volume("case-c_ab")
+    finally:
+        dockerd._dc = old
+    vols.create.assert_called_once_with(name="case-c_ab", labels={"managed-by": "cased"})
+
+
 if __name__ == "__main__":
     test_host_mode_dials_loopback_and_publishes_ports()
     test_container_limits_cover_swap_and_pids()
@@ -157,4 +197,6 @@ if __name__ == "__main__":
     test_deskclient_url_follows_the_network()
     test_vnc_url_hidden_when_computers_are_on_the_compose_network()
     test_create_clears_a_name_stuck_in_removal_and_retries_once()
+    test_destroy_names_a_volume_it_could_not_remove()
+    test_new_volumes_carry_the_cased_label()
     print("test_dockerd: ok")

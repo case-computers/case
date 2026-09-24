@@ -10,7 +10,7 @@ import time
 
 import docker
 
-from config import IMAGE, VNC_PORT
+from config import IMAGE, VNC_PORT, log
 from errors import ApiError
 
 NotFound = docker.errors.NotFound   # lifecycle catches this without importing docker-py
@@ -150,15 +150,21 @@ def stop_container(cid, timeout=10):
 
 
 def destroy_infra(cid, volume):
+    """Best effort, never raises. Already gone is fine; anything else leaves a
+    container or a volume behind, so say which."""
     try:
         dc().containers.get(container_name(cid)).remove(force=True)
-    except Exception:
+    except docker.errors.NotFound:
         pass
+    except Exception as e:
+        log.warning("destroy %s: container not removed (%s)", cid, e)
     try:
         dc().volumes.get(volume).remove()
-    except Exception:
+    except docker.errors.NotFound:
         pass
+    except Exception as e:
+        log.warning("destroy %s: volume %s not removed (%s)", cid, volume, e)
 
 
 def create_volume(volume):
-    dc().volumes.create(name=volume)
+    dc().volumes.create(name=volume, labels={"managed-by": "cased"})
