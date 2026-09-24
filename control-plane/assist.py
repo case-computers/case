@@ -26,10 +26,6 @@ def _hash(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _attempt_id_of(handoff):
-    return row_get(handoff, "attempt_id")
-
-
 def mint_assist_token(handoff_id):
     """Mint an exchange token for a handoff. Returns (raw_token, expires_at).
     Only the SHA-256 hash is stored, plaintext rides the email link once."""
@@ -51,9 +47,10 @@ def exchange(raw_token):
         raise ApiError(410, "gone", "assist link expired")
     handoff = store.get_handoff(row["handoff_id"])
     if not handoff or handoff["status"] not in HANDOFF_LIVE:
+        import handoffs
         # Attempt-scoped: allow exchange while the attempt still needs a human,
         # even if this mint's handoff row already moved on (rare race).
-        aid = _attempt_id_of(handoff) if handoff else None
+        aid = handoffs._attempt_id_of(handoff)
         attempt = store.get_auth_attempt(aid) if aid else None
         if not attempt:
             raise ApiError(410, "gone", "handoff is no longer open")
@@ -84,10 +81,11 @@ def session_view(raw_session):
     row = _session_row(raw_session)
     if not row:
         return None
+    import handoffs
     bound = store.get_handoff(row["handoff_id"])
     if not bound:
         return None
-    aid = _attempt_id_of(bound)
+    aid = handoffs._attempt_id_of(bound)
     attempt = store.get_auth_attempt(aid) if aid else None
 
     if bound["status"] in HANDOFF_LIVE and not attempt:
@@ -161,21 +159,16 @@ def resolve_view(raw_token, cookie_header=""):
     return build_view(bound, current, attempt), set_sess
 
 
-def continuation_of(handoff):
-    import handoffs
-    cont = row_get(handoff, "continuation")
-    return cont or handoffs.continuation_for(handoff["kind"])
-
-
 def allowed_actions_for(handoff, attempt):
     """Typed Assist actions for the current phase, never implies secrets."""
+    import handoffs
     if attempt and attempt["status"] in AUTH_ATTEMPT_TERMINAL:
         return []
     if attempt and attempt["status"] == "proving":
         return []
     if not handoff or handoff["status"] not in HANDOFF_LIVE:
         return []
-    cont = continuation_of(handoff)
+    cont = handoffs._continuation_of(handoff)
     if cont == "submit_value":
         return ["submit_value"]
     if cont == "verify_page":
@@ -187,6 +180,7 @@ def allowed_actions_for(handoff, attempt):
 
 def build_view(bound, current, attempt):
     """Public Assist view, no secrets, answers, or URLs."""
+    import handoffs
     handoff = current
     if attempt and attempt["status"] == "proving":
         return {
@@ -226,7 +220,7 @@ def build_view(bound, current, attempt):
     # Map legacy answered → completed for Assist surfaces.
     if status == "answered":
         status = "completed"
-    cont = continuation_of(handoff) if handoff and status in HANDOFF_LIVE else None
+    cont = handoffs._continuation_of(handoff) if handoff and status in HANDOFF_LIVE else None
     kind = handoff["kind"] if handoff else None
     instructions = (handoff["prompt"] or "") if handoff else ""
     revision = int(row_get(handoff, "revision", 0) or 0) if handoff else 0
@@ -268,7 +262,7 @@ def submit_with_session(raw_session, value, expected_revision=None):
     handoff = valid_session(raw_session)
     if not handoff:
         raise ApiError(410, "gone", "assist session invalid or expired")
-    if continuation_of(handoff) != "submit_value":
+    if handoffs._continuation_of(handoff) != "submit_value":
         raise ApiError(409, "bad_status", "current challenge does not accept a code")
     if expected_revision is not None and int(row_get(handoff, "revision", 0) or 0) != int(
             expected_revision):
@@ -282,7 +276,7 @@ def done_with_session(raw_session, expected_revision=None):
     handoff = valid_session(raw_session)
     if not handoff:
         raise ApiError(410, "gone", "assist session invalid or expired")
-    if continuation_of(handoff) != "verify_page":
+    if handoffs._continuation_of(handoff) != "verify_page":
         raise ApiError(409, "bad_status", "current challenge is not a page verify")
     if expected_revision is not None and int(row_get(handoff, "revision", 0) or 0) != int(
             expected_revision):
