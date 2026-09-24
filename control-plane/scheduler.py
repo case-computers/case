@@ -203,14 +203,26 @@ def run_schedule(sid):
             return
         # sqlite3.Row has no dict.get — index like every other column.
         tz = s["tz"] if "tz" in s.keys() else None
-        # Reschedule FIRST so a hung/crashed run never wedges the slot.
-        store.set_schedule_next(sid, compute_next(s["kind"], s["spec"], s["jitter_s"], tz))
+        # Reschedule FIRST so a hung/crashed run never wedges the slot. A row that no
+        # longer computes (a zone tzdata no longer has, a hand edit) fails this run and
+        # comes back in a day, instead of raising out of every sweep unrecorded.
+        try:
+            spec = s["spec"]
+            if s["kind"] == "interval":
+                spec = max(60, int(spec))       # rows stored before the 60s floor
+            nxt, bad = compute_next(s["kind"], spec, s["jitter_s"], tz), None
+        except (ApiError, TypeError, ValueError) as e:
+            nxt, bad = (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"), e
+        store.set_schedule_next(sid, nxt)
         cid, rid, started, t0 = s["computer_id"], new_id("run"), now(), time.monotonic()
         code, summary, status, artifact = -1, "", "fail", None
         # Only the run that woke an asleep box may put it back, never borrow a live session
         # (and never sleep under an active AuthAttempt; do_sleep also 409s as a belt).
         woke_for_run = False
         try:
+            if bad:
+                raise bad
             was_asleep = get_computer(cid)["state"] == "asleep"
             do_wake(cid)
             woke_for_run = was_asleep

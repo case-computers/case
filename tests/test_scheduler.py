@@ -421,6 +421,51 @@ def test_ram_tight_box_is_a_skip_too():
     assert "ApiError" not in rec["summary"], rec
 
 
+def _run_real_row(sid):
+    """run_schedule against the real store with the computer side faked out."""
+    import unittest.mock as mock
+    import scheduler
+    with mock.patch.object(scheduler, "get_computer", lambda cid: {"id": cid, "state": "running"}), \
+         mock.patch.object(scheduler, "do_wake") as wake, \
+         mock.patch.object(scheduler, "do_sleep"), \
+         mock.patch.object(scheduler, "run_brain", lambda cid, p, name="": (0, "done")), \
+         mock.patch.object(scheduler, "capture_run_artifacts", lambda *a, **k: None), \
+         mock.patch.object(scheduler.notifier, "push"), \
+         mock.patch.object(scheduler, "emit"):
+        scheduler.run_schedule(sid)
+    return wake
+
+
+def test_legacy_sub_minute_interval_runs_at_the_floor():
+    # Rows stored before the 60s floor used to raise out of compute_next on every
+    # sweep, before the reschedule, so they re-fired forever and never recorded a run.
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    store.insert_schedule("sch_legacy", "c_1", "legacy", "p", "interval", "30", 0,
+                          "2020-01-01T00:00:00Z")
+    _run_real_row("sch_legacy")
+    nxt = _dt(store.get_schedule("sch_legacy")["next_run_at"])
+    assert 55 <= (nxt - datetime.now(timezone.utc)).total_seconds() <= 65, nxt
+    assert [r["status"] for r in store.list_runs("sch_legacy")] == ["ok"]
+
+
+def test_unresolvable_tz_fails_the_run_and_backs_off_a_day():
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    store.insert_schedule("sch_badtz", "c_1", "tz", "p", "daily", "07:00", 0,
+                          "2020-01-01T00:00:00Z", tz="Mars/Olympus")
+    wake = _run_real_row("sch_badtz")
+    wake.assert_not_called()
+    s = store.get_schedule("sch_badtz")
+    assert s["enabled"] == 1
+    left = (_dt(s["next_run_at"]) - datetime.now(timezone.utc)).total_seconds()
+    assert 86000 <= left <= 86400, left                # not due again next sweep
+    runs = store.list_runs("sch_badtz")
+    assert [r["status"] for r in runs] == ["fail"], runs
+    assert "Mars/Olympus" in runs[0]["summary"], runs[0]["summary"]
+    assert s["last_status"] == "fail"
+
+
 def test_run_brain_url_finished():
     import unittest.mock as mock
     import scheduler
