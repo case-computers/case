@@ -200,7 +200,7 @@ async def audit_mw(request: Request, call_next):
 
 def _audit_append(line):
     os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
-    p = os.path.join(AUDIT_DIR, time.strftime("%Y-%m-%d") + ".jsonl")
+    p = os.path.join(AUDIT_DIR, line["ts"][:10] + ".jsonl")   # UTC, like the prune
     with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as f:
         f.write(json.dumps(line) + "\n")
 
