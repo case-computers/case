@@ -73,7 +73,8 @@ RUN printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
 # /usr/share/case by start.sh: only when missing, except once after each LOOK bump.
 COPY assets/wallpaper.png /usr/share/backgrounds/case.png
 COPY assets/cursor-left_ptr /usr/share/icons/case/cursors/left_ptr
-RUN printf '[Icon Theme]\nName=case\n' > /usr/share/icons/case/index.theme
+# Inherits: every cursor but left_ptr comes from Adwaita, which GTK 3 depends on
+RUN printf '[Icon Theme]\nName=case\nInherits=Adwaita\n' > /usr/share/icons/case/index.theme
 COPY assets/gtk-settings.ini assets/xfce4-panel.xml assets/xfwm4.xml assets/xfce4-desktop.xml /usr/share/case/
 
 COPY deskd.py /opt/deskd/deskd.py
