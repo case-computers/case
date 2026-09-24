@@ -264,13 +264,11 @@ def _complete(hid, *, answer=None, value_present=False):
 
 def _claim_validating(row, answer):
     """CAS pending → validating (claim_challenge) before desk work."""
-    rev = int(row["revision"] or 0)
     import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
-    auth_attempts.claim_challenge(row["id"], rev)
     # Never park an OTP in validating.answer, soft-fail / restart paths read this row.
-    stored = _durable_answer(row["kind"], _continuation_of(row), answer)
-    store.transition_handoff(row["id"], "validating", answer=stored)
-    return store.get_handoff(row["id"])
+    auth_attempts.claim_challenge(
+        row["id"], int(row["revision"] or 0),
+        answer=_durable_answer(row["kind"], _continuation_of(row), answer))
 
 
 def _continue_attempt(attempt_id):

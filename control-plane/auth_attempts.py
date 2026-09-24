@@ -398,13 +398,13 @@ async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,
         unsubscribe(q)
 
 
-def claim_challenge(handoff_id, expected_revision):
-    """CAS handoff pending → validating (Assist / answer path scaffolding)."""
+def claim_challenge(handoff_id, expected_revision, answer=None):
+    """CAS handoff pending → validating, writing `answer` (never an OTP) in the same step."""
     row = store.get_handoff(handoff_id)
     if not row:
         raise ApiError(404, "not_found", f"handoff {handoff_id} not found")
     n = store.cas_handoff_status(
-        handoff_id, "pending", "validating", int(expected_revision))
+        handoff_id, "pending", "validating", int(expected_revision), answer=answer)
     if n != 1:
         raise ApiError(409, "revision_conflict",
                        "handoff revision or status changed")
