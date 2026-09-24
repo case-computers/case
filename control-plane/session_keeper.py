@@ -10,7 +10,7 @@ Skips busy computers: active AuthAttempt, in-flight schedule brain, or a recentl
 touched live session (last_active_at within CASE_SESSION_KEEPER_BUSY_S, default 15m).
 
 Heuristic-only "looks fine" is never recorded as durable `ok`.
-Unhealthy → record `failed`; optionally open an AuthAttempt for human recovery later.
+Unhealthy → record `failed`, and notify the human when it flips to failed.
 """
 import os
 import threading
@@ -24,6 +24,7 @@ from auth_attempts import (
 )
 from config import log
 from lifecycle import do_sleep, do_wake, get_computer
+from notify import notifier
 from store import store
 from util import now, row_get
 
@@ -56,20 +57,12 @@ def _decide_status_for(computer, proof_spec, observation):
     return None
 
 
-def _maybe_start_recovery(computer_id, name, probe_url, proof_spec):
-    """Optional stub: open an AuthAttempt so a human can recover later. Never raises."""
-    if not probe_url:
-        log.info("session_keeper: %s/%s unhealthy; no probe_url to start recovery",
-                 computer_id, name)
-        return
-    try:
-        import auth_attempts
-        auth_attempts.start_attempt(
-            computer_id, name, probe_url, proof_spec=proof_spec,
-            idempotency_key=f"keeper:{computer_id}:{name}")
-        log.info("session_keeper: started recovery attempt for %s/%s", computer_id, name)
-    except Exception as e:
-        log.info("session_keeper: recovery stub for %s/%s: %s", computer_id, name, e)
+def _notify_unhealthy(computer_id, name):
+    """Tell the human. The keeper does not open an AuthAttempt for this: nothing would
+    advance it, and an open one pins the box awake and 409s the agent's own login."""
+    log.info("session_keeper: %s/%s failed its session check", computer_id, name)
+    notifier.push(f"[{store.computer_name(computer_id)}] {name}: session check failed, "
+                  "it may need a fresh login")
 
 
 def _observe(computer):
@@ -161,6 +154,7 @@ def _probe_one_awake(computer_id, name):
 
     probe_url = row_get(crow, "probe_url")
     proof_spec = parse_proof_spec(row_get(crow, "proof_spec"))
+    was_failed = row_get(crow, "last_status") == "failed"   # notified already
     computer = get_computer(computer_id)
     observation = None
 
@@ -172,7 +166,8 @@ def _probe_one_awake(computer_id, name):
             log.exception("session_keeper: navigate probe_url failed for %s/%s",
                           computer_id, name)
             store.record_credential_result(computer_id, name, "failed")
-            _maybe_start_recovery(computer_id, name, probe_url, proof_spec)
+            if not was_failed:
+                _notify_unhealthy(computer_id, name)
             return "failed"
         observation = _observe(computer)
 
@@ -183,8 +178,8 @@ def _probe_one_awake(computer_id, name):
     status = _decide_status_for(computer, proof_spec, observation)
     if status:
         store.record_credential_result(computer_id, name, status)
-        if status == "failed":
-            _maybe_start_recovery(computer_id, name, probe_url, proof_spec)
+        if status == "failed" and not was_failed:
+            _notify_unhealthy(computer_id, name)
     return status
 
 

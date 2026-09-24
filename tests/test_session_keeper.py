@@ -117,12 +117,33 @@ def test_probe_records_failed_when_logged_out():
 
     with mock.patch("deskclient.navigate", return_value={"ok": True}), \
          mock.patch.object(session_keeper, "_observe", return_value=obs), \
-         mock.patch.object(session_keeper, "_maybe_start_recovery") as recover:
+         mock.patch.object(session_keeper, "_notify_unhealthy") as recover:
         status = session_keeper._probe_one_awake(cid, "github")
 
     assert status == "failed"
     assert store.get_credential(cid, "github")["last_status"] == "failed"
     recover.assert_called_once()
+
+
+def test_failed_probe_notifies_once_and_opens_no_auth_attempt():
+    # The old recovery "stub" opened an AuthAttempt in created that nothing ever
+    # advanced: it pinned the box awake and 409'd the agent's login, and its fixed
+    # idempotency key meant it only ever happened once.
+    _cleanup()
+    _reset_keeper_clock()
+    cid = _computer(state="running")
+    _cred(cid, probe_url="https://example.com/login", proof_spec=None, last_status="ok")
+    obs = {"href": "https://example.com/login",
+           "visible_fields": {"pass": True}, "challenge_signals": []}
+    pushed = []
+    with mock.patch("deskclient.navigate", return_value={"ok": True}), \
+         mock.patch.object(session_keeper, "_observe", return_value=obs), \
+         mock.patch.object(session_keeper.notifier, "push", side_effect=pushed.append):
+        assert session_keeper._probe_one_awake(cid, "github") == "failed"
+        assert session_keeper._probe_one_awake(cid, "github") == "failed"
+    assert not store.active_attempt_exists(cid)
+    assert len(pushed) == 1 and "github" in pushed[0], pushed
+    assert store.get_credential(cid, "github")["last_status"] == "failed"
 
 
 def test_tick_sleeps_only_if_it_woke():
