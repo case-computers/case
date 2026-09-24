@@ -77,20 +77,23 @@ def test_call_falls_back_to_the_status_unchained():
     assert chained is None, chained          # a chained decode error buries the status
 
 
+LIST_CALL = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "computer_list", "arguments": {}}}
+ACCEPT = {"Accept": "application/json, text/event-stream"}
+
+
 def _mcp_statuses(requests_, **env):
-    """POST a tools/call to a fresh HTTP app per (Host, Origin); returns the statuses."""
+    """POST a tools/call per (Host, Origin) to one HTTP app; returns the statuses."""
     from starlette.testclient import TestClient
     m = _load(CASE_MCP_HTTP="1", CASE_MCP_BIND="0.0.0.0", **env)
     m.requests = types.SimpleNamespace(request=lambda *a, **kw: _Resp(200, {"computers": []}))
-    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "computer_list", "arguments": {}}}
     out = []
     with TestClient(m.mcp.streamable_http_app()) as c:
         for host, origin in requests_:
-            h = {"Host": host, "Accept": "application/json, text/event-stream"}
+            h = {"Host": host, **ACCEPT}
             if origin:
                 h["Origin"] = origin
-            out.append(c.post("/mcp", headers=h, json=body).status_code)
+            out.append(c.post("/mcp", headers=h, json=LIST_CALL).status_code)
     return out
 
 
@@ -107,6 +110,33 @@ def test_http_refuses_a_rebound_host():
         ("box.example.com:8788", None),
     ], CASE_ALLOWED_HOSTS="case.example.com", CASE_PUBLIC_HOST="box.example.com")
     assert codes == [421, 403, 200, 200, 200, 200, 200], codes
+
+
+def test_slow_tool_leaves_health_answering():
+    # FastMCP runs sync tools on the event loop: a 280s computer_login froze /health
+    # and every other client until it returned
+    import threading
+    import time
+    from starlette.testclient import TestClient
+    m = _load(CASE_MCP_HTTP="1")
+    started, release = threading.Event(), threading.Event()
+
+    def slow(*a, **kw):
+        started.set()
+        release.wait(10)
+        return _Resp(200, {"computers": []})
+    m.requests = types.SimpleNamespace(request=slow)
+    with TestClient(m.mcp.streamable_http_app(), base_url="http://127.0.0.1:8788") as c:
+        call = threading.Thread(target=c.post, args=("/mcp",),
+                                kwargs={"headers": ACCEPT, "json": LIST_CALL})
+        call.start()
+        assert started.wait(5)
+        t0 = time.time()
+        assert c.get("/health").text == "ok"
+        took = time.time() - t0
+        release.set()
+        call.join()
+    assert took < 2, took
 
 
 def test_optional_params_accept_explicit_null():
