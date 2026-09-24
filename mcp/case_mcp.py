@@ -18,6 +18,7 @@ import time
 
 import requests
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.transport_security import TransportSecuritySettings
 
 BASE = os.environ.get("CASE_URL", "http://127.0.0.1:8787/v1")
 HTTP = os.environ.get("CASE_MCP_HTTP") == "1"
@@ -25,9 +26,30 @@ BIND = (os.environ.get("CASE_MCP_BIND") or "127.0.0.1").strip() or "127.0.0.1"
 # In HTTP mode this is one id for the whole box (stateless: no per-client session) —
 # a box serves one person, so the audit log stays as useful as it is over stdio.
 SESSION = "mcp_" + secrets.token_hex(4)   # one per MCP process; keys cased's audit log
+
+
+def allowed_hosts():
+    """Names a browser may address us as; anything else is a rebinding page."""
+    hosts = ["127.0.0.1", "localhost", "[::1]", "mcp"]
+    hosts += [h.strip().lower()
+              for h in (os.environ.get("CASE_ALLOWED_HOSTS") or "").split(",") if h.strip()]
+    pub = (os.environ.get("CASE_PUBLIC_HOST") or "").strip().lower()
+    if pub:
+        hosts.append(pub)
+    return hosts
+
+
+# The SDK only checks Host/Origin by itself when bound to loopback, and compose binds
+# 0.0.0.0 — so name the same hosts cased and Drive accept, on any port or scheme.
+_HOSTS = allowed_hosts()
+SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[h + p for h in _HOSTS for p in ("", ":*")],
+    allowed_origins=[f"{s}://{h}{p}" for s in ("http", "https")
+                     for h in _HOSTS for p in ("", ":*")])
 # stateless_http: no server-side session state, so a proxy or service restart never
 # strands a client mid-session. Harmless over stdio.
-mcp = FastMCP("case", stateless_http=True,
+mcp = FastMCP("case", stateless_http=True, transport_security=SECURITY,
               host=BIND, port=int(os.environ.get("CASE_MCP_PORT", "8788")))
 
 if HTTP:

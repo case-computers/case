@@ -87,6 +87,8 @@ services:
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_MCP_BIND: "0.0.0.0"
       CASE_MCP_PORT: "8788"
+      CASE_PUBLIC_HOST: ${CASE_PUBLIC_HOST:-}
+      CASE_ALLOWED_HOSTS: ${CASE_ALLOWED_HOSTS:-}
       # CASE_MCP_SCHEDULES=1 unlocks the schedule_* tools (see .env.example)
       CASE_MCP_SCHEDULES: ${CASE_MCP_SCHEDULES:-}
     command: ["python", "/app/mcp/case_mcp.py"]

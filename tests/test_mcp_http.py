@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.join(ROOT, "mcp"))
 
 
 def _load(**env):
-    for k in ("CASE_MCP_HTTP", "CASE_MCP_PORT", "CASE_MCP_BIND"):
+    for k in ("CASE_MCP_HTTP", "CASE_MCP_PORT", "CASE_MCP_BIND",
+              "CASE_ALLOWED_HOSTS", "CASE_PUBLIC_HOST"):
         os.environ.pop(k, None)
     os.environ.update(env)
     mod = importlib.import_module("case_mcp")
@@ -74,6 +75,38 @@ def test_call_falls_back_to_the_status_unchained():
     msg, chained = _failed_call(ValueError("not json"), 502)
     assert msg == "cased returned 502", msg
     assert chained is None, chained          # a chained decode error buries the status
+
+
+def _mcp_statuses(requests_, **env):
+    """POST a tools/call to a fresh HTTP app per (Host, Origin); returns the statuses."""
+    from starlette.testclient import TestClient
+    m = _load(CASE_MCP_HTTP="1", CASE_MCP_BIND="0.0.0.0", **env)
+    m.requests = types.SimpleNamespace(request=lambda *a, **kw: _Resp(200, {"computers": []}))
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "computer_list", "arguments": {}}}
+    out = []
+    with TestClient(m.mcp.streamable_http_app()) as c:
+        for host, origin in requests_:
+            h = {"Host": host, "Accept": "application/json, text/event-stream"}
+            if origin:
+                h["Origin"] = origin
+            out.append(c.post("/mcp", headers=h, json=body).status_code)
+    return out
+
+
+def test_http_refuses_a_rebound_host():
+    # compose binds 0.0.0.0, where the SDK checks nothing by itself: a rebinding page
+    # reaches 127.0.0.1:8788 under its own name and must not get computer_exec
+    codes = _mcp_statuses([
+        ("rebind.evil.example:8788", None),
+        ("127.0.0.1:8788", "http://rebind.evil.example:8788"),
+        ("127.0.0.1:8788", None),
+        ("localhost:8788", "http://localhost:8788"),
+        ("mcp:8788", None),
+        ("case.example.com", "https://case.example.com"),
+        ("box.example.com:8788", None),
+    ], CASE_ALLOWED_HOSTS="case.example.com", CASE_PUBLIC_HOST="box.example.com")
+    assert codes == [421, 403, 200, 200, 200, 200, 200], codes
 
 
 def test_no_credential_write_tool():
