@@ -361,7 +361,7 @@ def health(request: Request):
         return {"ok": True}
     n = len(store.list_computers())
     try:
-        dockerd.dc().ping()
+        dockerd.ping()
         docker_ok = True
     except Exception:
         docker_ok = False

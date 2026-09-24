@@ -137,9 +137,7 @@ def test_create_clears_a_name_stuck_in_removal_and_retries_once():
         def remove_container(self, name, force=False):
             calls["removed"] = (name, force)
 
-    # dc() pings the cached client; without ping() it reconnects to real Docker.
-    fake = type("DC", (), {"containers": Containers(), "api": Api(),
-                           "ping": lambda self: True})()
+    fake = type("DC", (), {"containers": Containers(), "api": Api()})()
     old = dockerd._dc
     dockerd._dc = fake
     try:
@@ -166,8 +164,7 @@ def test_destroy_names_a_volume_it_could_not_remove():
     old = dockerd._dc
     try:
         for vols, warned in ((Gone(), False), (Down(), True)):
-            dockerd._dc = type("DC", (), {"containers": Gone(), "volumes": vols,
-                                          "ping": lambda self: True})()
+            dockerd._dc = type("DC", (), {"containers": Gone(), "volumes": vols})()
             with mock.patch.object(dockerd.log, "warning") as warn:
                 dockerd.destroy_infra("c_ab", "case-c_ab")
             assert warn.called is warned, (vols, warn.call_args_list)
@@ -181,12 +178,53 @@ def test_new_volumes_carry_the_cased_label():
     from unittest import mock
     vols = mock.Mock()
     old = dockerd._dc
-    dockerd._dc = type("DC", (), {"volumes": vols, "ping": lambda self: True})()
+    dockerd._dc = type("DC", (), {"volumes": vols})()
     try:
         dockerd.create_volume("case-c_ab")
     finally:
         dockerd._dc = old
     vols.create.assert_called_once_with(name="case-c_ab", labels={"managed-by": "cased"})
+
+
+def test_cached_client_reconnects_only_when_the_daemon_went_away():
+    # No ping round trip before every call; a dead socket is what triggers a new client.
+    import requests
+    from unittest import mock
+
+    class Dead:
+        def get(self, name):
+            raise requests.ConnectionError("socket gone")
+
+    class Live:
+        def get(self, name):
+            return name
+
+    old = dockerd._dc
+    dockerd._dc = type("DC", (), {"containers": Live()})()
+    try:
+        with mock.patch.object(dockerd, "_connect") as connect:
+            assert dockerd.get_container("c_ab") == "case-c_ab"
+            connect.assert_not_called()
+            dockerd._dc = type("DC", (), {"containers": Dead()})()
+            connect.return_value = type("DC", (), {"containers": Live()})()
+            assert dockerd.get_container("c_ab") == "case-c_ab"
+            connect.assert_called_once()
+    finally:
+        dockerd._dc = old
+
+
+def test_managed_containers_is_one_listing_keyed_by_name():
+    from unittest import mock
+    box = mock.Mock(attrs={"Names": ["/case-c_ab"], "State": "running"})
+    listing = mock.Mock(return_value=[box])
+    old = dockerd._dc
+    dockerd._dc = type("DC", (), {"containers": type("C", (), {"list": listing})()})()
+    try:
+        assert dockerd.managed_containers() == {"case-c_ab": box}
+    finally:
+        dockerd._dc = old
+    listing.assert_called_once_with(all=True, sparse=True,
+                                    filters={"label": "managed-by=cased"})
 
 
 if __name__ == "__main__":
@@ -199,4 +237,6 @@ if __name__ == "__main__":
     test_create_clears_a_name_stuck_in_removal_and_retries_once()
     test_destroy_names_a_volume_it_could_not_remove()
     test_new_volumes_carry_the_cased_label()
+    test_cached_client_reconnects_only_when_the_daemon_went_away()
+    test_managed_containers_is_one_listing_keyed_by_name()
     print("test_dockerd: ok")

@@ -9,6 +9,7 @@ import os
 import time
 
 import docker
+import requests
 
 from config import IMAGE, VNC_PORT, log
 from errors import ApiError
@@ -39,13 +40,24 @@ def _connect():
 
 def dc():
     global _dc
-    try:
-        if _dc is None:
-            _dc = _connect()
-        _dc.ping()
-    except Exception:
-        _dc = _connect()  # daemon restarted (host reboot / colima restart)
+    if _dc is None:
+        _dc = _connect()
     return _dc
+
+
+def _docker(fn):
+    """fn(client), once more on a fresh client when the daemon went away under the
+    cached one (host reboot / colima restart can move the socket)."""
+    global _dc
+    try:
+        return fn(dc())
+    except requests.ConnectionError:
+        _dc = None
+        return fn(dc())
+
+
+def ping():
+    _docker(lambda c: c.ping())
 
 
 def docker_network():
@@ -99,7 +111,7 @@ def container_run_kwargs(cid, cpus, ram_mb, volume, token):
 def create_container(cid, cpus, ram_mb, volume, token):
     kw = container_run_kwargs(cid, cpus, ram_mb, volume, token)
     try:
-        return dc().containers.run(IMAGE, **kw)
+        return _docker(lambda c: c.containers.run(IMAGE, **kw))
     except docker.errors.APIError as e:
         if e.status_code != 409:
             raise
@@ -128,7 +140,15 @@ def container_ports(container, deadline=10):
 
 
 def get_container(cid):
-    return dc().containers.get(container_name(cid))
+    return _docker(lambda c: c.containers.get(container_name(cid)))
+
+
+def managed_containers():
+    """{name: container} for every desktop cased made, from one list call. Sparse:
+    the listing carries the status, and container_ports reloads what it needs."""
+    listed = _docker(lambda c: c.containers.list(all=True, sparse=True,
+                                                 filters={"label": "managed-by=cased"}))
+    return {n.lstrip("/"): c for c in listed for n in c.attrs.get("Names") or ()}
 
 
 def container_up(cid):
@@ -153,13 +173,13 @@ def destroy_infra(cid, volume):
     """Best effort, never raises. Already gone is fine; anything else leaves a
     container or a volume behind, so say which."""
     try:
-        dc().containers.get(container_name(cid)).remove(force=True)
+        get_container(cid).remove(force=True)
     except docker.errors.NotFound:
         pass
     except Exception as e:
         log.warning("destroy %s: container not removed (%s)", cid, e)
     try:
-        dc().volumes.get(volume).remove()
+        _docker(lambda c: c.volumes.get(volume)).remove()
     except docker.errors.NotFound:
         pass
     except Exception as e:
@@ -167,4 +187,4 @@ def destroy_infra(cid, volume):
 
 
 def create_volume(volume):
-    dc().volumes.create(name=volume, labels={"managed-by": "cased"})
+    _docker(lambda c: c.volumes.create(name=volume, labels={"managed-by": "cased"}))

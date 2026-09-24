@@ -328,17 +328,18 @@ def reconcile():
     still repaired."""
     with _GUARD:
         rows = [r for r in store.all_non_deleted() if r["id"] not in _IN_FLIGHT]
+    try:
+        containers = dockerd.managed_containers()
+    except Exception as e:
+        log.warning("reconcile skipped (docker unavailable): %s", e)
+        return
     for row in rows:
         cid, current = row["id"], row["state"]
-        try:
-            container = dockerd.get_container(cid)
-        except dockerd.NotFound:
+        container = containers.get(dockerd.container_name(cid))
+        if container is None:
             log.warning("container for %s missing; will recreate from volume on wake", cid)
             _force_state(cid, current, "asleep", expect=current)
             continue
-        except Exception as e:
-            log.warning("reconcile skipped (docker unavailable): %s", e)
-            return
         if container.status == "running":
             try:
                 desk_port, vnc_port = dockerd.container_ports(container)

@@ -265,6 +265,8 @@ def _wake_harness(cid, during_wait):
     with mock.patch.object(dockerd, "start_container",
                            lambda c: st.update(container="running")), \
          mock.patch.object(dockerd, "get_container", lambda c: _Box(st)), \
+         mock.patch.object(dockerd, "managed_containers",
+                           lambda: {dockerd.container_name(cid): _Box(st)}), \
          mock.patch.object(dockerd, "container_ports", lambda c, deadline=10: (1, 2)), \
          mock.patch.object(dockerd, "container_up", lambda c: st["container"] == "running"), \
          mock.patch.object(dockerd, "stop_container", stop), \
@@ -389,7 +391,7 @@ def test_reconcile_still_repairs_a_stale_waking_row():
     _asleep_row(cid)
     store.set_state(cid, "waking")
     try:
-        with mock.patch.object(dockerd, "get_container", side_effect=dockerd.NotFound("x")):
+        with mock.patch.object(dockerd, "managed_containers", return_value={}):
             lifecycle.reconcile()
         assert store.get_computer(cid)["state"] == "asleep"
     finally:
@@ -404,7 +406,7 @@ def test_reconcile_during_provision_does_not_lose_the_create():
 
     def volume(v):
         # the sweeper ticks before the container exists
-        with mock.patch.object(dockerd, "get_container", side_effect=dockerd.NotFound("x")):
+        with mock.patch.object(dockerd, "managed_containers", return_value={}):
             lifecycle.reconcile()
 
     with mock.patch.object(dockerd, "create_volume", volume), \
