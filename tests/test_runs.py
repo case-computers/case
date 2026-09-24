@@ -85,6 +85,24 @@ def test_run_json_without_an_artifact():
     assert cased.run_json(store.get_run("run_b"))["has_screenshot"] is False
 
 
+def test_schedule_runs_route_hides_the_host_path_too():
+    from fastapi.testclient import TestClient
+    from unittest import mock
+    store.q("DELETE FROM runs")
+    store.q("DELETE FROM schedules")
+    store.insert_schedule("sch_r", "c_1", "n", "p", "interval", "3600", 0, None)
+    store.insert_run("run_s", "sch_r", "c_1", "2026-07-27T09:00:00Z",
+                     "2026-07-27T09:05:00Z", 0, "ok", "/home/case/.case/runs/run_s.png", "ok")
+    c = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+    with mock.patch.dict(os.environ, {"CASE_TOKEN": ""}):
+        r = c.get("/v1/schedules/sch_r/runs")
+        assert r.status_code == 200, r.text
+        assert [j["id"] for j in r.json()] == ["run_s"], r.text
+        assert "artifact_path" not in r.json()[0] and r.json()[0]["has_screenshot"] is True
+        assert c.get("/v1/schedules/sch_nope/runs").status_code == 404
+    store.q("DELETE FROM schedules")
+
+
 def test_screenshot_serves_only_from_the_runs_dir():
     from config import RUNS_DIR
     from errors import ApiError

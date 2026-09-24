@@ -317,6 +317,3 @@ def delete_schedule(sid):
     if store.delete_schedule(sid) == 0:
         raise ApiError(404, "not_found", f"no schedule {sid}")
 
-
-def list_runs(sid):
-    return [dict(r) for r in store.list_runs(sid)]

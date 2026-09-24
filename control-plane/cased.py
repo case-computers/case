@@ -1061,7 +1061,10 @@ def run_schedule_now(sid: str):
 
 @app.get("/v1/schedules/{sid}/runs")
 def list_runs(sid: str):
-    return scheduler.list_runs(sid)
+    if not store.get_schedule(sid):
+        raise ApiError(404, "not_found", f"no schedule {sid}")
+    names = store.computer_names()
+    return [run_json(r, names) for r in store.list_runs(sid)]
 
 
 # ---------- runs (scheduled-run activity) ----------
