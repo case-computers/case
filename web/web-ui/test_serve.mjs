@@ -48,6 +48,19 @@ const view = threadTurns([
 assert.deepEqual(view.map((t) => t.who), ['you', 'tool', 'agent']);
 assert.equal(view[1].name, 'computer_snapshot');
 assert.ok(!JSON.stringify(view).includes('SECRET'));   // outputs never reach the reopen view
+assert.equal(view[1].ok, true);
+// a reopened thread shows which tools failed, not "ok" for all of them
+{
+  const t = threadTurns([
+    { type: 'function_call', call_id: 'a', name: 'computer_click_element', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'a', output: '{"ok":false,"status":409,"error":"stale ref","act":"click [3]"}' },
+    { type: 'function_call', call_id: 'b', name: 'computer_login', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'b', output: '{"ok":false,"error":"interrupted"}' },
+    { type: 'function_call', call_id: 'c', name: 'computer_snapshot', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'c', output: clip({ ok: true, act: 'snapshot', result: { elements: ['x'.repeat(9000)] } }) },
+  ]);
+  assert.deepEqual(t.map((x) => x.ok), [false, false, true]);
+}
 assert.deepEqual(threadTurns([{ role: 'user', shot: '/tmp/x.png', content: [{ type: 'input_text', text: '[screenshot]' }] }]), [],
   'screenshots stay model-only on reopen');
 assert.deepEqual(threadTurns([{ role: 'user', content: 'look', attaches: [{ name: 'invoice.pdf' }] }]),

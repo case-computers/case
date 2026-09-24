@@ -917,7 +917,7 @@ async function openThread(tid){
         art.querySelector('p').textContent=turn.text;
       }else if(turn.who==='tool'){
         art.className='turn';
-        art.innerHTML='<div class="tool-block"><details class="tool-row"><summary><span class="tool-name"></span><span class="tool-st">ok</span></summary><pre class="tool-args"></pre></details></div>';
+        art.innerHTML='<div class="tool-block"><details class="tool-row'+(turn.ok===false?' fail':'')+'"><summary><span class="tool-name"></span><span class="tool-st">'+(turn.ok===false?'fail':'ok')+'</span></summary><pre class="tool-args"></pre></details></div>';
         art.querySelector('.tool-name').textContent=turn.name||'tool';
         art.querySelector('.tool-args').textContent=turn.args||'';
       }else{

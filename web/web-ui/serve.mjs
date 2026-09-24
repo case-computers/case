@@ -644,6 +644,9 @@ const threadSummary = (t) => ({ id: t.id, title: t.title, agent: t.agent, update
 // reasoning stay server-side.
 export function threadTurns(items) {
   const turns = [];
+  // A persisted output is the clipped tool result, whose head is always {"ok":…}.
+  const failed = new Set((items || []).filter((it) => it?.type === 'function_call_output'
+    && /^\{"ok":false[,}]/.test(String(it.output || ''))).map((it) => it.call_id));
   for (const it of items || []) {
     if (it.shot) continue; // screenshot attachments are model-only
     if (it.role === 'user') {
@@ -658,7 +661,7 @@ export function threadTurns(items) {
       if (!shown) continue; // screenshot attachments are model-only
       turns.push({ who: 'you', text: shown });
     }
-    else if (it.type === 'function_call') turns.push({ who: 'tool', name: it.name, args: String(it.arguments || '').slice(0, 400) });
+    else if (it.type === 'function_call') turns.push({ who: 'tool', name: it.name, args: String(it.arguments || '').slice(0, 400), ok: !failed.has(it.call_id) });
     else if (it.type === 'message' && it.role === 'assistant') turns.push({ who: 'agent', text: (it.content || []).map((c) => c.text || '').join('') });
   }
   return turns;
