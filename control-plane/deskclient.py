@@ -8,7 +8,9 @@ screenshot helpers give the "best-effort, never raises" shape that handoffs and
 run-reports want.
 """
 import base64
+import http.cookiejar
 import json
+import threading
 import time
 
 import requests
@@ -18,12 +20,25 @@ from dockerd import desk_base
 from errors import ApiError
 
 
+_local = threading.local()
+
+
+def _session():
+    """One keep-alive Session per thread (a Session is not thread-safe). No cookie
+    jar: every call used to start clean, and desks share 127.0.0.1."""
+    s = getattr(_local, "session", None)
+    if s is None:
+        s = _local.session = requests.Session()
+        s.cookies.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
+    return s
+
+
 def desk(row, method, path, timeout=35, **kw):
     """Low-level: returns the raw Response (used when the caller needs the status)."""
     url = f"{desk_base(row['id'], row['desk_port'])}{path}"
     headers = {"Authorization": f"Bearer {row['desk_token']}"}
     try:
-        return requests.request(method, url, headers=headers, timeout=timeout, **kw)
+        return _session().request(method, url, headers=headers, timeout=timeout, **kw)
     except (requests.Timeout, requests.ConnectionError):
         raise ApiError(504, "daemon_timeout", "deskd did not respond")
 
@@ -193,7 +208,7 @@ def wait_desk(cid, port, token, deadline_s):
     t0 = time.time()
     while time.time() - t0 < deadline_s:
         try:
-            r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=3)
+            r = _session().get(url, headers={"Authorization": f"Bearer {token}"}, timeout=3)
             if r.ok and r.json().get("ok") and r.json().get("chrome"):
                 return
         except Exception:

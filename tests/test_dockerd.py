@@ -66,15 +66,16 @@ def test_deskclient_accepts_sqlite_row():
         def json(self):
             return {"ok": True}
 
-    orig = deskclient.requests.request
-    deskclient.requests.request = lambda method, url, headers=None, timeout=None, **kw: (
-        seen.update(url=url, headers=headers) or R())
+    session = type("S", (), {"request": lambda self, method, url, headers=None, timeout=None,
+                                     **kw: seen.update(url=url, headers=headers) or R()})()
+    orig = deskclient._session
+    deskclient._session = lambda: session
     try:
         deskclient.desk(row, "GET", "/health")
         assert seen["url"] == "http://127.0.0.1:32771/health"
         assert seen["headers"]["Authorization"] == "Bearer tok"
     finally:
-        deskclient.requests.request = orig
+        deskclient._session = orig
 
 
 def test_deskclient_url_follows_the_network():
@@ -87,14 +88,14 @@ def test_deskclient_url_follows_the_network():
         def json(self):
             return {}
 
-    def fake_request(method, url, headers=None, timeout=None, **kw):
+    def fake_request(self, method, url, headers=None, timeout=None, **kw):
         seen["url"] = url
         seen["headers"] = headers
         return R()
 
     import deskclient
-    orig = deskclient.requests.request
-    deskclient.requests.request = fake_request
+    orig = deskclient._session
+    deskclient._session = lambda: type("S", (), {"request": fake_request})()
     _net("case")
     try:
         deskclient.desk({"id": "c_ab", "desk_port": 8000, "desk_token": "secret"},
@@ -102,8 +103,20 @@ def test_deskclient_url_follows_the_network():
         assert seen["url"] == "http://case-c_ab:8000/health"
         assert seen["headers"]["Authorization"] == "Bearer secret"
     finally:
-        deskclient.requests.request = orig
+        deskclient._session = orig
         _net(None)
+
+
+def test_deskclient_reuses_one_session_per_thread():
+    import threading
+    import deskclient
+    here = deskclient._session()
+    assert deskclient._session() is here
+    other = []
+    t = threading.Thread(target=lambda: other.append(deskclient._session()))
+    t.start()
+    t.join()
+    assert other[0] is not here
 
 
 def test_vnc_url_hidden_when_computers_are_on_the_compose_network():
@@ -233,6 +246,7 @@ if __name__ == "__main__":
     test_compose_mode_uses_container_dns_and_no_host_ports()
     test_deskclient_accepts_sqlite_row()
     test_deskclient_url_follows_the_network()
+    test_deskclient_reuses_one_session_per_thread()
     test_vnc_url_hidden_when_computers_are_on_the_compose_network()
     test_create_clears_a_name_stuck_in_removal_and_retries_once()
     test_destroy_names_a_volume_it_could_not_remove()
