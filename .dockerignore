@@ -1,7 +1,9 @@
 .git
 .venv
 __pycache__
+**/__pycache__
 *.pyc
+**/*.pyc
 .pytest_cache
 .worktrees
 .claude
@@ -11,6 +13,7 @@ __pycache__
 *.key
 *.log
 node_modules
+**/node_modules
 web/web-ui/threads.json
 .env
 *.env.local

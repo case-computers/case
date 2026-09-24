@@ -4,15 +4,14 @@
  * Drive UI + deployer — talks to local cased (compose or CASE_URL).
  * Serves Drive at / (index.html) and the computer deployer at /deploy.
  *
- * CASE_LOCAL (default on): 127.0.0.1 / compose `cased` — no SSH tunnel, /live
- * relays noVNC through cased. CASE_LOCAL=0 is a no-op here (this process never
- * tunnels); it only flips the health `local` flag.
+ * No SSH tunnel: cased is on CASE_URL (loopback or compose `cased`), and /live
+ * relays noVNC through it.
  *
  * OpenAI key arrives per-request in x-openai-key; Anthropic in x-anthropic-key;
  * never logged.
  * Optional CASE_TOKEN: Bearer, case_token cookie, or ?token= on first hit.
  *
- * Run: CASE_LOCAL=1 node web/web-ui/serve.mjs  →  http://127.0.0.1:4174/
+ * Run: node web/web-ui/serve.mjs  →  http://127.0.0.1:4174/
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -20,7 +19,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRateLimited } from './case-tools.mjs';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRetryable, clip } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
 import * as telegram from './telegram.mjs';
@@ -53,13 +52,6 @@ export function parseCaseUrl(raw) {
 const CASE = parseCaseUrl(process.env.CASE_URL || 'http://127.0.0.1:8787');
 process.env.CASE_URL = `${CASE.protocol}//${CASE.hostname}:${CASE.port}/v1`;
 
-export function isLocalMode(env = process.env, host = CASE.hostname) {
-  const flag = String(env.CASE_LOCAL || '').trim().toLowerCase();
-  if (flag === '0' || flag === 'false') return false;
-  if (flag === '1' || flag === 'true') return true;
-  return host === '127.0.0.1' || host === 'localhost' || host === 'cased';
-}
-const LOCAL = isLocalMode();
 const HOME = process.env.CASE_HOME || path.join(process.env.HOME || '/tmp', '.case');
 
 export function liveCid(pathname) {
@@ -83,6 +75,12 @@ export function livePathHasDotDot(rawUrl) {
     return true; // malformed percent-encoding: refuse
   }
   return false;
+}
+// Did the browser reach us over HTTPS? The proxy in front says so, or the page's
+// origin does. Plain-http loopback must not get a Secure cookie: it never comes back.
+export function viaHttps(req) {
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return proto === 'https' || /^https:\/\//i.test(String(req.headers.origin || ''));
 }
 export function tokenMatches(req, need = TOKEN) {
   if (!need) return true;
@@ -179,6 +177,10 @@ function originHealth() {
 }
 
 let cachedCid = '';
+// The computer the page is sat at. Files, vault, schedules and teach act on
+// exactly that one: rerouting a missing pick to the first computer on the box
+// would show and change someone else's desk (web-ui/README.md, "One seat").
+const pickedCid = (url) => String(url.searchParams.get('computer_id') || '').trim();
 async function cid() {
   if (cachedCid) return cachedCid;
   const r = await api('GET', '/computers', { timeoutMs: 6000 });
@@ -196,10 +198,14 @@ const BODY_CAP = 1 << 20; // 1 MB, chat input is capped to 32k anyway
 async function readBody(req, res, cap = BODY_CAP) {
   const chunks = [];
   let n = 0;
-  for await (const c of req) {
-    n += c.length;
-    if (n > cap) { json(res, 413, { error: 'body too large' }); req.destroy(); return null; }
-    chunks.push(c);
+  try {
+    for await (const c of req) {
+      n += c.length;
+      if (n > cap) { json(res, 413, { error: 'body too large' }); req.destroy(); return null; }
+      chunks.push(c);
+    }
+  } catch {
+    return null; // client hung up mid-body (STOP during an upload): nobody to answer
   }
   return Buffer.concat(chunks);
 }
@@ -211,7 +217,7 @@ async function computers(res) {
       api('GET', '/computers', { timeoutMs: 6000 }),
       originHealth().catch(() => ({ json: null })),
     ]);
-    if (r.status >= 400 || !r.json) return json(res, 502, { error: r.json?.error?.message || 'cased unreachable', up: false, local: LOCAL });
+    if (r.status >= 400 || !r.json) return json(res, 502, { error: r.json?.error?.message || 'cased unreachable', up: false });
     const rows = (r.json.computers || []).map((c) => ({
       id: c.id, name: c.name, state: c.state === 'running' ? 'awake' : c.state,
       credentials: c.credentials || [], pending_handoffs: c.pending_handoffs || 0,
@@ -223,12 +229,12 @@ async function computers(res) {
     const running = rows.filter((c) => awake.includes(c.state)).length;
     const maxRunning = Number(h.json?.max_running) || 0;
     return json(res, 200, {
-      computers: rows, live: CASE.hostname, up: true, local: LOCAL,
+      computers: rows, live: CASE.hostname, up: true,
       max_running: maxRunning, running: Number(h.json?.running) || running,
       max_ram_mb: Number(h.json?.max_ram_mb) || 0, ram_mb: Number(h.json?.ram_mb) || 0,
     });
   } catch {
-    return json(res, 502, { error: 'cased unreachable', up: false, local: LOCAL });
+    return json(res, 502, { error: 'cased unreachable', up: false });
   }
 }
 
@@ -257,8 +263,8 @@ async function fsList(res, url) {
   const p = url.searchParams.get('path') || '/home/agent';
   if (!pathOk(p)) return json(res, 400, { error: 'bad path' });
   try {
-    const id = await cid();
-    if (!id) return json(res, 409, { error: 'no computer on the box' });
+    const id = pickedCid(url);
+    if (!id) return json(res, 409, { error: 'no computer picked' });
     const cmd = `find ${shq(p)} -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T@\\t%f\\n' 2>&1 || true`;
     const r = await api('POST', `/computers/${encodeURIComponent(id)}/exec?wake=true`,
       { body: { command: cmd, timeout_s: 15 }, timeoutMs: 30000 });
@@ -278,16 +284,16 @@ async function fsFile(res, url) {
   const p = url.searchParams.get('path') || '';
   if (!pathOk(p)) return json(res, 400, { error: 'bad path' });
   try {
-    const id = await cid();
-    if (!id) return json(res, 409, { error: 'no computer on the box' });
+    const id = pickedCid(url);
+    if (!id) return json(res, 409, { error: 'no computer picked' });
     const r = await api('GET',
       `/computers/${encodeURIComponent(id)}/files?path=${encodeURIComponent(p)}&wake=true`,
-      { timeoutMs: 60000, raw: true });
+      { timeoutMs: 60000, raw: true, maxBytes: FILE_CAP });
+    if (r.tooBig) return json(res, 413, { error: 'file over 8MB' });
     if (r.status >= 400) {
       const msg = parseErr(r.buf, 'read failed');
       return json(res, r.status, { error: msg });
     }
-    if (r.buf.length > FILE_CAP) return json(res, 413, { error: 'file over 8MB' });
     const ext = path.extname(p).toLowerCase();
     const inline = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'].includes(ext);
     res.writeHead(200, {
@@ -308,9 +314,8 @@ export function normHost(s) {
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h) ? h : '';
 }
 async function creds(req, res, url) {
-  let id = '';
-  try { id = await cid(); } catch { /* fall through */ }
-  if (!id) return json(res, 502, { error: 'no computer — create one first' });
+  const id = pickedCid(url);
+  if (!id) return json(res, 409, { error: 'no computer picked' });
   const base = `/computers/${encodeURIComponent(id)}/credentials`;
   try {
     if (req.method === 'GET') {
@@ -380,7 +385,7 @@ async function power(res, req, action) {
   }
 }
 
-// Chat: same NDJSON contract as web/serve.mjs, hands always local REST.
+// Chat tools beyond CASE_TOOLS; hands are always cased REST.
 // Tool names + semantics match mcp/case_mcp.py.
 const EXTRA_TOOLS = [
   { type: 'function', name: 'computer_list', description: 'List all computers with state, resources and credential names. Reuse an existing computer — only computer_create for an identity that should stay separate.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
@@ -534,6 +539,10 @@ async function runExtra(plan) {
     }
     const r = await api(plan.method, plan.rel, { body: plan.body, timeoutMs: plan.timeoutMs || 60000 });
     if (r.status >= 400) return { ok: false, status: r.status, error: r.json?.error || r.raw, act: plan.act };
+    // handoff_get and click(screenshot:true) carry a png inside the JSON. Left there it
+    // is clipped to base64 noise; popped, it takes the screenshot's image path.
+    const { screenshot_png_b64: png, ...rest } = r.json && typeof r.json === 'object' ? r.json : {};
+    if (png) return { ok: rest.ok !== false, act: plan.act, result: rest, image_b64: png };
     return { ok: r.json?.ok !== false, act: plan.act, result: r.json };
   } catch (err) {
     return { ok: false, error: err.message || 'cased unreachable', act: plan.act };
@@ -554,6 +563,15 @@ const ROUNDS = 200;
 const TURN_TOKEN_BUDGET = Number(process.env.CASE_TURN_TOKENS || 2_000_000);
 const BUDGET_WARN = 'Turn budget nearly spent — a few tool steps remain. Append your progress and the exact next step to a file under /home/agent/reports now, then stop and say where you stopped.';
 const isBudgetWarn = (it) => Array.isArray(it?.content) && it.content.some((c) => c?.text === BUDGET_WARN);
+/** Past 80% of the billed budget or of the rounds, queue BUDGET_WARN into history
+ *  and say so; returns which bound tripped, '' if neither. Both provider loops. */
+function budgetWarn(hist, emit, eff, round) {
+  const why = eff > 0.8 * TURN_TOKEN_BUDGET ? 'budget' : round >= 0.8 * ROUNDS ? 'rounds' : '';
+  if (!why) return '';
+  pushSteerItems(hist.items, [BUDGET_WARN]);
+  emit({ type: 'think', text: `[80% of the turn ${why} — told the model to wrap up]` });
+  return why;
+}
 // Window guard. OpenAI compacts server-side once the rendered context passes this
 // (opaque `compaction` item we carry forward); `truncation:'auto'` is the floor if a
 // model lacks compaction. 200k fits every window in the list (272k–1M). 0 = off.
@@ -612,7 +630,7 @@ function saveThreads() {
   }, 400);
 }
 if (THREADS.size) saveThreads();
-export function newThread(title, agent) {
+function newThread(title, agent) {
   const t = {
     id: 't_' + Math.random().toString(36).slice(2, 10),
     title: String(title).replace(/\s+/g, ' ').trim().slice(0, 72),
@@ -626,6 +644,9 @@ const threadSummary = (t) => ({ id: t.id, title: t.title, agent: t.agent, update
 // reasoning stay server-side.
 export function threadTurns(items) {
   const turns = [];
+  // A persisted output is the clipped tool result, whose head is always {"ok":…}.
+  const failed = new Set((items || []).filter((it) => it?.type === 'function_call_output'
+    && /^\{"ok":false[,}]/.test(String(it.output || ''))).map((it) => it.call_id));
   for (const it of items || []) {
     if (it.shot) continue; // screenshot attachments are model-only
     if (it.role === 'user') {
@@ -640,7 +661,7 @@ export function threadTurns(items) {
       if (!shown) continue; // screenshot attachments are model-only
       turns.push({ who: 'you', text: shown });
     }
-    else if (it.type === 'function_call') turns.push({ who: 'tool', name: it.name, args: String(it.arguments || '').slice(0, 400) });
+    else if (it.type === 'function_call') turns.push({ who: 'tool', name: it.name, args: String(it.arguments || '').slice(0, 400), ok: !failed.has(it.call_id) });
     else if (it.type === 'message' && it.role === 'assistant') turns.push({ who: 'agent', text: (it.content || []).map((c) => c.text || '').join('') });
   }
   return turns;
@@ -701,7 +722,18 @@ function turnTail(items, budget) {
  *  turn pays to re-send on every round. A short turn is nowhere near `max`, so a
  *  follow-up like "click the blue one" still has its snapshot to work from. */
 export function histTrim(h, max = HIST_MAX) {
-  const over = () => JSON.stringify(h.items).length > max;
+  // Per-item sizes plus brackets and commas add up to JSON.stringify(h.items).length
+  // without re-serializing the whole history on every pass.
+  const size = (it) => (JSON.stringify(it) ?? 'null').length;
+  const sizes = h.items.map(size);
+  let sum = sizes.reduce((a, n) => a + n, 0);
+  const over = () => sum + Math.max(h.items.length - 1, 0) + 2 > max;
+  const splice = (at, n, add = []) => {
+    const added = add.map(size);
+    for (const g of sizes.splice(at, n, ...added)) sum -= g;
+    for (const g of added) sum += g;
+    h.items.splice(at, n, ...add);
+  };
   let starts = turnStarts(h.items);
   for (let k = 0; k < starts.length && over(); k++) {
     const [a, b] = [starts[k], starts[k + 1] ?? h.items.length];
@@ -721,11 +753,11 @@ export function histTrim(h, max = HIST_MAX) {
     const comp = body.filter((it) => it.type === 'compaction' && !keep.includes(it));
     const kept = [{ ...turn[0], content: clip(turn[0].content, PROMPT_KEEP) }, ...comp, ...keep];
     if (kept.length === turn.length) continue;
-    h.items.splice(a, b - a, ...kept);
+    splice(a, b - a, kept);
     starts = turnStarts(h.items);
   }
   while (starts.length > 1 && over()) {
-    h.items.splice(0, starts[1]);
+    splice(0, starts[1]);
     starts = turnStarts(h.items);
   }
 }
@@ -749,7 +781,7 @@ export function histCloseOpenCalls(items, { keepReasoning = false } = {}) {
   }
   return out;
 }
-export function shotsDir(home = HOME) {
+function shotsDir(home = HOME) {
   return path.join(home, 'drive', 'shots');
 }
 
@@ -778,33 +810,39 @@ export function pushShot(items, shots, b64, dir = shotsDir()) {
   items.push(stashShot(b64, dir));
 }
 
-export function hydrateShots(items, dir = shotsDir()) {
+/** memo (shot path -> item) lets a turn read and encode each file once, not once
+ *  per round; the request is still rebuilt whole every round (store:false). */
+export function hydrateShots(items, dir = shotsDir(), memo = new Map()) {
   const root = path.resolve(dir) + path.sep;
   return (items || []).map((it) => {
     if (!it?.shot) return it;
-    const abs = path.resolve(it.shot);
-    if (!abs.startsWith(root) || path.extname(abs) !== '.png') {
-      return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
-    }
-    try {
-      const buf = fs.readFileSync(abs);
-      return {
-        role: 'user',
-        content: [{
-          type: 'input_image', detail: 'high',
-          image_url: 'data:image/png;base64,' + buf.toString('base64'),
-        }],
-      };
-    } catch {
-      return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
-    }
+    if (!memo.has(it.shot)) memo.set(it.shot, hydrateShot(it.shot, root));
+    return memo.get(it.shot);
   });
+}
+function hydrateShot(shot, root) {
+  const abs = path.resolve(shot);
+  if (!abs.startsWith(root) || path.extname(abs) !== '.png') {
+    return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
+  }
+  try {
+    const buf = fs.readFileSync(abs);
+    return {
+      role: 'user',
+      content: [{
+        type: 'input_image', detail: 'high',
+        image_url: 'data:image/png;base64,' + buf.toString('base64'),
+      }],
+    };
+  } catch {
+    return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
+  }
 }
 
 export const ATTACH_MAX = 5 * 1024 * 1024;
-export const ATTACH_MAX_N = 4;
+const ATTACH_MAX_N = 4;
 
-export function inboxDir(home = HOME) {
+function inboxDir(home = HOME) {
   return path.join(home, 'drive', 'inbox');
 }
 
@@ -817,7 +855,7 @@ export function attachKind(mime, name = '') {
   return '';
 }
 
-export function safeAttachName(name) {
+function safeAttachName(name) {
   const base = path.basename(String(name || 'file')).replace(/[^\w.\-]+/g, '_').slice(0, 80);
   return base || 'file';
 }
@@ -901,7 +939,7 @@ function hydrateOneAttach(a, dir) {
   return [note];
 }
 
-export function hydrateAttaches(items, dir = inboxDir()) {
+export function hydrateAttaches(items, dir = inboxDir(), memo = new Map()) {
   return (items || []).map((it) => {
     if (!it?.attaches?.length) return it;
     const parts = [];
@@ -910,7 +948,11 @@ export function hydrateAttaches(items, dir = inboxDir()) {
     } else if (Array.isArray(it.content)) {
       for (const c of it.content) parts.push(c);
     }
-    for (const a of it.attaches) parts.push(...hydrateOneAttach(a, dir));
+    for (const a of it.attaches) {
+      const key = String(a?.path || '');
+      if (!memo.has(key)) memo.set(key, hydrateOneAttach(a, dir));
+      parts.push(...memo.get(key));
+    }
     return { role: 'user', content: parts };
   });
 }
@@ -942,16 +984,6 @@ export function migrateShots(items, dir = shotsDir()) {
     return stashShot(m[1], dir);
   });
   return changed ? next : items;
-}
-
-export function clip(v, n = 8000) {
-  const s = typeof v === 'string' ? v : JSON.stringify(v);
-  if (s.length <= n) return s;
-  // Head+tail, not a tail-drop: a 150-element snapshot overruns n, and a blind cut
-  // throws away the very fields that say so (count, truncated) along with the
-  // closing brace, so the model gets mid-JSON garbage with no signal it was cut.
-  const half = Math.floor((n - 40) / 2);
-  return `${s.slice(0, half)}\n…${s.length - 2 * half} chars elided…\n${s.slice(-half)}`;
 }
 
 /** A re-snapshot after a click that changed nothing repeats the whole element list.
@@ -987,7 +1019,7 @@ async function steer(req, res) {
   STEER.set(tid, q);
   return json(res, 200, { queued: true });
 }
-export function phoneThread() {
+function phoneThread() {
   let t = THREADS.get(PHONE_THREAD_ID);
   if (t) return t;
   t = {
@@ -1044,6 +1076,8 @@ export async function runTurn({
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
       const shots = new Set();
+      const snaps = { last: '' };
+      let warned = '';
       const { text: out, finished, spend, overBudget } = await anthropicToolLoop({
         key: auth.key,
         model,
@@ -1056,7 +1090,8 @@ export async function runTurn({
         tokenBudget: TURN_TOKEN_BUDGET,
         signal: gone.signal,
         stopped,
-        beforeRound: (msgs) => {
+        beforeRound: (msgs, { round, eff }) => {
+          if (!warned && (warned = budgetWarn(hist, emit, eff, round))) appendSteerToAnthropic(msgs, BUDGET_WARN);
           const nudges = takeSteers(thread.id);
           for (const n of nudges) {
             pushSteerItems(hist.items, [n]);
@@ -1078,16 +1113,17 @@ export async function runTurn({
             () => (eplan ? runExtra(eplan) : runCaseTool(name, args, id, null)),
             actFor(name, args || {}, id));
           const { image_b64, ...persist } = result;
-          hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(persist) });
+          const rest = snapshotElide(name, persist, snaps);
+          hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(rest) });
           if (image_b64) pushShot(hist.items, shots, image_b64);
-          return result;
+          return image_b64 ? { ...rest, image_b64 } : rest;
         },
       });
       let text = out;
       if (!finished && !stopped()) {
         text = (text ? text + '\n\n' : '')
           + (overBudget
-            ? `**Out of budget.** Stopped after ${spend.in.toLocaleString('en-US')} input tokens with the task unfinished. Say **continue** and I pick up from here.`
+            ? `**Out of budget.** Stopped after ${Math.round(spend.eff).toLocaleString('en-US')} billed input tokens with the task unfinished. Say **continue** and I pick up from here.`
             : `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`);
         emit({ type: 'text', text });
       } else if (text) {
@@ -1097,12 +1133,14 @@ export async function runTurn({
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
       return { text, computerId: id, threadId: thread.id, finished };
     }
-    const client = new OpenAI({ apiKey: auth.key });
+    const client = new OpenAI({ apiKey: auth.key, maxRetries: 0 });
     let text = '';
     const spend = { in: 0, cached: 0, out: 0 };
     const effSoFar = () => Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
     let summary = 'detailed';
     let compact = COMPACT_AT > 0;
+    const shotMemo = new Map();
+    const attachMemo = new Map();
     const round = async () => {
       // The SDK leaves its abort listener on the signal after the round ends; over a
       // 200-round turn that is 200 dead listeners on one signal. A per-round
@@ -1113,7 +1151,7 @@ export async function runTurn({
       if (gone.signal.aborted) rc.abort();
       try {
       const params = {
-        model, input: [dev, ...hydrateShots(hydrateAttaches(hist.items))], tools: ALL_TOOLS,
+        model, input: [dev, ...hydrateShots(hydrateAttaches(hist.items, inboxDir(), attachMemo), shotsDir(), shotMemo)], tools: ALL_TOOLS,
         reasoning: { effort, summary }, stream: true, store: false,
         // The loop is append-only: every round re-sends [dev, ...items], which is
         // exactly the shape the prefix cache wants. A stable key is required for
@@ -1130,11 +1168,11 @@ export async function runTurn({
         try { stream = await client.responses.create(params, { signal: rc.signal }); break; }
         catch (err) {
           // Only param fallbacks retry here. An abort must not — and neither may a
-          // rate limit: `summary`/`compact` outlive the round, so treating a 429 as
-          // "unsupported" retries with no backoff AND thins reasoning / drops the
-          // window guard for every later round. Let withRateRetry have it.
+          // rate limit or a 5xx: `summary`/`compact` outlive the round, so treating a
+          // 429 as "unsupported" retries with no backoff AND thins reasoning / drops
+          // the window guard for every later round. Let withRateRetry have it.
           if (gone.signal.aborted) throw err;
-          if (isRateLimited(err)) throw err;
+          if (isRetryable(err)) throw err;
           if (compact && /context_management|compaction/i.test(err?.message || '')) {
             console.log(`drive turn ${thread.id}: compaction rejected — ${err?.message || 'no message'}`);
             compact = false;
@@ -1193,11 +1231,7 @@ export async function runTurn({
     let compactions = 0;
     let i = 0;
     for (; i < ROUNDS && !finished && !stopped() && !overBudget(); i++) {
-      if (!warned && (effSoFar() > 0.8 * TURN_TOKEN_BUDGET || i >= 0.8 * ROUNDS)) {
-        warned = effSoFar() > 0.8 * TURN_TOKEN_BUDGET ? 'budget' : 'rounds';
-        pushSteerItems(hist.items, [BUDGET_WARN]);
-        emit({ type: 'think', text: `[80% of the turn ${warned} — told the model to wrap up]` });
-      }
+      if (!warned) warned = budgetWarn(hist, emit, effSoFar(), i);
       const nudges = takeSteers(thread.id);
       if (nudges.length) {
         for (const n of nudges) {
@@ -1297,10 +1331,10 @@ export async function runTurn({
 export const driveLoop = { turn: runTurn };
 
 export async function schedulesRoute(req, res, url) {
-  const id = await cid();
-  if (!id) return json(res, 409, { error: 'no computer' });
   const sid = String(url.searchParams.get('id') || '').trim();
   try {
+    const id = pickedCid(url);
+    if (!id) return json(res, 409, { error: 'no computer picked' });
     if (req.method === 'GET' && url.pathname === '/api/schedules') {
       const r = await api('GET', `/computers/${encodeURIComponent(id)}/schedules`);
       return json(res, r.status >= 400 ? r.status : 200, r.json || []);
@@ -1337,7 +1371,7 @@ export async function schedulesRoute(req, res, url) {
   }
 }
 
-export async function brainRoute(req, res) {
+async function brainRoute(req, res) {
   const buf = await readBody(req, res);
   if (!buf) return;
   let body;
@@ -1728,6 +1762,13 @@ function vncWs(req, socket, head) {
   const t = vncUpstream(req);
   if (!t) { socket.destroy(); return; }
   const up = http.request({ hostname: t.hostname, port: t.port, path: t.path, method: 'GET', headers: liveHeaders(req, true) });
+  socket.on('error', () => up.destroy());
+  // cased refused the upgrade (asleep, gone, unauthorized): pass the status on, or
+  // the browser's socket waits for a 101 that never comes.
+  up.on('response', (upRes) => {
+    upRes.resume();
+    socket.end(`HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage || ''}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  });
   up.on('upgrade', (upRes, upSocket, upHead) => {
     const lines = ['HTTP/1.1 101 Switching Protocols'];
     for (const [k, v] of Object.entries(upRes.headers)) lines.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
@@ -1738,8 +1779,8 @@ function vncWs(req, socket, head) {
     for (const s of [socket, upSocket]) s.on('error', () => { socket.destroy(); upSocket.destroy(); });
   });
   up.on('error', () => socket.destroy());
-  up.end();
   if (head?.length) up.write(head);
+  up.end();
 }
 
 // Only the two pages are servable. Everything else in this directory —
@@ -1757,7 +1798,7 @@ export const server = http.createServer(async (req, res) => {
   if (TOKEN && req.method === 'GET' && url.searchParams.has('token') && tokenMatches(req)) {
     res.writeHead(302, {
       Location: p === '/' ? '/' : p,
-      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+      'Set-Cookie': `case_token=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${viaHttps(req) ? '; Secure' : ''}`,
       'Cache-Control': 'no-store',
     });
     return res.end();
@@ -1772,7 +1813,7 @@ export const server = http.createServer(async (req, res) => {
     try {
       const h = await originHealth();
       return json(res, 200, {
-        ok: true, live: CASE.hostname, up: h.status === 200, local: LOCAL,
+        ok: true, live: CASE.hostname, up: h.status === 200,
         max_running: Number(h.json?.max_running) || 0,
         running: Number(h.json?.running) || 0,
         computers: Number(h.json?.computers) || 0,
@@ -1780,32 +1821,33 @@ export const server = http.createServer(async (req, res) => {
         brain_key: !!envDriveAuth().key,
       });
     } catch {
-      return json(res, 200, { ok: true, live: CASE.hostname, up: false, local: LOCAL, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
+      return json(res, 200, { ok: true, live: CASE.hostname, up: false, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
     }
   }
   try {
-    if (req.method === 'GET' && p === '/api/computers') return computers(res);
-    if (req.method === 'POST' && p === '/api/computers') return createComputer(res, req);
-    if (req.method === 'DELETE' && p === '/api/computers') return deleteComputer(res, req);
-    if (req.method === 'GET' && p === '/api/fs') return fsList(res, url);
-    if (p === '/api/creds') return creds(req, res, url);
+    if (req.method === 'GET' && p === '/api/computers') return await computers(res);
+    if (req.method === 'POST' && p === '/api/computers') return await createComputer(res, req);
+    if (req.method === 'DELETE' && p === '/api/computers') return await deleteComputer(res, req);
+    if (req.method === 'GET' && p === '/api/fs') return await fsList(res, url);
+    if (p === '/api/creds') return await creds(req, res, url);
     if (p === '/api/threads') return threadsRoute(req, res, url);
-    if (req.method === 'GET' && p === '/api/file') return fsFile(res, url);
-    if (req.method === 'POST' && p === '/api/brain') return brainRoute(req, res);
-    if (p === '/api/schedules' || p === '/api/schedules/run') return schedulesRoute(req, res, url);
-    if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
-    if (req.method === 'POST' && p === '/api/chat/steer') return steer(req, res);
-    if (req.method === 'POST' && p === '/api/attach') return attach(req, res);
+    if (req.method === 'GET' && p === '/api/file') return await fsFile(res, url);
+    if (req.method === 'POST' && p === '/api/brain') return await brainRoute(req, res);
+    if (p === '/api/schedules' || p === '/api/schedules/run') return await schedulesRoute(req, res, url);
+    if (req.method === 'POST' && p === '/api/chat') return await chat(req, res);
+    if (req.method === 'POST' && p === '/api/chat/steer') return await steer(req, res);
+    if (req.method === 'POST' && p === '/api/attach') return await attach(req, res);
     if (req.method === 'POST' && p === '/api/teach-tick') {
-      const id = await cid();
-      if (!id) return json(res, 409, { error: 'no computer' });
+      const id = pickedCid(url);
+      if (!id) return json(res, 409, { error: 'no computer picked' });
       const r = await api('POST', `/computers/${encodeURIComponent(id)}/teach-tick?wake=true`, { timeoutMs: 15000 });
       return json(res, r.status >= 400 ? r.status : 200, r.json || {});
     }
-    if (req.method === 'POST' && p === '/api/wake') return power(res, req, 'wake');
-    if (req.method === 'POST' && p === '/api/sleep') return power(res, req, 'sleep');
+    if (req.method === 'POST' && p === '/api/wake') return await power(res, req, 'wake');
+    if (req.method === 'POST' && p === '/api/sleep') return await power(res, req, 'sleep');
     if (p.startsWith('/live')) return vncHttp(req, res);
   } catch (err) {
+    if (res.headersSent) return res.destroy();
     return json(res, 500, { error: err.message || 'internal' });
   }
   const file = pageFile(p);
@@ -1824,8 +1866,10 @@ server.on('upgrade', (req, socket, head) => {
 const isMain = fileURLToPath(import.meta.url) === path.resolve(process.argv[1] || '');
 if (isMain) {
   server.on('clientError', (_e, s) => { try { s.destroy(); } catch { /* gone */ } });
+  // One bad request must never take Drive (and every running turn) down with it.
+  process.on('unhandledRejection', (err) => console.error('drive unhandled:', err));
   server.listen(PORT, BIND, () => {
-    process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port}${LOCAL ? ', local' : ''})\n`);
+    process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port})\n`);
     startPhoneNtfy();
     startPhoneTelegram();
   });

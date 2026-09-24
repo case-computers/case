@@ -20,7 +20,20 @@ from cryptography.fernet import Fernet
 from config import CASE_HOME
 from util import now, row_get
 
-SCHEMA = """
+# Status vocabularies. The one definition: callers import these, and the SQL
+# below is built from them.
+AUTH_ATTEMPT_ACTIVE = ("created", "advancing", "awaiting_human", "proving")
+AUTH_ATTEMPT_TERMINAL = ("authenticated", "unverified", "failed", "expired", "cancelled")
+HANDOFF_LIVE = ("pending", "validating")
+# Terminal handoff statuses; transition_handoff never moves a row out of one.
+HANDOFF_TERMINAL = ("completed", "answered", "failed", "expired")
+
+
+def _sql_in(values):
+    return "(" + ",".join(f"'{v}'" for v in values) + ")"
+
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS computers (
   id TEXT PRIMARY KEY, name TEXT, state TEXT, image TEXT,
   created_at TEXT, last_active_at TEXT,
@@ -53,14 +66,16 @@ CREATE TABLE IF NOT EXISTS auth_attempts (
   idempotency_key TEXT,
   current_handoff_id TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  fail_reason TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_idempotency
   ON auth_attempts(computer_id, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_one_active
   ON auth_attempts(computer_id)
-  WHERE status IN ('created','advancing','awaiting_human','proving');
+  WHERE status IN {_sql_in(AUTH_ATTEMPT_ACTIVE)};
+CREATE INDEX IF NOT EXISTS idx_auth_attempts_status_updated ON auth_attempts(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_handoffs_computer_status ON handoffs(computer_id, status);
 CREATE INDEX IF NOT EXISTS idx_handoffs_status_created ON handoffs(status, created_at);
 CREATE TABLE IF NOT EXISTS schedules (
@@ -74,6 +89,7 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at TEXT, ended_at TEXT, exit_code INTEGER, summary TEXT, artifact_path TEXT,
   status TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_runs_schedule_started ON runs(schedule_id, started_at);
 CREATE TABLE IF NOT EXISTS links (
   token TEXT PRIMARY KEY, computer_id TEXT, kind TEXT,
   created_at TEXT, expires_at TEXT, used_at TEXT
@@ -133,32 +149,14 @@ class Store:
         ("credentials", "proof_spec", "TEXT"),
         ("credentials", "verification_hosts", "TEXT"),
         ("schedules", "tz", "TEXT"),
+        ("auth_attempts", "fail_reason", "TEXT"),
     ]
-
-    # Active (non-terminal) auth-attempt statuses, kept here so the partial unique
-    # index and get_active_* share one definition with auth_attempts.ACTIVE_STATUSES.
-    AUTH_ATTEMPT_ACTIVE = ("created", "advancing", "awaiting_human", "proving")
 
     def _migrate(self):
         for table, col, typ in self.MIGRATIONS:
             cols = [r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")]
             if col not in cols:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
-        # Indexes are also in SCHEMA; re-assert for DBs created before they existed.
-        self.db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_idempotency "
-            "ON auth_attempts(computer_id, idempotency_key) "
-            "WHERE idempotency_key IS NOT NULL")
-        self.db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_attempts_one_active "
-            "ON auth_attempts(computer_id) "
-            "WHERE status IN ('created','advancing','awaiting_human','proving')")
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_handoffs_computer_status "
-            "ON handoffs(computer_id, status)")
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_handoffs_status_created "
-            "ON handoffs(status, created_at)")
         # Pre-migration handoff rows: treat missing revision as 0.
         self.db.execute("UPDATE handoffs SET revision=0 WHERE revision IS NULL")
         self.db.commit()
@@ -204,6 +202,9 @@ class Store:
 
     def all_non_deleted(self):
         return self.all("SELECT * FROM computers WHERE state != 'deleted'")
+
+    def computer_count(self):
+        return self.one("SELECT COUNT(*) c FROM computers WHERE state != 'deleted'")["c"]
 
     def running_rows(self):
         return self.all("SELECT * FROM computers WHERE state='running'")
@@ -346,7 +347,7 @@ class Store:
 
     def pending_login_handoffs(self):
         # pending + validating: a restart mid-verify must still recover LOGIN_CTX
-        return self.all("SELECT * FROM handoffs WHERE status IN ('pending','validating') "
+        return self.all(f"SELECT * FROM handoffs WHERE status IN {_sql_in(HANDOFF_LIVE)} "
                         "AND login_credential IS NOT NULL")
 
     def get_handoff(self, hid):
@@ -355,7 +356,7 @@ class Store:
     def get_open_handoff_by_fingerprint(self, cid, fingerprint):
         return self.one(
             "SELECT * FROM handoffs WHERE computer_id=? AND challenge_fingerprint=? "
-            "AND status IN ('pending','validating') ORDER BY created_at DESC LIMIT 1",
+            f"AND status IN {_sql_in(HANDOFF_LIVE)} ORDER BY created_at DESC LIMIT 1",
             (cid, fingerprint))
 
     def list_handoffs(self, status=None):
@@ -380,16 +381,13 @@ class Store:
     def stale_pending_handoffs(self, cutoff):
         """Open handoffs older than `cutoff`, for the TTL sweeper.
         validating that never finished (restart mid-verify) also ages out."""
-        return self.all("SELECT * FROM handoffs WHERE status IN ('pending','validating') "
+        return self.all(f"SELECT * FROM handoffs WHERE status IN {_sql_in(HANDOFF_LIVE)} "
                         "AND created_at < ?", (cutoff,))
 
     def delete_handoff(self, hid):
         self.q("DELETE FROM handoffs WHERE id=?", (hid,))
 
     _ANSWER_UNCHANGED = object()
-
-    # Terminal handoff statuses; transition_handoff never moves a row out of one.
-    HANDOFF_TERMINAL = ("completed", "answered", "failed", "expired")
 
     def set_handoff_status(self, hid, status, answer=_ANSWER_UNCHANGED):
         """Raw status write, no guard and no revision bump. Test fixtures only —
@@ -407,7 +405,7 @@ class Store:
         or None when the row is gone, already terminal, or another writer won —
         callers must do side effects (events, credential health) only on a row."""
         row = self.get_handoff(hid)
-        if not row or row["status"] in self.HANDOFF_TERMINAL:
+        if not row or row["status"] in HANDOFF_TERMINAL:
             return None
         n = self.cas_handoff_status(hid, row["status"], to,
                                     int(row["revision"] or 0), answer=answer)
@@ -444,19 +442,19 @@ class Store:
     def get_auth_attempt(self, aid):
         return self.one("SELECT * FROM auth_attempts WHERE id=?", (aid,))
 
+    # Literal IN lists, not bound ?s: SQLite only picks the partial index
+    # idx_auth_attempts_one_active when the query repeats its WHERE term verbatim.
     def get_active_auth_attempt(self, computer_id):
         """The newest non-terminal attempt on this computer, or None. At most one
         should exist — login 409s while one is active."""
-        qs = ",".join("?" * len(self.AUTH_ATTEMPT_ACTIVE))
         return self.one(
-            f"SELECT * FROM auth_attempts WHERE computer_id=? AND status IN ({qs}) "
-            "ORDER BY created_at DESC LIMIT 1",
-            (computer_id, *self.AUTH_ATTEMPT_ACTIVE))
+            f"SELECT * FROM auth_attempts WHERE computer_id=? "
+            f"AND status IN {_sql_in(AUTH_ATTEMPT_ACTIVE)} ORDER BY created_at DESC LIMIT 1",
+            (computer_id,))
 
     def stale_active_auth_attempts(self, cutoff):
-        qs = ",".join("?" * len(self.AUTH_ATTEMPT_ACTIVE))
-        return self.all(f"SELECT * FROM auth_attempts WHERE status IN ({qs}) AND updated_at < ?",
-                        (*self.AUTH_ATTEMPT_ACTIVE, cutoff))
+        return self.all(f"SELECT * FROM auth_attempts WHERE status IN "
+                        f"{_sql_in(AUTH_ATTEMPT_ACTIVE)} AND updated_at < ?", (cutoff,))
 
     def get_auth_attempt_by_idempotency(self, computer_id, idempotency_key):
         if not idempotency_key:
@@ -465,12 +463,13 @@ class Store:
             "SELECT * FROM auth_attempts WHERE computer_id=? AND idempotency_key=?",
             (computer_id, idempotency_key))
 
-    def cas_auth_attempt_status(self, aid, from_status, to_status, revision_expect):
+    def cas_auth_attempt_status(self, aid, from_status, to_status, revision_expect,
+                                fail_reason=None):
         """Compare-and-set status + bump revision. rowcount 1 = this caller won."""
         return self.q(
-            "UPDATE auth_attempts SET status=?, revision=revision+1, updated_at=? "
-            "WHERE id=? AND status=? AND revision=?",
-            (to_status, now(), aid, from_status, revision_expect)).rowcount
+            "UPDATE auth_attempts SET status=?, revision=revision+1, updated_at=?, "
+            "fail_reason=COALESCE(?, fail_reason) WHERE id=? AND status=? AND revision=?",
+            (to_status, now(), fail_reason, aid, from_status, revision_expect)).rowcount
 
     def set_attempt_handoff(self, aid, handoff_id):
         return self.q(
@@ -618,7 +617,7 @@ class Store:
         may become a name, prompt, domain or username."""
         n = lambda sql, args=(): self.one(sql, args)["c"]
         return {
-            "computers": n("SELECT COUNT(*) c FROM computers"),
+            "computers": n("SELECT COUNT(*) c FROM computers WHERE state != 'deleted'"),
             "credentials": n("SELECT COUNT(*) c FROM credentials"),
             "schedules": n("SELECT COUNT(*) c FROM schedules"),
             "schedules_enabled": n("SELECT COUNT(*) c FROM schedules WHERE enabled=1"),
@@ -629,9 +628,13 @@ class Store:
 
     def prune_terminal_handoffs(self, cutoff):
         self.q("UPDATE handoffs SET screenshot=NULL WHERE screenshot IS NOT NULL "
-               "AND status IN ('completed','answered','failed','expired')")
-        return self.q("DELETE FROM handoffs WHERE status IN "
-                      "('completed','answered','failed','expired') AND created_at < ?",
+               f"AND status IN {_sql_in(HANDOFF_TERMINAL)}")
+        return self.q(f"DELETE FROM handoffs WHERE status IN {_sql_in(HANDOFF_TERMINAL)} "
+                      "AND created_at < ?", (cutoff,)).rowcount
+
+    def prune_terminal_auth_attempts(self, cutoff):
+        return self.q(f"DELETE FROM auth_attempts WHERE status IN "
+                      f"{_sql_in(AUTH_ATTEMPT_TERMINAL)} AND updated_at < ?",
                       (cutoff,)).rowcount
 
     def prune_old_runs(self, keep=1000):

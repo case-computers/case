@@ -2,13 +2,11 @@
 """Typed handoff state + verified continuation (restart recovery + Assist foundation).
 Run: .venv/bin/python tests/test_handoffs.py"""
 import os
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: the tests below write handoff rows, and an inherited
-# CASE_HOME would put them in a live box's DB. Same reasoning as tests/test_links.py.
-os.environ["CASE_HOME"] = "/tmp/case-handoffs-test"
+import _helpers
+
+_helpers.isolated_home()
 import handoffs  # noqa: E402
 import links  # noqa: E402
 from errors import ApiError  # noqa: E402
@@ -195,7 +193,7 @@ def test_otp_submit_resume_success_completes_and_pops_ctx():
         with mock.patch.object(handoffs, "get_computer", return_value=ROW), \
              mock.patch.object(handoffs, "desk_json",
                                return_value={"status": "success"}) as desk, \
-             mock.patch.object(handoffs, "emit", side_effect=lambda *a, **k: events.append(a)), \
+             mock.patch("events.emit", side_effect=lambda *a, **k: events.append(a)), \
              mock.patch.object(store, "record_credential_result") as rec:
             row = handoffs.submit_handoff_value("h_otp", "123456")
         assert row["status"] == "completed", row
@@ -349,6 +347,24 @@ def test_approval_deny_is_terminal_failed():
         _cleanup("h_otp")
 
 
+def test_resume_reason_mentioning_denied_is_a_soft_fail():
+    # A page saying "permission denied" is not the human saying deny.
+    _cleanup("h_otp")
+    try:
+        _persist("h_otp", "otp", "enter code", login_credential="chase",
+                 continuation="submit_value")
+        with mock.patch.object(handoffs, "get_computer", return_value=ROW), \
+             mock.patch.object(handoffs, "desk_json",
+                               return_value={"status": "failed", "reason": "Permission denied"}), \
+             mock.patch.object(store, "record_credential_result") as rec:
+            row = handoffs.submit_handoff_value("h_otp", "123456")
+        assert row["status"] == "pending", dict(row)
+        assert "h_otp" in handoffs.LOGIN_CTX
+        rec.assert_not_called()
+    finally:
+        _cleanup("h_otp")
+
+
 def test_approval_approve_persists_approve_not_done():
     """'approve' is also a verify_page synonym — must not collapse approval answers."""
     _cleanup("h_plain")
@@ -358,6 +374,47 @@ def test_approval_approve_persists_approve_not_done():
             row = handoffs.answer_handoff("h_plain", "approve")
         assert row["status"] == "completed", row
         assert row["answer"] == "approve", row
+    finally:
+        _cleanup("h_plain")
+
+
+def test_approval_takes_only_approve_or_deny():
+    # Anything but "deny" used to approve: "no", a stray OTP, an empty ntfy body.
+    _cleanup("h_plain")
+    try:
+        for bad in ("no", "reject", None, {}, "123456", "done"):
+            _persist("h_plain", "approval", "Ship it?", continuation="submit_value")
+            try:
+                handoffs.answer_handoff("h_plain", bad)
+                assert False, f"expected 400 for {bad!r}"
+            except ApiError as e:
+                assert e.status == 400, (bad, e)
+            row = store.get_handoff("h_plain")
+            assert row["status"] == "pending" and row["answer"] is None, (bad, dict(row))
+        _persist("h_plain", "approval", "Ship it?", continuation="submit_value")
+        row = handoffs.answer_handoff("h_plain", " Approve ")
+        assert row["status"] == "completed" and row["answer"] == "approve", dict(row)
+    finally:
+        _cleanup("h_plain")
+
+
+def test_public_answer_door_returns_the_public_shape():
+    import cased
+    from fastapi.testclient import TestClient
+    _cleanup("h_plain")
+    try:
+        store.insert_handoff("h_plain", "c_1", "approval", "Pay $500?", "iVBORw0KGgo=",
+                             "bank", continuation="submit_value")
+        client = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+        url = f"/answer/h_plain/{store.sign('answer:h_plain')}"
+        assert client.post(url, json={}).status_code == 400
+        assert store.get_handoff("h_plain")["status"] == "pending"
+        r = client.post(url, json={"value": "approve"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "completed" and body["answer"] == "approve", body
+        assert "screenshot" not in body and "screenshot_png_b64" not in body, body
+        assert "login_credential" not in body, body
     finally:
         _cleanup("h_plain")
 
@@ -407,7 +464,7 @@ def test_expire_stale_clears_login_ctx():
         store.q("UPDATE handoffs SET created_at=? WHERE id=?",
                 ("2000-01-01T00:00:00Z", "h_otp"))
         events = []
-        with mock.patch.object(handoffs, "emit", side_effect=lambda *a, **k: events.append(a)), \
+        with mock.patch("events.emit", side_effect=lambda *a, **k: events.append(a)), \
              mock.patch.object(store, "record_credential_result") as rec:
             handoffs.expire_stale()
         assert store.get_handoff("h_otp")["status"] == "expired"
@@ -522,8 +579,4 @@ def test_expire_stale_loses_race_to_a_finished_answer():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

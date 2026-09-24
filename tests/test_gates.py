@@ -4,13 +4,11 @@ Run: .venv/bin/python tests/test_gates.py"""
 import glob
 import os
 import shutil
-import sys
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: this suite writes audit files and wipes the audit
-# directory, and an inherited CASE_HOME would aim that at the real vault.
-os.environ["CASE_HOME"] = "/tmp/case-gates-test"
+import _helpers
+
+_helpers.isolated_home()
 from fastapi.testclient import TestClient  # noqa: E402
 
 import cased  # noqa: E402
@@ -118,6 +116,37 @@ def test_login_url_must_be_https():
             assert r.status_code != 400, (ok, r.text)
 
 
+def test_non_integer_body_values_are_a_400_not_a_500():
+    os.environ.pop("CASE_TOKEN", None)
+    row = {"id": "c_x", "desk_port": 1, "desk_token": "t"}
+    with mock.patch.object(cased.lifecycle, "ensure_running", return_value=row), \
+         mock.patch.object(cased.store, "touch"), \
+         mock.patch.object(cased, "desk_json", return_value={"ok": True}) as desk, \
+         mock.patch.object(cased.browse, "click_element", return_value={"ok": True}):
+        c = _client()
+        for path, body in (("exec", {"command": "ls", "timeout_s": "soon"}),
+                           ("exec", {"command": "ls", "timeout_s": -5}),
+                           ("eval", {"expression": "1", "timeout_s": [1]}),
+                           ("navigate", {"url": "https://x", "timeout_s": "1.5"}),
+                           ("wait", {"timeout_s": "x"}),
+                           ("click", {"ref": "abc"}),
+                           ("click", {"ref": None}),
+                           ("click", {"ref": -1}),
+                           ("hover", {"ref": {}}),
+                           ("upload", {"ref": "x", "path": "/home/agent/f"})):
+            r = c.post(f"/v1/computers/c_x/{path}", json=body)
+            assert r.status_code == 400, (path, body, r.status_code, r.text)
+            assert r.json()["error"]["code"] == "bad_request", r.text
+        # the forms that always worked still do: blank/0 is the default, the cap holds
+        assert c.post("/v1/computers/c_x/exec", json={"command": "ls", "timeout_s": 0}
+                      ).status_code == 200
+        assert desk.call_args.kwargs["timeout"] == 45
+        assert c.post("/v1/computers/c_x/exec", json={"command": "ls", "timeout_s": "9999"}
+                      ).status_code == 200
+        assert desk.call_args.kwargs["timeout"] == 615
+        assert c.post("/v1/computers/c_x/click", json={"ref": "7"}).status_code == 200
+
+
 def test_live_relay_needs_the_bearer_on_both_halves():
     # HTTP middleware never sees a websocket scope, so the socket has to check the
     # token itself or the desktop is one upgrade away from anyone.
@@ -193,10 +222,15 @@ def test_live_socket_relays_for_allowed_browsers_and_bearers():
                                              headers=headers) as ws:
                 assert ws.receive_bytes() == b"RFB 003.008\n"
 
+    # a human on the live view is activity: the session keeper reads last_active_at
+    with mock.patch.dict(os.environ, {"CASE_TOKEN": "", "CASE_DOCKER_NETWORK": ""}), \
+         mock.patch.object(cased.lifecycle, "ensure_running", return_value=row), \
+         mock.patch.object(cased, "ws_connect", side_effect=connect), \
+         mock.patch.object(cased.store, "touch") as touch:
+        with _client().websocket_connect("ws://127.0.0.1/v1/computers/c_x/live/websockify") as ws:
+            ws.receive_bytes()
+    touch.assert_called_with("c_x")
+
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

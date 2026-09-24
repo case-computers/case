@@ -14,6 +14,7 @@ import random
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,12 @@ from util import new_id, now
 
 SCHED_RUNNING = set()   # in-memory guard, fine while one cased process runs
 _LOCK = threading.Lock()   # guards the check-then-add on SCHED_RUNNING (sweeper vs run-now)
+# computer_id -> [runs using it, whether one of them woke it]. Two schedules can share
+# a box, and the one that woke it must not sleep it under the other: the last one out does.
+_HOLDERS = {}
+# computer_id -> lock ordering a run's wake after the last run's sleep of that box, so
+# a run starting mid-sleep waits and wakes it; _LOCK itself is never held over Docker.
+_GATES = {}
 
 
 def _wall_exists(t, hh, mm):
@@ -149,13 +156,19 @@ def run_brain(cid, prompt, name=""):
         return 127, f"mcp config not found at {MCP_CONFIG} — set CASE_MCP_CONFIG"
     # BYOK: stock path forces the caller's logged-in/subscription auth by blanking the
     # key, UNLESS the operator explicitly set one (their key = their cost, still BYOK).
-    # Template path owns its env untouched.
-    env = os.environ
-    if not BRAIN_CMD and not os.environ.get("ANTHROPIC_API_KEY"):
-        env = {**os.environ, "ANTHROPIC_API_KEY": ""}
+    # Template path owns its env and cwd untouched.
+    env, cwd = os.environ, None
+    if not BRAIN_CMD:
+        # case-mcp.json says `python3 mcp/case_mcp.py`: run from the config's directory
+        # (the repo root) with this interpreter, which has the deps, first on PATH
+        env = {**os.environ, "PATH": os.pathsep.join(
+            [os.path.dirname(sys.executable), os.environ.get("PATH", "")])}
+        cwd = os.path.dirname(os.path.abspath(MCP_CONFIG))
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            env["ANTHROPIC_API_KEY"] = ""
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=BRAIN_TIMEOUT, env=env)
+                           timeout=BRAIN_TIMEOUT, env=env, cwd=cwd)
         return p.returncode, (p.stdout or p.stderr or "").strip()[-800:]
     except subprocess.TimeoutExpired:
         return -1, f"brain run timed out ({BRAIN_TIMEOUT}s)"
@@ -203,16 +216,32 @@ def run_schedule(sid):
             return
         # sqlite3.Row has no dict.get — index like every other column.
         tz = s["tz"] if "tz" in s.keys() else None
-        # Reschedule FIRST so a hung/crashed run never wedges the slot.
-        store.set_schedule_next(sid, compute_next(s["kind"], s["spec"], s["jitter_s"], tz))
+        # Reschedule FIRST so a hung/crashed run never wedges the slot. A row that no
+        # longer computes (a zone tzdata no longer has, a hand edit) fails this run and
+        # comes back in a day, instead of raising out of every sweep unrecorded.
+        try:
+            spec = s["spec"]
+            if s["kind"] == "interval":
+                spec = max(60, int(spec))       # rows stored before the 60s floor
+            nxt, bad = compute_next(s["kind"], spec, s["jitter_s"], tz), None
+        except (ApiError, TypeError, ValueError) as e:
+            nxt, bad = (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"), e
+        store.set_schedule_next(sid, nxt)
         cid, rid, started, t0 = s["computer_id"], new_id("run"), now(), time.monotonic()
         code, summary, status, artifact = -1, "", "fail", None
         # Only the run that woke an asleep box may put it back, never borrow a live session
         # (and never sleep under an active AuthAttempt; do_sleep also 409s as a belt).
         woke_for_run = False
+        with _LOCK:
+            _HOLDERS.setdefault(cid, [0, False])[0] += 1
+            gate = _GATES.setdefault(cid, threading.Lock())
         try:
-            was_asleep = get_computer(cid)["state"] == "asleep"
-            do_wake(cid)
+            if bad:
+                raise bad
+            with gate:
+                was_asleep = get_computer(cid)["state"] == "asleep"
+                do_wake(cid)
             woke_for_run = was_asleep
             code, summary = run_brain(cid, s["prompt"], name=s["name"])
             status = "ok" if code == 0 else "fail"
@@ -233,11 +262,22 @@ def run_schedule(sid):
             summary = f"{type(e).__name__}: {e}"
             log.exception("schedule %s run failed", sid)
         finally:
-            try:
-                if woke_for_run and not store.active_attempt_exists(cid):
-                    do_sleep(cid)
-            except Exception:
-                log.exception("sleep after schedule %s", sid)
+            with _LOCK:
+                held = _HOLDERS[cid]
+                held[0] -= 1
+                held[1] = held[1] or woke_for_run
+                last = not held[0]
+            if last:
+                with gate:
+                    with _LOCK:    # a run that joined since takes over the sleep
+                        last = _HOLDERS.get(cid) is held and not held[0]
+                        if last:
+                            del _HOLDERS[cid]
+                    try:
+                        if last and held[1] and not store.active_attempt_exists(cid):
+                            do_sleep(cid)
+                    except Exception:
+                        log.exception("sleep after schedule %s", sid)
             store.insert_run(rid, sid, cid, started, now(), code, summary, artifact, status)
             store.set_schedule_result(sid, started, status)
             shot = " 📸" if artifact else ""
@@ -294,6 +334,3 @@ def delete_schedule(sid):
     if store.delete_schedule(sid) == 0:
         raise ApiError(404, "not_found", f"no schedule {sid}")
 
-
-def list_runs(sid):
-    return [dict(r) for r in store.list_runs(sid)]

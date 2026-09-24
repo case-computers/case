@@ -11,6 +11,7 @@ import json
 
 LOOP = None      # main asyncio loop, set at startup
 SUBS = []        # live subscriber queues
+QUEUE_MAX = 256  # a subscriber this far behind has stalled; it is dropped, not buffered
 
 
 def set_loop(loop):
@@ -21,12 +22,22 @@ def set_loop(loop):
 def emit(type_, data):
     if LOOP:
         for q in list(SUBS):
-            LOOP.call_soon_threadsafe(q.put_nowait, (type_, data))
+            try:
+                LOOP.call_soon_threadsafe(_offer, q, (type_, data))
+            except RuntimeError:     # loop closed (shutdown): nobody is listening
+                return
+
+
+def _offer(q, item):
+    try:
+        q.put_nowait(item)
+    except asyncio.QueueFull:
+        unsubscribe(q)               # sse_gen hangs up on it at its next heartbeat
 
 
 def subscribe():
     """Register a subscriber queue. Caller must unsubscribe() in finally."""
-    q = asyncio.Queue()
+    q = asyncio.Queue(maxsize=QUEUE_MAX)
     SUBS.append(q)
     return q
 
@@ -46,6 +57,8 @@ async def sse_gen(computer_id=None):
             try:
                 type_, data = await asyncio.wait_for(q.get(), timeout=15)
             except asyncio.TimeoutError:
+                if q not in SUBS:
+                    return           # dropped as stalled; the client reconnects
                 yield ": hb\n\n"
                 continue
             if computer_id and data.get("computer_id") != computer_id:

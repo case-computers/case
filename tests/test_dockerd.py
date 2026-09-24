@@ -2,10 +2,10 @@
 """dockerd network vs loopback reachability. Pure — no Docker daemon.
 Run: .venv/bin/python tests/test_dockerd.py"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ["CASE_HOME"] = "/tmp/case-dockerd-test"
+import _helpers
+
+_helpers.isolated_home()
 os.environ.pop("CASE_DOCKER_NETWORK", None)
 import dockerd  # noqa: E402
 
@@ -66,15 +66,16 @@ def test_deskclient_accepts_sqlite_row():
         def json(self):
             return {"ok": True}
 
-    orig = deskclient.requests.request
-    deskclient.requests.request = lambda method, url, headers=None, timeout=None, **kw: (
-        seen.update(url=url, headers=headers) or R())
+    session = type("S", (), {"request": lambda self, method, url, headers=None, timeout=None,
+                                     **kw: seen.update(url=url, headers=headers) or R()})()
+    orig = deskclient._session
+    deskclient._session = lambda: session
     try:
         deskclient.desk(row, "GET", "/health")
         assert seen["url"] == "http://127.0.0.1:32771/health"
         assert seen["headers"]["Authorization"] == "Bearer tok"
     finally:
-        deskclient.requests.request = orig
+        deskclient._session = orig
 
 
 def test_deskclient_url_follows_the_network():
@@ -87,14 +88,14 @@ def test_deskclient_url_follows_the_network():
         def json(self):
             return {}
 
-    def fake_request(method, url, headers=None, timeout=None, **kw):
+    def fake_request(self, method, url, headers=None, timeout=None, **kw):
         seen["url"] = url
         seen["headers"] = headers
         return R()
 
     import deskclient
-    orig = deskclient.requests.request
-    deskclient.requests.request = fake_request
+    orig = deskclient._session
+    deskclient._session = lambda: type("S", (), {"request": fake_request})()
     _net("case")
     try:
         deskclient.desk({"id": "c_ab", "desk_port": 8000, "desk_token": "secret"},
@@ -102,8 +103,20 @@ def test_deskclient_url_follows_the_network():
         assert seen["url"] == "http://case-c_ab:8000/health"
         assert seen["headers"]["Authorization"] == "Bearer secret"
     finally:
-        deskclient.requests.request = orig
+        deskclient._session = orig
         _net(None)
+
+
+def test_deskclient_reuses_one_session_per_thread():
+    import threading
+    import deskclient
+    here = deskclient._session()
+    assert deskclient._session() is here
+    other = []
+    t = threading.Thread(target=lambda: other.append(deskclient._session()))
+    t.start()
+    t.join()
+    assert other[0] is not here
 
 
 def test_vnc_url_hidden_when_computers_are_on_the_compose_network():
@@ -137,9 +150,7 @@ def test_create_clears_a_name_stuck_in_removal_and_retries_once():
         def remove_container(self, name, force=False):
             calls["removed"] = (name, force)
 
-    # dc() pings the cached client; without ping() it reconnects to real Docker.
-    fake = type("DC", (), {"containers": Containers(), "api": Api(),
-                           "ping": lambda self: True})()
+    fake = type("DC", (), {"containers": Containers(), "api": Api()})()
     old = dockerd._dc
     dockerd._dc = fake
     try:
@@ -149,12 +160,85 @@ def test_create_clears_a_name_stuck_in_removal_and_retries_once():
         dockerd._dc = old
 
 
+def test_destroy_names_a_volume_it_could_not_remove():
+    # NotFound is the normal "already gone"; a daemon that is down is not, and the
+    # volume it leaves behind holds a deleted computer's home.
+    import docker as dockerpy
+    from unittest import mock
+
+    class Gone:
+        def get(self, name):
+            raise dockerpy.errors.NotFound("gone")
+
+    class Down:
+        def get(self, name):
+            raise dockerpy.errors.DockerException("daemon unreachable")
+
+    old = dockerd._dc
+    try:
+        for vols, warned in ((Gone(), False), (Down(), True)):
+            dockerd._dc = type("DC", (), {"containers": Gone(), "volumes": vols})()
+            with mock.patch.object(dockerd.log, "warning") as warn:
+                dockerd.destroy_infra("c_ab", "case-c_ab")
+            assert warn.called is warned, (vols, warn.call_args_list)
+            if warned:
+                assert "case-c_ab" in warn.call_args.args[0] % warn.call_args.args[1:]
+    finally:
+        dockerd._dc = old
+
+
+def test_new_volumes_carry_the_cased_label():
+    from unittest import mock
+    vols = mock.Mock()
+    old = dockerd._dc
+    dockerd._dc = type("DC", (), {"volumes": vols})()
+    try:
+        dockerd.create_volume("case-c_ab")
+    finally:
+        dockerd._dc = old
+    vols.create.assert_called_once_with(name="case-c_ab", labels={"managed-by": "cased"})
+
+
+def test_cached_client_reconnects_only_when_the_daemon_went_away():
+    # No ping round trip before every call; a dead socket is what triggers a new client.
+    import requests
+    from unittest import mock
+
+    class Dead:
+        def get(self, name):
+            raise requests.ConnectionError("socket gone")
+
+    class Live:
+        def get(self, name):
+            return name
+
+    old = dockerd._dc
+    dockerd._dc = type("DC", (), {"containers": Live()})()
+    try:
+        with mock.patch.object(dockerd, "_connect") as connect:
+            assert dockerd.get_container("c_ab") == "case-c_ab"
+            connect.assert_not_called()
+            dockerd._dc = type("DC", (), {"containers": Dead()})()
+            connect.return_value = type("DC", (), {"containers": Live()})()
+            assert dockerd.get_container("c_ab") == "case-c_ab"
+            connect.assert_called_once()
+    finally:
+        dockerd._dc = old
+
+
+def test_managed_containers_is_one_listing_keyed_by_name():
+    from unittest import mock
+    box = mock.Mock(attrs={"Names": ["/case-c_ab"], "State": "running"})
+    listing = mock.Mock(return_value=[box])
+    old = dockerd._dc
+    dockerd._dc = type("DC", (), {"containers": type("C", (), {"list": listing})()})()
+    try:
+        assert dockerd.managed_containers() == {"case-c_ab": box}
+    finally:
+        dockerd._dc = old
+    listing.assert_called_once_with(all=True, sparse=True,
+                                    filters={"label": "managed-by=cased"})
+
+
 if __name__ == "__main__":
-    test_host_mode_dials_loopback_and_publishes_ports()
-    test_container_limits_cover_swap_and_pids()
-    test_compose_mode_uses_container_dns_and_no_host_ports()
-    test_deskclient_accepts_sqlite_row()
-    test_deskclient_url_follows_the_network()
-    test_vnc_url_hidden_when_computers_are_on_the_compose_network()
-    test_create_clears_a_name_stuck_in_removal_and_retries_once()
-    print("test_dockerd: ok")
+    _helpers.run_tests(globals())

@@ -9,12 +9,12 @@ from urllib.parse import urlsplit
 
 import auth_attempts
 import captcha
-import events
 import handoffs
 import links
 from config import log
+from errors import ApiError
 from deskclient import desk_json, eval_js, eval_value, screenshot_b64
-from store import store
+from store import HANDOFF_LIVE, store
 from util import row_get
 
 
@@ -80,23 +80,24 @@ def _post_login_challenge(row, cid, name, url, attempt_id=None):
         "const challengePath=path.split('/').some("
         "p=>/^(codeentry|challenge|checkpoint)$/i.test(p));"
         "const otp=/two.?factor|\\b2fa\\b|one.?time|verification code|authentication code|"
-        "enter the code|\\b\\d\\s?-?\\s?digit code|check your email/i.test(text)"
-        "||challengePath;"
-        "return {href, text:text.slice(0,240), otp};"
+        "enter the code|\\b\\d\\s?-?\\s?digit code/i.test(text)||challengePath;"
+        "const email=/check your email/i.test(text);"
+        "return {href, text:text.slice(0,240), otp, email};"
         "})()"
     )
     deadline = time.time() + 12.0
     while time.time() < deadline:
         v = eval_value(row, probe, timeout_s=8)
         v = v if isinstance(v, dict) else {}
-        if v.get("otp"):
+        if v.get("otp") or v.get("email"):
             prompt = f"{links.normalize_domain(url)}: {str(v.get('text') or 'enter the code')[:160]}"
             try:
                 shot = screenshot_b64(row)
             except Exception:
                 shot = None
+            # An email-only wall is deskd's email_verify: a live-desk (device) challenge.
             pub = auth_attempts.raise_challenge(
-                attempt_id, "otp", prompt, screenshot=shot,
+                attempt_id, "otp" if v.get("otp") else "device", prompt, screenshot=shot,
                 domain=links.normalize_domain(url))
             return auth_attempts.login_result(pub)
         time.sleep(0.8)
@@ -226,20 +227,23 @@ def _try_captcha_auto(row, cid, name, resume=True, record=True):
         # Settle then verify BEFORE resume, resume would clear state["login"].
         _settle_after_inject(row, seconds=9.0)
         verify = eval_js(row, captcha.VERIFY_JS, timeout_s=15)
-        v = (verify or {}).get("value") if isinstance(verify, dict) else None
-        page_blob = ""
-        has_password = False
-        if isinstance(v, dict):
-            page_blob = v.get("text") if isinstance(v.get("text"), str) else ""
-            has_password = bool(v.get("hasPassword"))
-        elif isinstance(v, str):
-            page_blob = v
-        if captcha.still_challenge(page_blob, has_password):
+        if captcha.verify_still_challenged(verify):
             log.info("captcha_auto=fail reason=still_present")
             if captcha_id:
                 captcha.report(captcha_id)
             return None
-        if not resume:
+        resumed = None
+        if resume:
+            # Verified clean, only now approve the deskd login hold.
+            try:
+                resumed = desk_json(row, "POST", "/login/resume",
+                                    json={"value": "approve"}, timeout=25)
+            except ApiError as e:
+                # The advance path runs after deskd let go of the login: same as
+                # resume=False, not a bad solve.
+                if e.status != 409 or e.code != "no_pending_login":
+                    raise
+        if resumed is None:
             # No deskd login hold to approve. Require the gate itself to be closed
             # before calling this a login, verify text alone can be clean on a page
             # that is still a checkpoint shell.
@@ -249,26 +253,17 @@ def _try_captcha_auto(row, cid, name, resume=True, record=True):
                     captcha.report(captcha_id)
                 return None
             if record:
-                store.record_credential_result(cid, name, "success")
-                events.emit("login_completed", {"computer_id": cid, "credential": name,
-                                                "status": "success"})
+                auth_attempts.record_login(cid, name, "success")
             log.info("captcha_auto=ok path=gate")
             return {"status": "success", "captcha_auto": True}
-        # Verified clean, only now approve the deskd login hold.
-        resumed = desk_json(row, "POST", "/login/resume",
-                            json={"value": "approve"}, timeout=25)
         if resumed.get("status") == "failed":
             log.info("captcha_auto=fail reason=resume_failed")
             if record:
-                store.record_credential_result(cid, name, "failed")
-                events.emit("login_completed", {"computer_id": cid, "credential": name,
-                                                "status": "failed"})
+                auth_attempts.record_login(cid, name, "failed")
             # Return failed to caller, do not create a dead handoff.
             return resumed if isinstance(resumed, dict) else {"status": "failed"}
         if record:
-            store.record_credential_result(cid, name, "success")
-            events.emit("login_completed", {"computer_id": cid, "credential": name,
-                                            "status": "success"})
+            auth_attempts.record_login(cid, name, "success")
         log.info("captcha_auto=ok")
         return {"status": "success", "captcha_auto": True}
     except Exception as e:
@@ -286,7 +281,7 @@ def _route_blocker(row, blocker):
         current_id = active["current_handoff_id"]
         if current_id:
             current = store.get_handoff(current_id)
-            if current and current["status"] in ("pending", "validating"):
+            if current and current["status"] in HANDOFF_LIVE:
                 return current_id
         if row_get(active, "status") == "proving":
             return None

@@ -11,6 +11,8 @@ import hmac
 import json
 import os
 import re
+import select
+import signal
 import struct
 import subprocess
 import threading
@@ -34,6 +36,8 @@ app = FastAPI()
 
 state = {
     "injecting": False,   # screenshots 423 while true
+    "injections": 0,      # injecting routes in flight; injecting is injections > 0
+    "inject_gen": 0,      # bumped as each injection starts, see injected_since
     "login": None,        # pending challenge ctx for /login/resume
     "in_login": False,    # suppress blocker watchdog during login flows
     "blocker": None,      # {"kind","prompt","fingerprint"} or None
@@ -45,9 +49,37 @@ def err(status, code, message):
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
 
 
+_inject_lock = threading.Lock()
+
+
+def inject_begin(alone=False):
+    """Close the gate for one injecting route; alone refuses while another runs."""
+    with _inject_lock:
+        if alone and state["injections"]:
+            return False
+        state["injections"] += 1
+        state["inject_gen"] += 1
+        state["injecting"] = True
+        return True
+
+
+def inject_end():
+    with _inject_lock:
+        state["injections"] -= 1
+        state["injecting"] = state["injections"] > 0
+
+
 def injecting():
     if state["injecting"]:
         return err(423, "credential_injection", "blocked during credential injection")
+
+
+def injected_since(gen):
+    # A route that passed the gate before an injection started can still read the page
+    # during it (an awaited /eval polling the password field), so it gets the 423 too.
+    if state["inject_gen"] != gen:
+        return err(423, "credential_injection", "blocked during credential injection")
+    return injecting()
 
 
 @app.middleware("http")
@@ -172,6 +204,7 @@ def do_action(a):
 
 @app.post("/action")
 def action(a: dict = Body(...)):
+    gen = state["inject_gen"]
     if (r := injecting()):
         return r
     try:
@@ -183,9 +216,11 @@ def action(a: dict = Body(...)):
     out = {"ok": True}
     if a.get("screenshot"):
         time.sleep(min(int(a.get("delay_ms", 300)), 5000) / 1000)
-        if (r := injecting()):
+        if (r := injected_since(gen)):
             return r
         out["screenshot_png_b64"] = base64.b64encode(grab()).decode()
+    if (r := injected_since(gen)):
+        return r
     return out
 
 
@@ -200,23 +235,67 @@ def home_path(path):
     return p if p.startswith(HOME + "/") else None
 
 
+def _slurp(f, buf, stop):
+    # drains past CAP so a writer never blocks on a full pipe, and polls so /exec can
+    # let go of a pipe a background job still holds instead of waiting out the job
+    fd = f.fileno()
+    while not stop.is_set():
+        if not select.select([fd], [], [], 0.1)[0]:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        if len(buf) <= CAP:
+            buf.extend(chunk)
+    f.close()
+
+
 @app.post("/exec")
 def exec_(b: dict = Body(...)):
+    gen = state["inject_gen"]
     if (r := injecting()):
         return r
     if "command" not in b:
         return err(400, "bad_request", "command required")
-    timeout = min(int(b.get("timeout_s", 30)), 600)
+    try:
+        timeout = min(int(b.get("timeout_s", 30)), 600)
+    except (TypeError, ValueError):
+        return err(400, "bad_request", "timeout_s must be an integer")
     cwd = b.get("cwd", "/home/agent")
     try:
-        p = subprocess.run(["bash", "-c", b["command"]], cwd=cwd, env=denv(),
-                           capture_output=True, timeout=timeout)
-        code, out, errb = p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired as e:
-        code, out = 124, e.stdout or b""
-        errb = (e.stderr or b"") + b"\n[deskd] command timed out"
+        # own session, so a timeout kills the whole command and not just bash
+        p = subprocess.Popen(["bash", "-c", b["command"]], cwd=cwd, env=denv(),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             start_new_session=True)
     except (FileNotFoundError, NotADirectoryError, PermissionError):
         return err(400, "bad_cwd", f"no such directory: {cwd}")
+    out, errb, stop = bytearray(), bytearray(), threading.Event()
+    readers = [threading.Thread(target=_slurp, args=(*io, stop), daemon=True)
+               for io in ((p.stdout, out), (p.stderr, errb))]
+    for t in readers:
+        t.start()
+    try:
+        code = p.wait(timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.wait()
+        code = None
+    # `cmd &` leaves the job holding the pipes after bash exits: stop listening
+    # shortly after, or the call would last as long as the job
+    grace = time.time() + 0.5
+    for t in readers:
+        t.join(max(0, grace - time.time()))
+    stop.set()
+    for t in readers:
+        t.join()
+    out, errb = bytes(out), bytes(errb)
+    if code is None:
+        code, errb = 124, errb + b"\n[deskd] command timed out"
+    if (r := injected_since(gen)):
+        return r
     truncated = len(out) > CAP or len(errb) > CAP
     return {"exit_code": code, "stdout": out[:CAP].decode(errors="replace"),
             "stderr": errb[:CAP].decode(errors="replace"), "truncated": truncated}
@@ -229,8 +308,11 @@ async def file_put(request: Request, path: str):
     p = home_path(path)
     if not p:
         return err(400, "bad_path", f"path must be under {HOME}/")
-    if int(request.headers.get("content-length") or 0) > FILE_MAX:
-        return err(413, "too_large", f"file over {FILE_MAX} bytes")
+    try:
+        if int(request.headers.get("content-length") or 0) > FILE_MAX:
+            return err(413, "too_large", f"file over {FILE_MAX} bytes")
+    except ValueError:
+        return err(400, "bad_request", "bad content-length")
     data = bytearray()
     async for chunk in request.stream():
         if len(data) + len(chunk) > FILE_MAX:
@@ -264,16 +346,21 @@ def file_get(path: str):
 
 # ---------- CDP ----------
 
+def page_ws():
+    """A websocket to the most-recently-active Chromium page."""
+    pages = [t for t in requests.get(f"{CDP}/json/list", timeout=5).json() if t["type"] == "page"]
+    if not pages:
+        raise RuntimeError("no chromium page target")
+    # suppress_origin: chromium 136+ rejects CDP websockets with an Origin header
+    return websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=30,
+                                       suppress_origin=True)
+
+
 class Tab:
     """One websocket to the most-recently-active Chromium page."""
 
     def __init__(self):
-        pages = [t for t in requests.get(f"{CDP}/json/list", timeout=5).json() if t["type"] == "page"]
-        if not pages:
-            raise RuntimeError("no chromium page target")
-        # suppress_origin: chromium 136+ rejects CDP websockets with an Origin header
-        self.ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=30,
-                                              suppress_origin=True)
+        self.ws = page_ws()
         self._id = 0
 
     def cmd(self, method, **params):
@@ -298,7 +385,9 @@ class Tab:
 
 
 def navigate(tab, url, timeout=25):
-    tab.cmd("Page.navigate", url=url)
+    # a DNS or TLS failure lands on chrome-error://, which would read as a foreign origin
+    if (e := tab.cmd("Page.navigate", url=url).get("errorText")):
+        raise RuntimeError(f"navigation failed: {e}")
     t0 = time.time()
     while time.time() - t0 < timeout:
         if tab.js("document.readyState") == "complete":
@@ -366,11 +455,15 @@ def press_enter(tab):
 
 @app.post("/eval")
 def eval_(b: dict = Body(...)):
+    gen = state["inject_gen"]
     if (r := injecting()):
         return r
     if "expression" not in b:
         return err(400, "bad_request", "body needs 'expression'")
-    timeout = min(int(b.get("timeout_s", 20)), 120)
+    try:
+        timeout = min(int(b.get("timeout_s", 20)), 120)
+    except (TypeError, ValueError):
+        return err(400, "bad_request", "timeout_s must be an integer")
     try:
         tab = Tab()
         try:
@@ -381,6 +474,8 @@ def eval_(b: dict = Body(...)):
             tab.close()
     except Exception as e:
         return err(502, "eval_error", f"{type(e).__name__}: {e}")
+    if (gated := injected_since(gen)):
+        return gated
     exc = r.get("exceptionDetails")
     if exc:
         desc = exc.get("exception", {}).get("description") or exc.get("text", "js exception")
@@ -418,6 +513,7 @@ FOCUS_PASS = (f"(()=>{{{VIS}const p=[...document.querySelectorAll('input[type=\"
 FOCUS_CODE = (f"(()=>{{{VIS}const c=[...document.querySelectorAll('{CODE_SEL}')].find(vis);"
               "if(!c)return false; c.focus(); if(c.select)c.select(); return true;})()")
 PAGE_TEXT = "(document.body ? document.body.innerText.slice(0, 5000) : '')"
+WATCH_JS = "[(document.body ? document.body.innerText.slice(0, 3000) : ''), location.href]"
 CLEAR_PASS = "[...document.querySelectorAll('input[type=\"password\"]')].forEach(p=>{p.value=''})"
 
 # Generic auth observation — no website names. The JS only collects raw material
@@ -617,8 +713,7 @@ def classify(tab, cred):
             fill(tab, FOCUS_CODE, totp(cred["totp_seed"]))
             press_enter(tab)
             settle(tab)
-            after = (tab.js(PAGE_TEXT) or "") + " " + (tab.js("location.href") or "")
-            if RE_FAIL.search(after) or RE_OTP.search(after):
+            if code_refused(tab):
                 return {"status": "failed", "reason": "totp code rejected"}
             return {"status": "success", "totp_used": True}
         # SMS OTP / other code challenge -> human (or Twilio, decided by cased)
@@ -631,6 +726,17 @@ def classify(tab, cred):
     if fields.get("pass"):
         return {"status": "failed", "reason": "still on login form after submit"}
     return {"status": "success"}
+
+
+def code_refused(tab):
+    """Why the page still refuses a submitted code, or None. Page text only, the
+    URL is the same `%2Fa` trap as in classify()."""
+    text = tab.js(PAGE_TEXT) or ""
+    if RE_FAIL.search(text):
+        return snippet(text, RE_FAIL)
+    if RE_OTP.search(text):
+        return "challenge still present"
+    return None
 
 
 def advanced_past_identifier(tab):
@@ -683,8 +789,11 @@ def apply_challenge_action(tab, kind, value=None):
     """Generic challenge action: otp/code fill+enter, or approval settle. Returns err str or None."""
     k = (kind or "").lower()
     if k in ("approval", "approve"):
-        if value is not None and str(value).lower() == "deny":
+        v = "" if value is None else str(value).lower()
+        if v == "deny":
             return "denied by human"
+        if v != "approve":
+            return "approval expects 'approve' or 'deny'"
         time.sleep(8)  # human approved out-of-band; let the site catch up
         settle(tab)
         return None
@@ -700,10 +809,13 @@ def apply_challenge_action(tab, kind, value=None):
 
 @app.post("/login")
 def login(b: dict = Body(...)):
+    if "credential" not in b or "url" not in b:
+        return err(400, "bad_request", "body needs 'credential' and 'url'")
     cred, url = b["credential"], b["url"]
+    if not inject_begin(alone=True):
+        return err(409, "injection_running", "another credential injection is running")
     state["login"] = None
     state["in_login"] = True
-    state["injecting"] = True
     try:
         tab = Tab()
         try:
@@ -725,19 +837,24 @@ def login(b: dict = Body(...)):
     except Exception as e:
         return {"status": "failed", "reason": f"login error: {type(e).__name__}: {e}"}
     finally:
-        state["injecting"] = False
+        inject_end()
         if not state["login"]:
             state["in_login"] = False
 
 
 @app.post("/login/resume")
 def login_resume(b: dict = Body(...)):
+    if "value" not in b:
+        return err(400, "bad_request", "body needs 'value'")
     value = str(b["value"])
-    ctx = state["login"]
-    if not ctx:
+    if not state["login"]:
         return err(409, "no_pending_login", "no login is waiting on a handoff")
-    state["login"] = None
-    state["injecting"] = True
+    if not inject_begin(alone=True):
+        return err(409, "injection_running", "another credential injection is running")
+    ctx, state["login"] = state["login"], None
+    if not ctx:
+        inject_end()
+        return err(409, "no_pending_login", "no login is waiting on a handoff")
     try:
         tab = Tab()
         try:
@@ -753,13 +870,8 @@ def login_resume(b: dict = Body(...)):
                 reason = apply_challenge_action(tab, "otp", value)
                 if reason:
                     return {"status": "failed", "reason": reason}
-            blob = (tab.js(PAGE_TEXT) or "") + " " + (tab.js("location.href") or "")
-            if RE_FAIL.search(blob):
-                return {"status": "failed", "reason": snippet(blob, RE_FAIL)}
-            page_text = tab.js(PAGE_TEXT) or ""
-            fields_ok = tab.js(HAS_FIELDS) is not None      # eval reachable
-            if fields_ok and RE_OTP.search(page_text):      # text only: href %2Fa trap, see classify()
-                return {"status": "failed", "reason": "challenge still present"}
+            if reason := code_refused(tab):
+                return {"status": "failed", "reason": reason}
             return {"status": "success"}
         finally:
             try:
@@ -770,7 +882,7 @@ def login_resume(b: dict = Body(...)):
     except Exception as e:
         return {"status": "failed", "reason": f"resume error: {type(e).__name__}: {e}"}
     finally:
-        state["injecting"] = False
+        inject_end()
         state["in_login"] = False
 
 
@@ -802,8 +914,9 @@ def auth_submit_challenge(b: dict = Body(...)):
     if str(kind).lower() in ("otp", "code") and (
             not isinstance(b.get("domains"), list) or not b["domains"]):
         return err(400, "bad_request", "body needs 'domains' for otp/code")
+    if not inject_begin(alone=True):
+        return err(409, "injection_running", "another credential injection is running")
     state["in_login"] = True
-    state["injecting"] = True
     try:
         tab = Tab()
         try:
@@ -815,16 +928,20 @@ def auth_submit_challenge(b: dict = Body(...)):
                 return err(400, "bad_request", "body needs 'value' for otp/code")
             if reason and reason.startswith("unknown challenge kind"):
                 return err(400, "bad_request", reason)
+            if not reason and str(kind).lower() in ("otp", "code"):
+                reason = code_refused(tab)
             if reason:
                 return {"ok": False, "reason": reason}
+            state["login"] = None   # the challenge a /login was held on is answered
             return {"ok": True}
         finally:
             tab.close()
     except Exception as e:
         return {"ok": False, "reason": f"submit_challenge error: {type(e).__name__}: {e}"}
     finally:
-        state["injecting"] = False
-        state["in_login"] = False
+        inject_end()
+        if not state["login"]:
+            state["in_login"] = False
 
 
 @app.post("/auth/navigate_verification")
@@ -928,12 +1045,7 @@ def capture_worker(cap):
     pending = {}          # our command id -> {url,status}, awaiting body reply
     next_id = [10000]     # keep clear of any low ids; events have no id anyway
     try:
-        pages = [t for t in requests.get(f"{CDP}/json/list", timeout=5).json()
-                 if t["type"] == "page"]
-        if not pages:
-            raise RuntimeError("no chromium page target")
-        ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=30,
-                                         suppress_origin=True)
+        ws = page_ws()
         ws.settimeout(2)
         ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
         while not cap["stop"].is_set():
@@ -1080,8 +1192,7 @@ def watchdog():
         try:
             tab = Tab()
             try:
-                text = (tab.js(PAGE_TEXT) or "")[:3000]
-                href = tab.js("location.href") or ""
+                text, href = tab.js(WATCH_JS) or ("", "")
             finally:
                 tab.close()
             # text only, and only once the page has painted. Matching the href raised a

@@ -4,14 +4,11 @@ Run: .venv/bin/python tests/test_telemetry.py"""
 import importlib
 import json
 import os
-import shutil
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-HOME = "/tmp/case-telemetry-test"
-shutil.rmtree(HOME, ignore_errors=True)
-os.environ["CASE_HOME"] = HOME
+import _helpers
+
+_helpers.isolated_home()
 os.environ.pop("CASE_TELEMETRY", None)
 os.environ.pop("DO_NOT_TRACK", None)
 
@@ -105,9 +102,18 @@ def test_counts_are_counts():
     assert all(type(v) is int for v in c.values()), c
 
 
+def test_deleted_computers_are_not_counted():
+    # destroy() keeps the row as a 'deleted' tombstone
+    for cid, state in (("c_tele_live", "asleep"), ("c_tele_gone", "deleted")):
+        store.delete_computer(cid)
+        store.insert_computer(cid, cid, "img", 1, 512, "vol", "tok")
+        store.set_state(cid, state)
+    try:
+        assert store.telemetry_counts("2000-01-01T00:00:00Z")["computers"] == 1
+    finally:
+        store.delete_computer("c_tele_live")
+        store.delete_computer("c_tele_gone")
+
+
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

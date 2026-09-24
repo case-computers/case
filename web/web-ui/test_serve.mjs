@@ -4,15 +4,20 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, isLocalMode, pageFile, clip, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } from './serve.mjs';
 import {
   CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
-  histToAnthropicMessages, anthropicThinkingFor, caseToolPlan,
+  histToAnthropicMessages, anthropicThinkingFor, caseToolPlan, clip,
 } from './case-tools.mjs';
+
+// serve.mjs loads threads.json at import and rewrites it; never the developer's own.
+process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
+process.env.CASE_TURN_TOKENS = '10000';   // small enough for the scripted turns below to cross 80%
+const { runTurn, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 assert.match(html, /x-anthropic-key/);
@@ -26,6 +31,10 @@ assert.match(html, /id="schedBtn"/);
 assert.match(html, /id="schedBtnM"/);
 assert.match(html, /Intl\.supportedValuesOf/);
 assert.match(html, /brain_key/);
+for (const m of html.matchAll(/innerHTML=[^\n]*apiErr\(j\)[^\n]*/g)) assert.match(m[0], /esc\(apiErr\(j\)/, 'error text is escaped before innerHTML');
+for (const m of html.matchAll(/'\/api\/(fs|file|creds|schedules|teach-tick)[^;]*/g)) {
+  assert.match(m[0], /compQ\(\)/, `${m[1]} names the picked computer: ${m[0]}`);
+}
 assert.match(fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8'), /schedulesRoute/);
 
 // threadTurns: reopening a thread shows text + tool calls; outputs and reasoning stay server-side
@@ -39,6 +48,19 @@ const view = threadTurns([
 assert.deepEqual(view.map((t) => t.who), ['you', 'tool', 'agent']);
 assert.equal(view[1].name, 'computer_snapshot');
 assert.ok(!JSON.stringify(view).includes('SECRET'));   // outputs never reach the reopen view
+assert.equal(view[1].ok, true);
+// a reopened thread shows which tools failed, not "ok" for all of them
+{
+  const t = threadTurns([
+    { type: 'function_call', call_id: 'a', name: 'computer_click_element', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'a', output: '{"ok":false,"status":409,"error":"stale ref","act":"click [3]"}' },
+    { type: 'function_call', call_id: 'b', name: 'computer_login', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'b', output: '{"ok":false,"error":"interrupted"}' },
+    { type: 'function_call', call_id: 'c', name: 'computer_snapshot', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'c', output: clip({ ok: true, act: 'snapshot', result: { elements: ['x'.repeat(9000)] } }) },
+  ]);
+  assert.deepEqual(t.map((x) => x.ok), [false, false, true]);
+}
 assert.deepEqual(threadTurns([{ role: 'user', shot: '/tmp/x.png', content: [{ type: 'input_text', text: '[screenshot]' }] }]), [],
   'screenshots stay model-only on reopen');
 assert.deepEqual(threadTurns([{ role: 'user', content: 'look', attaches: [{ name: 'invoice.pdf' }] }]),
@@ -219,11 +241,6 @@ const kept = histCloseOpenCalls([{ type: 'reasoning', summary: [] }], { keepReas
 assert.equal(kept[0].type, 'reasoning');
 
 assert.deepEqual(parseCaseUrl('http://cased:8787'), { hostname: 'cased', port: 8787, protocol: 'http:' });
-assert.equal(isLocalMode({ CASE_LOCAL: '1' }, 'example.com'), true);
-assert.equal(isLocalMode({ CASE_LOCAL: '0' }, '127.0.0.1'), false);
-assert.equal(isLocalMode({}, '127.0.0.1'), true);
-assert.equal(isLocalMode({}, 'cased'), true);
-assert.equal(isLocalMode({}, 'remote.example'), false);
 assert.equal(liveCid('/live/c_abc12/vnc.html'), 'c_abc12');
 assert.equal(liveCid('/live/vnc.html'), '');
 assert.equal(liveDestPath('/live/c_abc12/vnc.html?autoconnect=1'), '/vnc.html?autoconnect=1');
@@ -321,6 +338,10 @@ assert.equal(resolveChatModel('gpt-5.6-terra', 'anthropic'), 'claude-sonnet-4-6'
 {
   const tools = openaiToolsToAnthropic(CASE_TOOLS);
   assert.equal(tools[0].name, 'computer_navigate');
+  // caseToolPlan forwards button, so the schema has to let the model send it
+  const action = CASE_TOOLS.find((t) => t.name === 'computer_action').parameters.properties;
+  assert.deepEqual(action.button.enum, ['left', 'middle', 'right']);
+  assert.equal(caseToolPlan('computer_action', { type: 'click', x: 1, y: 2, button: 'right' }, 'c_1').json.button, 'right');
   assert.equal(tools[0].input_schema.required[0], 'url');
   assert.equal(tools[0].type, undefined);
 }
@@ -434,6 +455,9 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
 {
   const src = fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8');
   assert.match(src, /content\.push\(\{ type: 'image', source: \{ type: 'base64', media_type: 'image\/png', data: image_b64 \} \}\)/);
+  // live tool_result and persisted history are cut by the same head+tail clip
+  assert.match(src, /\{ type: 'text', text: clip\(rest\) \}/);
+  assert.ok(!/clipJson/.test(src));
   const items = [];
   const shots = new Set();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'case-dedupe-'));
@@ -463,7 +487,7 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(loopFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);
   assert.ok(!/responses\.create\(params\)/.test(loopFn), 'every round is abortable');
   assert.match(loopFn, /if \(gone\.signal\.aborted\) throw err;/, 'an abort never retries as a param fallback');
-  assert.match(loopFn, /if \(isRateLimited\(err\)\) throw err;/);
+  assert.match(loopFn, /if \(isRetryable\(err\)\) throw err;/);
   assert.match(loopFn, /else if \(summary !== 'auto'\)/);
   assert.ok(loopFn.lastIndexOf('histApplyCompaction') > loopFn.indexOf("histCloseOpenCalls(hist.items, { keepReasoning: true })"),
     'the tool round applies compaction only after closing its open calls');
@@ -484,6 +508,19 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(loopFn, /if \(!stopped\(\)\) emit\(\{ type: 'error'/);
   assert.match(html, /\/api\/chat\/steer/);
   assert.match(html, /steerPrompt/);
+  assert.match(html, /const setText=t=>\{raw=t;if\(!textFrame\)textFrame=requestAnimationFrame\(drawText\);\};/,
+    'a text_delta does not re-parse the whole reply');
+  assert.match(html, /if\(textFrame\)\{cancelAnimationFrame\(textFrame\);drawText\(\);\}\n    caret\.remove\(\);/,
+    'the last frame is drawn before the caret goes');
+  assert.match(html, /if\(nav!==navDrawn\)/, 'refresh repaints the sidebar only when it changed');
+  // switching threads mid-turn: a slow reopen never paints over a newer pick
+  // (where typed messages go is covered in test_nav.mjs)
+  assert.match(html, /if\(gen!==threadGen\)return;/);
+  assert.match(html, /const tid=steerTarget\(runTid,activeTid\);/);
+  assert.match(html, /ev\.type==='round'\)\{mark=/, 'the UI marks where each provider round began');
+  assert.match(html, /ev\.type==='round_reset'&&mark/, 'and drops a failed round\'s partial output on replay');
+  assert.match(caseToolsSrc, /emit\(\{ type: 'round_reset' \}\);\n      result = await withRateRetry\(\(\) => round\(rest\)/,
+    'the output_config fallback replays the round too');
   assert.match(loopFn, /eff=\$\{eff\}/, 'turn log reports billed tokens, not nominal');
   assert.match(serveSrc, /p === '\/api\/attach'/, 'user files land on disk, not in the chat body');
   assert.match(fs.readFileSync(fileURLToPath(new URL('./case-tools.mjs', import.meta.url)), 'utf8'),
@@ -540,6 +577,14 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(missing[0].content[0].type, 'input_text');
   const outside = hydrateShots([{ role: 'user', shot: '/etc/passwd', content: [{ type: 'input_text', text: '[screenshot]' }] }], dir);
   assert.equal(outside[0].content[0].type, 'input_text', 'paths outside the shots dir are refused');
+  // A turn reads each file once: with its memo, a later round needs no disk.
+  const memo = new Map();
+  const first = hydrateShots([item], dir, memo)[0];
+  const copy = path.join(dir, 'keep.png');
+  fs.renameSync(item.shot, copy);
+  assert.equal(hydrateShots([item], dir, memo)[0], first);
+  assert.equal(hydrateShots([item], dir)[0].content[0].type, 'input_text', 'without it the file is read again');
+  fs.renameSync(copy, item.shot);
   const legacy = [{ role: 'user', content: [{ type: 'input_image', detail: 'high', image_url: 'data:image/png;base64,' + png }] }];
   const moved = migrateShots(legacy, dir);
   assert.ok(moved[0].shot);
@@ -582,6 +627,16 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(hyd[0].content[2].type, 'input_text');
   assert.match(hyd[0].content[2].text, /notes\.md/);
   assert.match(hyd[0].content[2].text, /hello notes/);
+  {
+    const memo = new Map();
+    const turn = [{ role: 'user', content: '', attaches: [{ path: img.path, name: img.name, mime: img.mime }] }];
+    const once = hydrateAttaches(turn, dir, memo);
+    fs.renameSync(img.path, img.path + '.moved');
+    const again = hydrateAttaches(turn, dir, memo);
+    fs.renameSync(img.path + '.moved', img.path);
+    assert.deepEqual(again, once, 'an attachment is read once per turn');
+    assert.equal(again[0].content[0].type, 'input_image');
+  }
   const missing = hydrateAttaches([{
     role: 'user', content: '',
     attaches: [{ path: path.join(dir, 'nope.md'), name: 'gone.md', mime: 'text/plain' }],
@@ -634,6 +689,117 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
     { event: 'credential_added', data: { name: 'x' } },
   ]);
   assert.equal(rest, 'event: handoff_cre');
+}
+
+// ---- scripted turns: a fake cased and a fake provider behind global fetch ----
+async function fakeCased(routes) {
+  const hits = [];
+  const srv = http.createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    const hit = Object.entries(routes).find(([k]) => req.url.startsWith(k));
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(hit ? hit[1] : {}));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const was = process.env.CASE_URL;
+  process.env.CASE_URL = `http://127.0.0.1:${srv.address().port}/v1`;
+  return { hits, close: () => { process.env.CASE_URL = was; srv.close(); } };
+}
+/** One Messages SSE body per round: blocks are {text} or {tool, input}. */
+function anthropicSse({ blocks, usage = {} }) {
+  const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  let out = ev('message_start', { message: { id: 'msg', type: 'message', role: 'assistant', model: 'm', content: [],
+    stop_reason: null, usage: { input_tokens: 0, output_tokens: 1, ...usage } } });
+  blocks.forEach((b, index) => {
+    if (b.tool) {
+      out += ev('content_block_start', { index, content_block: { type: 'tool_use', id: b.id, name: b.tool, input: {} } });
+      out += ev('content_block_delta', { index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(b.input || {}) } });
+    } else {
+      out += ev('content_block_start', { index, content_block: { type: 'text', text: '' } });
+      out += ev('content_block_delta', { index, delta: { type: 'text_delta', text: b.text } });
+    }
+    out += ev('content_block_stop', { index });
+  });
+  const stop = blocks.some((b) => b.tool) ? 'tool_use' : 'end_turn';
+  return out + ev('message_delta', { delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 5 } })
+    + ev('message_stop', {});
+}
+async function withAnthropic(rounds, fn) {
+  const sent = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    sent.push(JSON.parse(init.body));
+    return new Response(anthropicSse(rounds.shift()), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  try { return await fn(sent); } finally { globalThis.fetch = orig; }
+}
+
+// Anthropic turns are bounded by billed input, not raw: 50k cache reads bill as
+// 5k. Past 80% of the budget the model gets BUDGET_WARN, and a re-snapshot of an
+// unchanged page is elided — the same as the OpenAI loop.
+{
+  const cased = await fakeCased({
+    '/v1/computers/c_1/page': { ok: true, url: 'https://x/', elements: ['[1] button "Go"'] },
+    '/v1/computers/c_1': { name: 'desk', credentials: [] },
+  });
+  const thread = { id: 't_budget', title: 't', agent: '', items: [], created: 0, updated: 0 };
+  const events = [];
+  try {
+    const result = await withAnthropic([
+      { usage: { input_tokens: 100, cache_read_input_tokens: 50000 }, blocks: [{ tool: 'computer_snapshot', id: 'tu_1' }] },
+      { usage: { input_tokens: 100, cache_read_input_tokens: 30000 }, blocks: [{ tool: 'computer_snapshot', id: 'tu_2' }] },
+      { usage: { input_tokens: 100 }, blocks: [{ text: 'done' }] },
+    ], async (sent) => {
+      const r = await runTurn({
+        thread, inputText: 'look', auth: { provider: 'anthropic', key: 'sk-ant' }, computerId: 'c_1',
+        model: 'claude-sonnet-4-6', emit: (e) => events.push(e),
+      });
+      assert.equal(sent.length, 3, 'raw input is over budget after round 1; billed (5.1k) is not');
+      const last = JSON.stringify(sent[2].messages.at(-1));
+      assert.ok(last.includes('Turn budget nearly spent'), 'round 3 carries the wrap-up warning');
+      assert.ok(last.includes('same elements as the previous snapshot'), 'the repeat snapshot is elided live');
+      return r;
+    });
+    assert.equal(result.finished, true);
+    assert.equal(result.text, 'done');
+    assert.ok(events.some((e) => e.type === 'think' && /80% of the turn budget/.test(e.text)));
+    const outs = thread.items.filter((it) => it.type === 'function_call_output');
+    assert.match(outs[1].output, /"unchanged":true/, 'history matches what the model saw');
+    assert.ok(!JSON.stringify(thread.items).includes('Turn budget nearly spent'), 'the warning is turn-scoped');
+  } finally {
+    cased.close();
+  }
+}
+
+// A png inside a tool's JSON (handoff_get, click with screenshot:true) reaches the
+// model as an image, not as clipped base64 text.
+{
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const cased = await fakeCased({
+    '/v1/handoffs/h_1': { id: 'h_1', status: 'pending', screenshot_png_b64: png },
+    '/v1/computers/c_1': { name: 'desk', credentials: [] },
+  });
+  const thread = { id: 't_hshot', title: 't', agent: '', items: [], created: 0, updated: 0 };
+  try {
+    await withAnthropic([
+      { blocks: [{ tool: 'handoff_get', id: 'tu_1', input: { handoff_id: 'h_1' } }] },
+      { blocks: [{ text: 'seen' }] },
+    ], async (sent) => {
+      await runTurn({
+        thread, inputText: 'check', auth: { provider: 'anthropic', key: 'sk-ant' }, computerId: 'c_1',
+        model: 'claude-sonnet-4-6', emit: () => {},
+      });
+      const res = sent[1].messages.at(-1).content[0];
+      assert.equal(res.type, 'tool_result');
+      assert.ok(!res.content[0].text.includes(png), 'no base64 in the text');
+      assert.match(res.content[0].text, /"status":"pending"/);
+      assert.deepEqual(res.content[1], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } });
+    });
+    assert.ok(thread.items.some((it) => it.shot), 'history keeps the png as a screenshot item');
+    assert.ok(!JSON.stringify(thread.items).includes(png));
+  } finally {
+    cased.close();
+  }
 }
 
 console.log('web-ui serve: all checks pass');

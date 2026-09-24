@@ -63,7 +63,7 @@ class Ntfy:
             prompt = " ".join((h.get("prompt") or "").split())    # header values can't hold newlines
             headers = {
                 **_auth_headers(),
-                "X-Title": ascii_(f"[Case] {h['kind']} — {computer_name}"),
+                "X-Title": ascii_(f"[Case] {h['kind']} - {computer_name}"),
                 "X-Tags": ",".join(tags),
                 "X-Message": ascii_(prompt)[:800],
             }

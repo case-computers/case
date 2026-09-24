@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
 <!-- Drive v2 experiment: chat spine + one rail surface with two modes (Browser | Files).
      Signature: the blue block caret marks the machine's attention everywhere.
      Local cased + live desk (see serve.mjs beside this). -->
@@ -624,7 +625,7 @@ body.acting .deskwrap::before{
             </div>
           </div>
           <div class="pane">
-            <div class="creds" id="credsPane">
+            <div class="creds">
               <div class="cred-list" id="credList"><div class="cred-empty">LOADING</div></div>
               <form class="cred-form" id="credForm" autocomplete="off">
                 <h4>Add credential</h4>
@@ -690,7 +691,7 @@ body.acting .deskwrap::before{
       </div>
       <div class="sched-err" id="schedErr"></div>
       <div class="modal-actions">
-        <button type="submit" class="btn solid" id="schedSave">SAVE</button>
+        <button type="submit" class="btn solid">SAVE</button>
       </div>
     </form>
   </div>
@@ -770,12 +771,16 @@ function caretEl(){const s=document.createElement('span');s.className='cur';retu
    computer than the one you picked would mean different logins, so a missing
    pick says so rather than quietly seating you somewhere else. */
 const PICK_KEY='case.drive.computer';
+const compQ=()=>'computer_id='+encodeURIComponent(comp&&comp.id||'');
 const readPick=()=>{try{return localStorage.getItem(PICK_KEY)||'';}catch{return '';}};
 const writePick=id=>{try{localStorage.setItem(PICK_KEY,id);}catch{/* private mode */}};
 let pickLost=false;   // picked a computer, it is not on the box any more
 let comps=[];
 let threads=[];
 let activeTid='';
+let loadingTid='';  // activeTid while openThread is still fetching it
+let runTid='';     // thread of the turn in flight; activeTid is only the one on screen
+let threadGen=0;
 const EMPTY_HTML='<div class="empty" id="emptyState"><div class="h">DRIVE</div><p class="say">Tell it what to do. Watch if you want.</p><div class="ex" id="exPrompt">“<b>open x.com and tell me what\'s on the home feed</b>”</div></div>';
 function showEmpty(){
   $('loginner').innerHTML=EMPTY_HTML;
@@ -790,8 +795,13 @@ async function refresh(){
     const want=(comp&&comp.id)||readPick();
     const found=want?comps.find(c=>c.id===want):null;
     pickLost=!!(want&&!found&&comps.length);
+    const had=comp;
     comp=found||(want?null:(comps.find(c=>c.state==='awake')||comps[0]||null));
     if(comp&&comp.id!==readPick())writePick(comp.id);
+    if(comp&&!had){   // a pane opened before the pick was known asked for no computer
+      if(mode==='files'&&!entries)loadDir(cwd);
+      if(mode==='creds')loadCreds();
+    }
     try{
       const rt=await fetch('/api/threads');
       const jt=await rt.json();
@@ -830,10 +840,12 @@ function navHtml(){
   if(!kids.length)return '<div class="navnote">No tasks yet. Type one below.</div>';
   return '<div class="threads"><div>'+kids.map(threadRowHtml).join('')+'</div></div>';
 }
+let navDrawn=null;
 function paint(){
   $('hostLabel').textContent=boxHost||'no box';
   $('compName').textContent=(comp&&comp.name)||(pickLost?'computer gone':'no computer');
-  $('navlist').innerHTML=navHtml();
+  const nav=navHtml();
+  if(nav!==navDrawn){navDrawn=nav;$('navlist').innerHTML=nav;}   // the 8s refresh mostly changes nothing
   $('keyBtn').textContent=currentKey()?'KEY ON':'KEY';
   $('keyBtn').classList.toggle('on',!!currentKey());
   $('keyBtnM').textContent=$('keyBtn').textContent;
@@ -853,7 +865,8 @@ function claimThread(tid,agentId){
   paint();
 }
 function newTask(){
-  activeTid='';
+  threadGen++;
+  activeTid=loadingTid='';
   showEmpty();
   paint();
   $('q').focus();
@@ -871,6 +884,7 @@ async function deleteThread(tid){
   if(row)row.classList.add('gone');
   fetch('/api/threads?id='+encodeURIComponent(tid),{method:'DELETE'}).catch(()=>{});
   threads=threads.filter(t=>t.id!==tid);
+  orphanQueued(tid);
   const finish=()=>{
     if(activeTid===tid){activeTid='';showEmpty();}
     paint();
@@ -887,12 +901,21 @@ async function deleteThread(tid){
 $('newAgent').addEventListener('click',()=>newTask());
 async function openThread(tid){
   if(tid===activeTid)return;
-  activeTid=tid;
+  const gen=++threadGen;
+  activeTid=loadingTid=tid;
   paint();
   try{
     const r=await fetch('/api/threads?id='+encodeURIComponent(tid));
     const j=await r.json();
-    if(!r.ok){inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';return;}
+    if(gen!==threadGen)return;   // clicked on to another thread meanwhile
+    loadingTid='';
+    // a thread that never loaded is not open: clicking it (or a queued prompt) retries
+    if(!r.ok){
+      activeTid='';paint();inner.innerHTML='<div class="empty">'+esc(j.error||'thread gone')+'</div>';
+      if(r.status===404)orphanQueued(tid);else holdQueued(tid,true);   // gone, or retried on the next open
+      drainQ('');
+      return;
+    }
     // Deliberately does NOT follow j.agent: moving you to another computer
     // behind a click means another set of logins. Deploy owns the seat.
     inner.innerHTML='';
@@ -904,7 +927,7 @@ async function openThread(tid){
         art.querySelector('p').textContent=turn.text;
       }else if(turn.who==='tool'){
         art.className='turn';
-        art.innerHTML='<div class="tool-block"><details class="tool-row"><summary><span class="tool-name"></span><span class="tool-st">ok</span></summary><pre class="tool-args"></pre></details></div>';
+        art.innerHTML='<div class="tool-block"><details class="tool-row'+(turn.ok===false?' fail':'')+'"><summary><span class="tool-name"></span><span class="tool-st">'+(turn.ok===false?'fail':'ok')+'</span></summary><pre class="tool-args"></pre></details></div>';
         art.querySelector('.tool-name').textContent=turn.name||'tool';
         art.querySelector('.tool-args').textContent=turn.args||'';
       }else{
@@ -915,8 +938,13 @@ async function openThread(tid){
       inner.appendChild(art);
     }
     log.scrollTop=log.scrollHeight;
+    holdQueued(tid,false);
+    if(promptQ.some(p=>queuedThread(p,'')===tid))drainQ(tid);
   }catch{
-    inner.innerHTML='<div class="empty">cannot reach the drive server</div>';
+    if(gen===threadGen){
+      activeTid=loadingTid='';paint();inner.innerHTML='<div class="empty">cannot reach the drive server</div>';
+      holdQueued(tid,true);drainQ('');
+    }
   }
 }
 
@@ -1029,7 +1057,7 @@ async function loadDir(p){
   const list=$('flist');
   list.classList.add('loading');
   try{
-    const r=await fetch('/api/fs?path='+encodeURIComponent(p));
+    const r=await fetch('/api/fs?path='+encodeURIComponent(p)+'&'+compQ());
     const j=await r.json();
     if(gen!==dirGen)return;
     if(!r.ok){renderList([{err:j.error||('http '+r.status)}],p);return;}
@@ -1079,14 +1107,14 @@ async function openFile(p){
   prev.classList.add('has');
   $('fhName').textContent=name;
   $('fhMeta').textContent='';
-  $('fhOpen').href='/api/file?path='+encodeURIComponent(p);
+  $('fhOpen').href='/api/file?path='+encodeURIComponent(p)+'&'+compQ();
   const bodyEl=$('fbody');
   bodyEl.innerHTML='<pre style="color:var(--faint)">loading…</pre>';
   const ent=(entries||[]).find(e=>(cwd==='/'?'':cwd)+'/'+e.name===p);
   if(ent)$('fhMeta').textContent=fmtSize(ent.size);
   if(IMG_RE.test(name)){
     if(gen!==fileGen)return;
-    bodyEl.innerHTML='<img alt="'+esc(name)+'" src="/api/file?path='+encodeURIComponent(p)+'">';
+    bodyEl.innerHTML='<img alt="'+esc(name)+'" src="/api/file?path='+encodeURIComponent(p)+'&amp;'+compQ()+'">';
     return;
   }
   if(!TEXT_RE.test(name)||(ent&&ent.size>1048576)){
@@ -1094,7 +1122,7 @@ async function openFile(p){
     return;
   }
   try{
-    const r=await fetch('/api/file?path='+encodeURIComponent(p));
+    const r=await fetch('/api/file?path='+encodeURIComponent(p)+'&'+compQ());
     if(gen!==fileGen)return;
     if(!r.ok){
       const j=await r.json().catch(()=>({}));
@@ -1133,7 +1161,7 @@ function renderCreds(){
 }
 async function loadCreds(){
   try{
-    const r=await fetch('/api/creds');
+    const r=await fetch('/api/creds?'+compQ());
     const j=await r.json();
     credRows=r.ok?(j.credentials||[]):[];
     if(!r.ok)$('credErr').textContent=j.error||('http '+r.status);
@@ -1148,7 +1176,7 @@ $('credList').addEventListener('click',async e=>{
   if(!confirm('Delete "'+name+'" from the vault?'))return;
   btn.disabled=true;
   try{
-    const r=await fetch('/api/creds?name='+encodeURIComponent(name),{method:'DELETE'});
+    const r=await fetch('/api/creds?name='+encodeURIComponent(name)+'&'+compQ(),{method:'DELETE'});
     if(!r.ok){const j=await r.json().catch(()=>({}));$('credErr').textContent=j.error||'delete failed';}
   }catch{$('credErr').textContent='cased down';}
   loadCreds();
@@ -1166,7 +1194,7 @@ $('credForm').addEventListener('submit',async e=>{
   const save=$('credSave');
   save.disabled=true;save.textContent='SAVING…';
   try{
-    const r=await fetch('/api/creds',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+    const r=await fetch('/api/creds?'+compQ(),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok){err.textContent=j.error||('http '+r.status);}
     else{$('credForm').reset();loadCreds();}
@@ -1283,9 +1311,9 @@ function paintSchedList(rows){
 async function loadSchedules(){
   $('schedErr').textContent='';
   try{
-    const r=await fetch('/api/schedules');
+    const r=await fetch('/api/schedules?'+compQ());
     const j=await r.json().catch(()=>[]);
-    if(!r.ok){$('schedList').innerHTML='<div class="sched-empty">'+(apiErr(j)||'could not load')+'</div>';return;}
+    if(!r.ok){$('schedList').innerHTML='<div class="sched-empty">'+esc(apiErr(j)||'could not load')+'</div>';return;}
     paintSchedList(Array.isArray(j)?j:[]);
   }catch{$('schedList').innerHTML='<div class="sched-empty">cased unreachable</div>';}
 }
@@ -1310,7 +1338,7 @@ $('schedList').addEventListener('click',async e=>{
   const id=row.dataset.id;
   if(e.target.classList.contains('sched-run')){
     try{
-      const r=await fetch('/api/schedules/run',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})});
+      const r=await fetch('/api/schedules/run?'+compQ(),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})});
       const j=await r.json().catch(()=>({}));
       $('schedErr').textContent=r.ok?'started':(apiErr(j)||'run failed');
     }catch{$('schedErr').textContent='cased unreachable';}
@@ -1318,7 +1346,7 @@ $('schedList').addEventListener('click',async e=>{
   }
   if(e.target.classList.contains('sched-del')){
     try{
-      const r=await fetch('/api/schedules?id='+encodeURIComponent(id),{method:'DELETE'});
+      const r=await fetch('/api/schedules?id='+encodeURIComponent(id)+'&'+compQ(),{method:'DELETE'});
       if(!r.ok){const j=await r.json().catch(()=>({}));$('schedErr').textContent=apiErr(j)||'delete failed';return;}
       loadSchedules();
     }catch{$('schedErr').textContent='cased unreachable';}
@@ -1356,7 +1384,7 @@ $('schedForm').addEventListener('submit',async e=>{
   if(name)body.name=name;
   $('schedErr').textContent='';
   try{
-    const r=await fetch('/api/schedules',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch('/api/schedules?'+compQ(),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok){$('schedErr').textContent=apiErr(j)||'save failed';return;}
     $('schedPrompt').value='';
@@ -1405,6 +1433,7 @@ const paintQ=()=>{
     chip.className='qchip';
     chip.innerHTML='<span class="qtxt"></span><button type="button" class="qx" aria-label="Remove queued prompt">×</button>';
     chip.querySelector('.qtxt').textContent=item.text||((item.files[0]&&item.files[0].name)||'queued');
+    if(p&&p.held)chip.title='Waits for its task to open';
     chip.querySelector('.qx').addEventListener('click',()=>{promptQ.splice(i,1);paintQ();});
     ql.appendChild(chip);
   });
@@ -1437,26 +1466,62 @@ $('go').addEventListener('submit',e=>{
   q.value='';q.style.height='auto';
   pending.length=0;paintAline();
   if(chatCtl){
-    if(files.length){promptQ.push({text:t,files});paintQ();return;}
+    if(files.length){promptQ.push({text:t,files,tid:activeTid});paintQ();return;}
     steerPrompt(t);return;
   }
+  if(loadingTid&&loadingTid===activeTid){promptQ.push({text:t,files,tid:activeTid});paintQ();return;}
   sendPrompt(t,files);
 });
+/* A message typed mid-turn steers the running turn only while that turn is on
+   screen. Typed into another thread or a new task, it waits in the queue for
+   that thread; queue items without one belong to the turn that ran. */
+function steerTarget(run,active){return run&&run!=='__pending'&&run===active?run:'';}
+function queuedThread(item,ran){
+  return item&&typeof item==='object'&&typeof item.tid==='string'&&item.tid!=='__pending'?item.tid:ran;
+}
+/* Send the next queued prompt to the thread it was typed into, never to whatever is
+   on screen. A thread that has to load first drains from openThread once it is up;
+   pick another meanwhile and the prompt stays queued until its thread is opened.
+   Prompts for the thread already on screen go first, so draining never pulls the
+   view away from it. A prompt whose thread failed to load is held, not retried on
+   a timer (that would switch the view unasked): the rest of the queue moves on and
+   it goes out when its thread next loads. */
+function drainQ(ran){
+  if(chatCtl)return;
+  const live=promptQ.filter(p=>!(p&&p.held));
+  if(!live.length)return;
+  const n=live.find(p=>activeTid&&queuedThread(p,ran)===activeTid)||live[0];
+  const to=queuedThread(n,ran);
+  if(to&&to!==activeTid){openThread(to);return;}
+  if(to&&loadingTid===to)return;   // sent into a view the load is about to replace
+  promptQ.splice(promptQ.indexOf(n),1);paintQ();
+  if(!to&&activeTid)newTask();
+  sendPrompt(n);
+}
+/* Prompts queued for a thread that is gone start a new task instead, so they are
+   neither lost nor left blocking the prompts queued behind them. */
+function orphanQueued(tid){
+  for(const p of promptQ)if(p&&typeof p==='object'&&p.tid===tid){p.tid='';delete p.held;}
+}
+function holdQueued(tid,held){
+  for(const p of promptQ)if(p&&typeof p==='object'&&p.tid===tid){if(held)p.held=true;else delete p.held;}
+}
 /* Mid-turn message: try to inject into the running turn; fall back to the
    local queue if the turn just ended (409) or the server is unreachable. */
 async function steerPrompt(t){
-  const tid=activeTid&&activeTid!=='__pending'?activeTid:'';
-  if(!tid){promptQ.push(t);paintQ();return;}
+  const tid=steerTarget(runTid,activeTid);
+  if(!tid){promptQ.push({text:t,files:[],tid:activeTid});paintQ();return;}
   try{
     const r=await fetch('/api/chat/steer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread_id:tid,input:t})});
-    if(!r.ok){promptQ.push(t);paintQ();return;}
+    if(!r.ok){promptQ.push({text:t,files:[],tid});paintQ();return;}
+    if(activeTid!==tid)return;   // on screen is another thread; reopening this one shows it
     const art=document.createElement('article');
     art.className='turn you';
     art.innerHTML='<div class="k">YOU</div><p></p>';
     art.querySelector('p').textContent=t;
     inner.appendChild(art);
     stick(true);
-  }catch{promptQ.push(t);paintQ();}
+  }catch{promptQ.push({text:t,files:[],tid});paintQ();}
 }
 async function sendPrompt(t,files){
   if(t&&typeof t==='object'&&!Array.isArray(t)){files=t.files||[];t=t.text||'';}
@@ -1475,6 +1540,7 @@ async function sendPrompt(t,files){
     const th=threads.find(x=>x.id===activeTid);
     if(th){th.updated=Date.now();th.pending=true;paint();}
   }
+  runTid=activeTid;
   const art=document.createElement('article');
   art.className='turn you';
   art.innerHTML='<div class="k">YOU</div><p></p>';
@@ -1492,8 +1558,12 @@ async function sendPrompt(t,files){
   const toolsEl=reply.querySelector('.tool-block');
   const pEl=reply.querySelector('.pmsg');
   let raw='';
+  let mark=null;   // render state when the provider round began; round_reset returns to it
   const caret=caretEl();
-  const setText=t=>{raw=t;pEl.innerHTML=md(raw);pEl.appendChild(caret);};  // machine types
+  let textFrame=0;
+  const drawText=()=>{textFrame=0;const was=nearBottom();pEl.innerHTML=md(raw);pEl.appendChild(caret);stick(was);};
+  // machine types; the markdown is re-parsed once a frame, not once per streamed delta
+  const setText=t=>{raw=t;if(!textFrame)textFrame=requestAnimationFrame(drawText);};
   const addText=t=>setText(raw+t);
   const pretty=v=>{if(v==null)return'';if(typeof v==='string')return v;try{return JSON.stringify(v,null,2);}catch{return String(v);}};
   const toolRow=ev=>{
@@ -1570,8 +1640,15 @@ async function sendPrompt(t,files){
             for(const el of $('navlist').querySelectorAll('[data-t="__pending"]')) el.dataset.t=ev.thread_id;
           }
           if(activeTid==='__pending')activeTid=ev.thread_id;
+          if(runTid==='__pending')runTid=ev.thread_id;
+          for(const p of promptQ)if(p&&p.tid==='__pending')p.tid=ev.thread_id;
         }
         else if(ev.type==='claim'&&ev.thread_id){claimThread(ev.thread_id,ev.agent);}
+        else if(ev.type==='round'){mark={raw,think:thinkEl.textContent,tools:toolsEl.children.length};}
+        else if(ev.type==='round_reset'&&mark){
+          setText(mark.raw);thinkEl.textContent=mark.think;
+          while(toolsEl.children.length>mark.tools)toolsEl.lastChild.remove();
+        }
         else if(ev.type==='think_delta'&&ev.text){thinkBlock.classList.add('has');thinkEl.textContent+=ev.text;}
         else if(ev.type==='think'&&ev.text){thinkBlock.classList.add('has');thinkEl.textContent+=(thinkEl.textContent?'\n\n':'')+ev.text;}
         else if(ev.type==='tool'||ev.type==='tool_args'){fillTool(toolRow(ev),ev);}
@@ -1603,10 +1680,13 @@ async function sendPrompt(t,files){
   }finally{
     chatCtl=null;
     $('stopBtn').hidden=true;
+    if(textFrame){cancelAnimationFrame(textFrame);drawText();}
     caret.remove();
     if(activeTid==='__pending')activeTid=''; // stream died before the thread was born
+    const ran=runTid!=='__pending'?runTid:'';
+    runTid='';
     refresh(); // state may have changed (wake on first tool); threads re-sync too
-    if(promptQ.length){const n=promptQ.shift();paintQ();sendPrompt(n);}
+    drainQ(ran);
   }
 }
 
@@ -1655,7 +1735,7 @@ $('teachStart').addEventListener('click',()=>{
 async function teachTick(){
   if(!teach.on)return;
   try{
-    const r=await fetch('/api/teach-tick',{method:'POST'});
+    const r=await fetch('/api/teach-tick?'+compQ(),{method:'POST'});
     const j=await r.json();
     if(!j.ok)return;
     if(j.gap){

@@ -33,9 +33,13 @@ for f in tests/test_*.py; do
   case "$f" in tests/test_acceptance.py) continue ;; esac
   .venv/bin/python "$f" || exit 1
 done
+.venv/bin/ruff check --select F,E9 control-plane mcp image tests
 npm --prefix web ci
 npm --prefix web test
 ```
+
+Unit tests run one file per process, as CI does: each file sets up its own vault
+when it is imported, so a single pytest run across the files shares one and fails.
 
 ## Acceptance tests (Docker)
 

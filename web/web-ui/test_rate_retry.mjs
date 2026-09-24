@@ -3,7 +3,9 @@
 // Pure-unit checks for the rate-limit retry. Run: node web/web-ui/test_rate_retry.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { isRateLimited, rateWaitS, withRateRetry } from './case-tools.mjs';
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
+import { isRateLimited, isRetryable, rateWaitS, withRateRetry } from './case-tools.mjs';
 
 // --- what counts as "too fast" -------------------------------------------
 assert.ok(isRateLimited({ status: 429 }));
@@ -14,12 +16,28 @@ assert.ok(isRateLimited({ message: 'Overloaded' }));
 assert.ok(!isRateLimited({ status: 400, message: "unsupported value: 'detailed'" }));
 assert.ok(!isRateLimited({ status: 401 }));
 assert.ok(!isRateLimited(undefined));
+// The SDKs run with maxRetries: 0, so their transient faults are ours to retry too.
+assert.ok(isRetryable({ status: 429 }));
+assert.ok(isRetryable({ status: 503 }));
+assert.ok(isRetryable({ status: 408 }));
+assert.ok(isRetryable(new OpenAI.APIConnectionError({ message: undefined })));
+assert.ok(isRetryable(new Anthropic.APIConnectionTimeoutError()));
+assert.ok(!isRetryable(new Anthropic.APIUserAbortError()));
+assert.ok(!isRetryable({ status: 400, message: 'Request timed out' }), 'a 400 is never transient');
+assert.ok(!isRetryable({ status: 401 }));
 
 // --- how long to wait ----------------------------------------------------
 // the server's own hint wins over the exponential guess
 assert.equal(rateWaitS({ message: 'try again in 12s' }, 0), 12.5);
 assert.equal(rateWaitS({ headers: { 'retry-after': '9' } }, 0), 9.5);
 assert.equal(rateWaitS({ response: { headers: new Map([['retry-after', '4']]) } }, 0), 4.5);
+// what the SDKs actually throw: APIError.headers is a fetch Headers object
+{
+  const h = new Headers({ 'retry-after': '30' });
+  assert.equal(rateWaitS(Anthropic.APIError.generate(429, { error: { type: 'rate_limit_error', message: 'slow' } }, 'slow', h), 0), 30.5);
+  assert.equal(rateWaitS(OpenAI.APIError.generate(429, { message: 'slow' }, 'slow', h), 0), 30.5);
+  assert.equal(rateWaitS({ status: 429, headers: new Headers() }, 1), 2.5, 'no header: exponential');
+}
 // no hint: exponential in the attempt number
 assert.equal(rateWaitS({ status: 429 }, 0), 1.5);
 assert.equal(rateWaitS({ status: 429 }, 3), 8.5);
@@ -47,9 +65,25 @@ const out = await withRateRetry(async () => {
 }, (ev) => seen.push(ev));
 assert.equal(out, 'round done');
 assert.equal(calls, 3);
-assert.equal(seen.length, 2, 'one notice per wait');
-assert.ok(seen.every((e) => e.type === 'think' && e.rate === true), 'notices carry rate:true so headless consumers can log them');
-assert.match(seen[0].text, /rate limited — retrying in 1s/);
+// a replay re-streams the round: the UI is told where it began and to drop the
+// failed attempt's partial output before each retry
+assert.deepEqual(seen.map((e) => e.type), ['round', 'round_reset', 'think', 'round_reset', 'think']);
+const notes = seen.filter((e) => e.type === 'think');
+assert.ok(notes.every((e) => e.rate === true), 'notices carry rate:true so headless consumers can log them');
+assert.match(notes[0].text, /rate limited — retrying in 1s/);
+
+// a transient 5xx is retried the same way, and the notice does not call it a rate limit
+{
+  const notes = [];
+  let n = 0;
+  const r = await withRateRetry(async () => {
+    n += 1;
+    if (n === 1) throw Object.assign(new Error('502 bad gateway — try again in 0.01s'), { status: 502 });
+    return 'ok';
+  }, (ev) => notes.push(ev));
+  assert.equal(r, 'ok');
+  assert.match(notes.find((e) => e.type === 'think').text, /^provider error — retrying in 1s/);
+}
 
 // retries do run dry — the caller has to see the error, not hang forever
 calls = 0;
@@ -70,7 +104,7 @@ assert.equal(calls, 3, 'tries is a hard cap');
       const err = new Error('rate limited');
       err.status = 429;
       throw err;
-    }, () => ctl.abort(), 5, ctl.signal),
+    }, (e) => { if (e.type === 'think') ctl.abort(); }, 5, ctl.signal),
     (err) => err?.name === 'AbortError',
   );
   assert.equal(n, 1, 'disconnect stops retries before another provider request');
@@ -82,9 +116,12 @@ assert.equal(calls, 3, 'tries is a hard cap');
 // fire on a rate limit: no backoff, and serve.mjs's `summary` is sticky for the turn.
 const serve = fs.readFileSync(new URL('./serve.mjs', import.meta.url), 'utf8');
 assert.match(serve, /if \(gone\.signal\.aborted\) throw err;/);
-assert.match(serve, /if \(isRateLimited\(err\)\) throw err;/);
+assert.match(serve, /if \(isRetryable\(err\)\) throw err;/);
 assert.match(serve, /else if \(summary !== 'auto'\)/);
 const tools = fs.readFileSync(new URL('./case-tools.mjs', import.meta.url), 'utf8');
-assert.match(tools, /!params\.output_config \|\| isRateLimited\(err\)/);
+assert.match(tools, /!params\.output_config \|\| isRetryable\(err\)/);
+// withRateRetry is the whole retry policy: SDK retries under it multiply to 15 requests.
+assert.match(tools, /new Anthropic\(\{ apiKey: key, maxRetries: 0 \}\)/);
+assert.match(serve, /new OpenAI\(\{ apiKey: auth\.key, maxRetries: 0 \}\)/);
 
 console.log('rate retry ok');

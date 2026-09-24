@@ -2,15 +2,11 @@
 """Auth attempt long-poll wait (cursor + event wake).
 Run: .venv/bin/python tests/test_auth_wait.py"""
 import asyncio
-import os
-import shutil
-import sys
-import tempfile
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-_HOME = tempfile.mkdtemp(prefix="case-auth-wait-")
-os.environ["CASE_HOME"] = _HOME
+import _helpers
+
+_helpers.isolated_home()
 
 import auth_attempts  # noqa: E402
 import events  # noqa: E402
@@ -272,16 +268,17 @@ def test_wait_safe_after_restart_style_reread():
         await task
         return out
 
-    out = _run(go())
+    with mock.patch.object(auth_attempts, "WAIT_REREAD_S", 0.1):
+        out = _run(go())
     assert out["changed"] is True
     assert out["attempt"]["status"] == "cancelled"
 
 
-def _awaiting_with_child(hid):
+def _awaiting_with_child(hid, kind="otp"):
     a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
     auth_attempts._cas_or_conflict(a["id"], "created", "advancing", 0)
     store.insert_handoff(
-        hid, "c_1", "otp", "enter code", None, "github",
+        hid, "c_1", kind, "enter code", None, "github",
         domain="example.com", attempt_id=a["id"], sequence=1, revision=1)
     store.set_attempt_handoff(a["id"], hid)
     auth_attempts._cas_or_conflict(a["id"], "advancing", "awaiting_human", 1)
@@ -334,6 +331,30 @@ def test_wait_timeout_settings_page_mentions_2fa_still_advances():
     assert store.get_handoff("h_settings_page")["status"] == "completed"
 
 
+def test_wait_timeout_page_verify_child_needs_the_gate_closed():
+    # deskd's text signals miss an iframe captcha gate; the page check must agree too.
+    _cleanup()
+    aid, rev = _awaiting_with_child("h_gate", kind="captcha")
+    clean = {"ok": True, "observation": {"challenge_signals": [], "visible_fields": {}}}
+
+    async def go(still_challenged):
+        events.set_loop(asyncio.get_running_loop())
+        with mock.patch("lifecycle.get_computer", return_value=COMP), \
+             mock.patch("deskclient.observe_auth", return_value=clean), \
+             mock.patch.object(handoffs, "_page_still_challenged",
+                               return_value=still_challenged):
+            return await auth_attempts.wait_attempt(
+                aid, after_revision=rev, timeout_s=1)
+
+    out = _run(go(True))
+    assert out["wait_status"] == "timeout", out
+    assert out["attempt"]["status"] == "awaiting_human", out
+    assert store.get_handoff("h_gate")["status"] == "pending"
+    out = _run(go(False))
+    assert out["attempt"]["status"] == "unverified", out
+    assert store.get_handoff("h_gate")["status"] == "completed"
+
+
 def test_wait_timeout_challenge_still_up_keeps_waiting():
     _cleanup()
     aid, rev = _awaiting_with_child("h_still_up")
@@ -361,15 +382,4 @@ def json_dumps(obj):
 
 
 if __name__ == "__main__":
-    try:
-        for name, fn in sorted(globals().items()):
-            if name.startswith("test_"):
-                fn()
-                print("ok", name)
-        print("PASS")
-    finally:
-        try:
-            store.db.close()
-        except Exception:
-            pass
-        shutil.rmtree(_HOME, ignore_errors=True)
+    _helpers.run_tests(globals())

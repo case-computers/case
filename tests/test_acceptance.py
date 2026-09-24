@@ -66,6 +66,7 @@ def child_env(parent, case_home, port, token, image):
         "CASE_PORT": str(port),
         "CASE_TOKEN": token,
         "CASE_IMAGE": image,
+        "CASE_TELEMETRY": "0",   # the child is cased.py, not a test_ script
     })
     return env
 

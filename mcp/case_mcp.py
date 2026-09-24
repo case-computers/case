@@ -11,13 +11,16 @@ CASE_MCP_HTTP=1 → streamable-http, stateless. Binds 127.0.0.1 by default
 Publishing it further is the operator's reverse proxy's job (TLS + bearer).
 """
 import base64
+import functools
 import os
 import re
 import secrets
 import time
 
+import anyio
 import requests
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.transport_security import TransportSecuritySettings
 
 BASE = os.environ.get("CASE_URL", "http://127.0.0.1:8787/v1")
 HTTP = os.environ.get("CASE_MCP_HTTP") == "1"
@@ -25,9 +28,30 @@ BIND = (os.environ.get("CASE_MCP_BIND") or "127.0.0.1").strip() or "127.0.0.1"
 # In HTTP mode this is one id for the whole box (stateless: no per-client session) —
 # a box serves one person, so the audit log stays as useful as it is over stdio.
 SESSION = "mcp_" + secrets.token_hex(4)   # one per MCP process; keys cased's audit log
+
+
+def allowed_hosts():
+    """Names a browser may address us as; anything else is a rebinding page."""
+    hosts = ["127.0.0.1", "localhost", "[::1]", "mcp"]
+    hosts += [h.strip().lower()
+              for h in (os.environ.get("CASE_ALLOWED_HOSTS") or "").split(",") if h.strip()]
+    pub = (os.environ.get("CASE_PUBLIC_HOST") or "").strip().lower()
+    if pub:
+        hosts.append(pub)
+    return hosts
+
+
+# The SDK only checks Host/Origin by itself when bound to loopback, and compose binds
+# 0.0.0.0 — so name the same hosts cased and Drive accept, on any port or scheme.
+_HOSTS = allowed_hosts()
+SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[h + p for h in _HOSTS for p in ("", ":*")],
+    allowed_origins=[f"{s}://{h}{p}" for s in ("http", "https")
+                     for h in _HOSTS for p in ("", ":*")])
 # stateless_http: no server-side session state, so a proxy or service restart never
 # strands a client mid-session. Harmless over stdio.
-mcp = FastMCP("case", stateless_http=True,
+mcp = FastMCP("case", stateless_http=True, transport_security=SECURITY,
               host=BIND, port=int(os.environ.get("CASE_MCP_PORT", "8788")))
 
 if HTTP:
@@ -41,12 +65,21 @@ if HTTP:
         return PlainTextResponse("ok")
 
 
-def _headers(**extra):
+def tool(fn):
+    """mcp.tool(), run in a worker thread: FastMCP calls sync tools on the event loop,
+    where one 280s computer_login stalls every client and /health. Returns fn as is."""
+    @functools.wraps(fn)
+    async def run(**kw):
+        return await anyio.to_thread.run_sync(functools.partial(fn, **kw))
+    mcp.tool()(run)
+    return fn
+
+
+def _headers():
     h = {"X-Case-Session": SESSION}
     tok = (os.environ.get("CASE_TOKEN") or "").strip()
     if tok:
         h["Authorization"] = "Bearer " + tok
-    h.update(extra)
     return h
 
 
@@ -63,7 +96,7 @@ def call(method, path, **kw):
     return r
 
 
-@mcp.tool()
+@tool
 def computer_create(name: str = "") -> dict:
     """Create a persistent computer (Linux desktop + Chromium). Blocks until running.
     Returns the computer incl. its `id` — pass that id to every other tool.
@@ -73,7 +106,7 @@ def computer_create(name: str = "") -> dict:
     return call("POST", "/computers", json={"name": name} if name else {}).json()
 
 
-@mcp.tool()
+@tool
 def computer_list() -> dict:
     """List all computers with state, resources and VNC URL.
     `vnc_url` is bound to the *host's* loopback and its port changes on every wake —
@@ -82,7 +115,7 @@ def computer_list() -> dict:
     return call("GET", "/computers").json()
 
 
-@mcp.tool()
+@tool
 def computer_screenshot(computer_id: str, marks: bool = False) -> Image:
     """Screenshot of the computer's display (1280x800 by default; see computer_list
     display for the actual size). Wakes the computer if asleep.
@@ -93,12 +126,12 @@ def computer_screenshot(computer_id: str, marks: bool = False) -> Image:
     return Image(data=r.content, format="png")
 
 
-@mcp.tool()
-def computer_action(computer_id: str, type: str, x: int = None, y: int = None,
-                    button: str = None, text: str = None, keys: str = None,
-                    dy: int = None, ms: int = None,
-                    from_x: int = None, from_y: int = None,
-                    to_x: int = None, to_y: int = None,
+@tool
+def computer_action(computer_id: str, type: str, x: int | None = None, y: int | None = None,
+                    button: str | None = None, text: str | None = None, keys: str | None = None,
+                    dy: int | None = None, ms: int | None = None,
+                    from_x: int | None = None, from_y: int | None = None,
+                    to_x: int | None = None, to_y: int | None = None,
                     screenshot: bool = False) -> object:
     """Perform a UI action: click|double_click|move|drag|scroll|type|key|wait.
     Coordinates are pixels, origin top-left of the display (1280x800 by default;
@@ -123,15 +156,18 @@ def computer_action(computer_id: str, type: str, x: int = None, y: int = None,
     return out
 
 
-@mcp.tool()
+@tool
 def computer_exec(computer_id: str, command: str, timeout_s: int = 30) -> dict:
-    """Run a shell command on the computer (bash, as user 'agent')."""
+    """Run a shell command on the computer (bash, as user 'agent'). Returns when bash
+    exits; a timeout kills the command and everything it started. Start background
+    jobs as `nohup cmd >/dev/null 2>&1 &` — output a job writes after bash exits is
+    lost."""
     return call("POST", f"/computers/{computer_id}/exec", params={"wake": "true"},
                 json={"command": command, "timeout_s": timeout_s},
                 timeout=timeout_s + 30).json()
 
 
-@mcp.tool()
+@tool
 def computer_eval(computer_id: str, expression: str, timeout_s: int = 20) -> dict:
     """Evaluate a JavaScript expression in the computer's active browser tab
     (CDP Runtime.evaluate, JSON result, promises awaited). Prefer this over
@@ -149,7 +185,7 @@ def computer_eval(computer_id: str, expression: str, timeout_s: int = 20) -> dic
                 timeout=timeout_s + 20).json()
 
 
-@mcp.tool()
+@tool
 def computer_navigate(computer_id: str, url: str, timeout_s: int = 30) -> dict:
     """Point the computer's browser at url and block until the page has loaded.
     One call — do not follow it with readyState polling. Returns
@@ -165,7 +201,7 @@ def computer_navigate(computer_id: str, url: str, timeout_s: int = 30) -> dict:
                 timeout=timeout_s + 20).json()
 
 
-@mcp.tool()
+@tool
 def computer_snapshot(computer_id: str) -> dict:
     """Numbered list of the visible interactive elements on the computer's active
     browser tab — the cheap way to see what's clickable. PREFER THIS OVER
@@ -185,9 +221,9 @@ def computer_snapshot(computer_id: str) -> dict:
     return call("GET", f"/computers/{computer_id}/page", params={"wake": "true"}).json()
 
 
-@mcp.tool()
-def computer_click_element(computer_id: str, ref: int, name: str = None,
-                           text: str = None, screenshot: bool = False) -> dict:
+@tool
+def computer_click_element(computer_id: str, ref: int, name: str | None = None,
+                           text: str | None = None, screenshot: bool = False) -> dict:
     """Click element [ref] from the last computer_snapshot. Pass name (the quoted
     text from the snapshot line) so a changed page is caught: on mismatch this
     REFUSES to click and returns {ok:false, stale:true, snapshot} unless exactly
@@ -211,8 +247,8 @@ def computer_click_element(computer_id: str, ref: int, name: str = None,
                 params={"wake": "true"}, json=body, timeout=60).json()
 
 
-@mcp.tool()
-def computer_hover(computer_id: str, ref: int, name: str = None) -> dict:
+@tool
+def computer_hover(computer_id: str, ref: int, name: str | None = None) -> dict:
     """Hover the OS pointer over snapshot [ref] without clicking — opens menus
     that only appear on hover. Pass name so a changed page is refused."""
     body = {"ref": ref}
@@ -222,8 +258,8 @@ def computer_hover(computer_id: str, ref: int, name: str = None) -> dict:
                 params={"wake": "true"}, json=body, timeout=40).json()
 
 
-@mcp.tool()
-def computer_upload(computer_id: str, ref: int, path: str, name: str = None) -> dict:
+@tool
+def computer_upload(computer_id: str, ref: int, path: str, name: str | None = None) -> dict:
     """Assign a file already on the computer (path under /home/agent/, ≤5MB) to
     snapshot [ref], which must be input[type=file]. Never send file bytes through
     this tool — write the file with computer_file_put or computer_exec first."""
@@ -234,7 +270,7 @@ def computer_upload(computer_id: str, ref: int, path: str, name: str = None) -> 
                 params={"wake": "true"}, json=body, timeout=90).json()
 
 
-@mcp.tool()
+@tool
 def computer_fill(computer_id: str, fields: list, submit: bool = False) -> dict:
     """Fill a whole form in ONE call: fields=[{"ref": 13, "value": "jane@x.com"}, …]
     with refs from computer_snapshot. Uses native value setters + input/change
@@ -253,8 +289,8 @@ def computer_fill(computer_id: str, fields: list, submit: bool = False) -> dict:
                 params={"wake": "true"}, json=body, timeout=60).json()
 
 
-@mcp.tool()
-def computer_wait_for(computer_id: str, selector: str = None, text: str = None,
+@tool
+def computer_wait_for(computer_id: str, selector: str | None = None, text: str | None = None,
                       gone: bool = False, network_idle: bool = False,
                       timeout_s: int = 30) -> dict:
     """Block in this one call until the page is ready — instead of polling with
@@ -279,9 +315,9 @@ def computer_wait_for(computer_id: str, selector: str = None, text: str = None,
                 params={"wake": "true"}, json=body, timeout=timeout_s + 30).json()
 
 
-@mcp.tool()
-def computer_tabs(computer_id: str, action: str = "list", target_id: str = None,
-                  url: str = None) -> dict:
+@tool
+def computer_tabs(computer_id: str, action: str = "list", target_id: str | None = None,
+                  url: str | None = None) -> dict:
     """Browser tab management: action=list|activate|new|close. list returns
     [{id, title, url, active}] — the ACTIVE tab is the one computer_eval,
     computer_snapshot and computer_capture talk to. If a click opened a new tab
@@ -297,7 +333,7 @@ def computer_tabs(computer_id: str, action: str = "list", target_id: str = None,
                 params={"wake": "true"}, json=body, timeout=40).json()
 
 
-@mcp.tool()
+@tool
 def computer_capture_start(computer_id: str, url_pattern: str) -> dict:
     """Start capturing network response bodies in the computer's active browser tab
     whose URL matches url_pattern (a regex). A browser-level wiretap: survives page/SPA
@@ -309,7 +345,7 @@ def computer_capture_start(computer_id: str, url_pattern: str) -> dict:
                 json={"pattern": url_pattern}).json()
 
 
-@mcp.tool()
+@tool
 def computer_capture_read(computer_id: str, stop: bool = False) -> dict:
     """Drain captured network responses from the active browser tab. Returns
     {items, running, error}; each item is {ts,url,status,body,truncated} on success
@@ -321,9 +357,9 @@ def computer_capture_read(computer_id: str, stop: bool = False) -> dict:
     return call(method, f"/computers/{computer_id}/capture", params={"wake": "true"}).json()
 
 
-@mcp.tool()
+@tool
 def computer_login(computer_id: str, credential: str, url: str,
-                   idempotency_key: str = None, proof_spec: dict = None) -> dict:
+                   idempotency_key: str | None = None, proof_spec: dict | None = None) -> dict:
     """Log into a site using a vaulted credential (added by the human via CLI/fill).
     Returns AuthAttemptResult / LoginResult with attempt_id always present:
     {"status":"success","attempt_id",…}, {"status":"failed"|"unverified","reason",
@@ -347,7 +383,7 @@ def computer_login(computer_id: str, credential: str, url: str,
 
     Optional CAPTCHA auto-solve (CASE_DBC_*) is capability-gated; unsupported or
     terminal solver responses fail fast into the same handoff_pending path.
-    Timeout 280s: deskd login ≤95s plus optional DBC solve (≤60s) + settle/verify
+    Timeout 280s: deskd login ≤125s plus optional DBC solve (≤60s) + settle/verify
     + resume; under a typical 300s proxy read timeout."""
     body = {"credential": credential, "url": url}
     if idempotency_key is not None:
@@ -358,14 +394,14 @@ def computer_login(computer_id: str, credential: str, url: str,
                 json=body, timeout=280).json()
 
 
-@mcp.tool()
+@tool
 def computer_file_put(computer_id: str, path: str, content_b64: str) -> dict:
     """Write a file on the computer (content is base64). Paths must be under /home/agent/."""
     return call("PUT", f"/computers/{computer_id}/files",
                 params={"path": path, "wake": "true"}, data=base64.b64decode(content_b64)).json()
 
 
-@mcp.tool()
+@tool
 def computer_file_get(computer_id: str, path: str) -> dict:
     """Read a file from the computer. Paths must be under /home/agent/.
     Text files come back readable:
@@ -411,7 +447,7 @@ def skill_content_risky(content):
     return m.group(0)[:60] if m else None
 
 
-@mcp.tool()
+@tool
 def case_skill(computer_id: str, action: str, name: str = "", content: str = "") -> dict:
     """Procedural memory: save a browser/desktop task you just completed as a skill,
     and reuse skills on later runs. action=list|read|save.
@@ -482,7 +518,7 @@ def case_skill(computer_id: str, action: str, name: str = "", content: str = "")
     raise RuntimeError("action must be list|read|save")
 
 
-@mcp.tool()
+@tool
 def computer_sleep(computer_id: str) -> dict:
     """Hibernate the computer. Disk state (sessions, cookies, files) survives, and it
     wakes in seconds. Sleeping frees the host's RAM so other computers can run.
@@ -490,8 +526,8 @@ def computer_sleep(computer_id: str) -> dict:
     return call("POST", f"/computers/{computer_id}/sleep").json()
 
 
-@mcp.tool()
-def auth_attempt_wait(attempt_id: str, since_revision: int = None,
+@tool
+def auth_attempt_wait(attempt_id: str, since_revision: int | None = None,
                       max_wait_s: int = 240) -> dict:
     """Block in this tool call until the auth attempt advances or the budget ends.
     This is also the inspection tool: for a non-blocking snapshot of where a login
@@ -545,20 +581,15 @@ def auth_attempt_wait(attempt_id: str, since_revision: int = None,
         if last.get("wait_status") == "timeout":
             continue
         # Intermediate advance (new challenge / proving) — keep waiting inside budget.
-        if attempt["status"] == "awaiting_human" and last.get("changed"):
-            # Still human-needed; continue waiting for the next Assist action unless
-            # budget is nearly gone — then surface handoff_pending so the agent can
-            # re-enter wait without asking the user.
-            if deadline - time.time() < 5:
-                return {"wait_status": "timeout", "changed": True, "attempt": attempt,
-                        "attempt_id": attempt["id"], "revision": attempt["revision"],
-                        **lr}
-            continue
-        # Non-terminal progress (advancing/proving) — keep polling.
-        continue
+        # Still human-needed with the budget nearly gone: surface handoff_pending so
+        # the agent can re-enter wait without asking the user.
+        if (attempt["status"] == "awaiting_human" and last.get("changed")
+                and deadline - time.time() < 5):
+            return {"wait_status": "timeout", "changed": True, "attempt": attempt,
+                    "attempt_id": attempt["id"], "revision": attempt["revision"], **lr}
 
 
-@mcp.tool()
+@tool
 def handoff_request(computer_id: str, prompt: str, kind: str = "approval") -> dict:
     """Ask the human for help. kind is required semantically — one of:
     'approval'|'question' → code/text Assist form;
@@ -572,7 +603,7 @@ def handoff_request(computer_id: str, prompt: str, kind: str = "approval") -> di
                 json={"kind": kind, "prompt": prompt}).json()
 
 
-@mcp.tool()
+@tool
 def handoff_list() -> dict:
     """List pending handoffs across all computers (id, computer_id, kind, prompt,
     status, continuation, domain). Status values: pending | validating | completed |
@@ -584,7 +615,7 @@ def handoff_list() -> dict:
     return call("GET", "/handoffs", params={"status": "pending"}).json()
 
 
-@mcp.tool()
+@tool
 def handoff_get(handoff_id: str) -> dict:
     """Fetch one handoff/challenge by id (includes screenshot). For login journeys
     prefer auth_attempt_wait(attempt_id) — this is for a specific challenge only.
@@ -599,7 +630,7 @@ def handoff_get(handoff_id: str) -> dict:
 # scheduler itself still runs (REST/CLI unchanged); set CASE_MCP_SCHEDULES=1
 # to expose these tools again.
 if os.environ.get("CASE_MCP_SCHEDULES") == "1":
-    @mcp.tool()
+    @tool
     def schedule_create(computer_id: str, prompt: str, kind: str = "daily",
                         spec: str = "09:00", name: str = "", jitter_s: int = 300,
                         tz: str = "") -> dict:
@@ -614,26 +645,26 @@ if os.environ.get("CASE_MCP_SCHEDULES") == "1":
         return call("POST", f"/computers/{computer_id}/schedules", json=body).json()
 
 
-    @mcp.tool()
+    @tool
     def schedule_list(computer_id: str) -> list:
         """List schedules for a computer."""
         return call("GET", f"/computers/{computer_id}/schedules").json()
 
 
-    @mcp.tool()
+    @tool
     def schedule_delete(schedule_id: str) -> str:
         """Delete a schedule by id."""
         call("DELETE", f"/schedules/{schedule_id}")
         return "deleted"
 
 
-    @mcp.tool()
+    @tool
     def schedule_run(schedule_id: str) -> dict:
         """Fire a schedule immediately (async). Returns {status, schedule}."""
         return call("POST", f"/schedules/{schedule_id}/run").json()
 
 
-    @mcp.tool()
+    @tool
     def schedule_runs(schedule_id: str) -> list:
         """List past runs for a schedule (status, summary, timestamps)."""
         return call("GET", f"/schedules/{schedule_id}/runs").json()

@@ -8,9 +8,11 @@ Case holds logins. These are promises, with code you can read.
 - **deskd returns 423 while a credential is being injected.** Not just
   screenshots: `/exec`, `/action`, `/file` (read and write), `/eval`,
   `/auth/observe` and the capture reads all refuse until the injection finishes,
-  and network capture drops anything in flight. The password field is cleared
-  (`CLEAR_PASS`) before the gate reopens, so the first screenshot after a login
-  sees an empty box.
+  and network capture drops anything in flight. An `/exec`, `/action` or `/eval`
+  that was already running when the injection started returns 423 instead of
+  its result, and a second login is refused (409) rather than overlapping.
+  The password field is cleared (`CLEAR_PASS`) before the gate reopens, so the
+  first screenshot after a login sees an empty box.
 - **That gate is "we do not hand it over", not "cannot obtain".** `computer_exec`
   runs bash in the same container as Chromium, and Chromium's CDP port is on
   that container's loopback. An agent that goes looking can reach what the
@@ -29,11 +31,13 @@ Case holds logins. These are promises, with code you can read.
   must be under `/home/agent/`, at most 5MB, and the snapshot ref must be
   `input[type=file]`. Password/OTP-like inputs are refused. Bytes travel
   through deskd `GET /file`, never command stdout.
-- **cased and Drive check `Host`, and `Origin` when one is present.** Anything
-  else gets a 403. Allowed by default: `127.0.0.1`, `localhost`, `[::1]`, the
-  compose service name, plus `CASE_PUBLIC_HOST` and anything in
-  `CASE_ALLOWED_HOSTS`. This is what stops a DNS-rebinding page or a cross-site
-  WebSocket open from driving a loopback install. Drive checks every request.
+- **cased, Drive and MCP HTTP check `Host`, and `Origin` when one is present.**
+  Anything else gets a 403 (MCP answers a bad `Host` with 421). Allowed by
+  default: `127.0.0.1`, `localhost`, `[::1]`, the compose service name, plus
+  `CASE_PUBLIC_HOST` and anything in `CASE_ALLOWED_HOSTS`. This is what stops a
+  DNS-rebinding page or a cross-site WebSocket open from driving a loopback
+  install, including a page calling `computer_exec` through `/mcp` on
+  `127.0.0.1:8788`. Drive checks every request.
   cased checks the untokened ones — the token-in-URL doors always, everything
   when `CASE_TOKEN` is unset; with `CASE_TOKEN` set the rest of the API is
   bearer-only.

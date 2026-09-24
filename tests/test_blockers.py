@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: MIT
 """Blocker routing: one live challenge owns one durable handoff."""
-import os
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ["CASE_HOME"] = "/tmp/case-blockers-test"
+import _helpers
+
+_helpers.isolated_home()
 
 import login_flow  # noqa: E402
 import cased  # noqa: E402
@@ -33,6 +32,21 @@ def test_late_challenge_probe_matches_path_not_full_url():
     assert "location.pathname" in probe, probe
     assert ".test(href)" not in probe, probe
     assert result["status"] == "handoff_pending", result
+
+
+def test_late_check_your_email_wall_is_a_device_challenge():
+    # deskd tags this page email_verify, which advance_attempt raises as device.
+    for probe_out, kind in (({"otp": False, "email": True, "text": "Check your email"}, "device"),
+                            ({"otp": True, "email": True, "text": "Enter the code"}, "otp")):
+        with mock.patch.object(login_flow, "eval_value", return_value=probe_out), \
+             mock.patch.object(login_flow, "screenshot_b64", return_value=None), \
+             mock.patch.object(cased.auth_attempts, "raise_challenge",
+                               return_value={"id": "a_1", "revision": 2,
+                                             "status": "awaiting_human",
+                                             "current_handoff_id": "h_1"}) as raise_:
+            login_flow._post_login_challenge(
+                ROW, "c_1", "instagram.com", "https://instagram.com/", attempt_id="a_1")
+        assert raise_.call_args.args[1] == kind, (probe_out, raise_.call_args)
 
 
 def test_active_attempt_reuses_its_pending_handoff():
@@ -122,9 +136,60 @@ def test_store_fingerprint_lookup_ignores_terminal_handoffs():
         store.delete_handoff("h_fp")
 
 
+class _Stop(Exception):
+    pass
+
+
+def _one_pass(rows, desk):
+    """Run blocker_poller for exactly one sweep over `rows`."""
+    with mock.patch.object(cased.time, "sleep", side_effect=[None, _Stop()]), \
+         mock.patch.object(store, "running_rows", return_value=rows), \
+         mock.patch.object(cased, "desk_json", side_effect=desk):
+        try:
+            cased.blocker_poller()
+        except _Stop:
+            pass
+
+
+def test_expired_handoff_is_raised_again_while_the_page_still_blocks():
+    store.delete_handoff("h_seen")
+    cased.BLOCKER_SEEN.clear()
+    try:
+        store.insert_handoff("h_seen", "c_1", "otp", "code", None, None,
+                             challenge_fingerprint=BLOCKER["fingerprint"])
+        cased.BLOCKER_SEEN["c_1"] = (BLOCKER["fingerprint"], "h_seen")
+        desk = lambda row, *a, **k: {"blocker": BLOCKER}
+        with mock.patch.object(login_flow, "_route_blocker", return_value="h_new") as route:
+            _one_pass([ROW], desk)
+            route.assert_not_called()               # its handoff is still open
+            store.set_handoff_status("h_seen", "expired")
+            _one_pass([ROW], desk)
+            route.assert_called_once()
+        assert cased.BLOCKER_SEEN["c_1"] == (BLOCKER["fingerprint"], "h_new")
+    finally:
+        store.delete_handoff("h_seen")
+        cased.BLOCKER_SEEN.clear()
+
+
+def test_poller_forgets_computers_that_left_running_and_survives_a_bad_desk():
+    cased.BLOCKER_SEEN.clear()
+    cased.BLOCKER_SEEN["c_slept"] = ("fp", "h_x")
+    other = {"id": "c_2", "name": "bo", "state": "running"}
+
+    def desk(row, *a, **k):
+        if row["id"] == "c_1":
+            raise RuntimeError("desk went sideways")
+        return {"blocker": BLOCKER}
+
+    try:
+        with mock.patch.object(login_flow, "_route_blocker", return_value="h_2") as route:
+            _one_pass([ROW, other], desk)
+        assert route.call_args.args[0]["id"] == "c_2"   # c_1's error did not skip c_2
+        assert "c_slept" not in cased.BLOCKER_SEEN
+        assert cased.BLOCKER_SEEN["c_2"] == (BLOCKER["fingerprint"], "h_2")
+    finally:
+        cased.BLOCKER_SEEN.clear()
+
+
 if __name__ == "__main__":
-    for name, fn in sorted(globals().copy().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

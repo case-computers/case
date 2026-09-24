@@ -14,11 +14,11 @@ import Anthropic from '@anthropic-ai/sdk';
 export const CASE_TOOLS = [
   { type: 'function', name: 'computer_navigate', description: 'Point the computer browser at url and block until the page has loaded. Returns {ok, url, title, text, snapshot} — text is the first 2000 chars of the page; snapshot holds the numbered elements, so do NOT call computer_snapshot after this. Same-page #anchor jumps are not navigations.', parameters: { type: 'object', properties: { url: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['url'], additionalProperties: false } },
   { type: 'function', name: 'computer_eval', description: 'Evaluate JS in the active tab (CDP, promises awaited). Prefer this over screenshots for page content. Return plain values — DOM nodes are not serialisable. To read a page as prose, document.body.innerText. Do not drive location.assign from here; use computer_navigate.', parameters: { type: 'object', properties: { expression: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['expression'], additionalProperties: false } },
-  { type: 'function', name: 'computer_action', description: 'UI action on the desktop (1280x800 by default): click|double_click|move|drag|scroll|type|key|wait. Coordinates are pixels, origin top-left. keys uses xdotool syntax (ctrl+l, Return). For elements INSIDE a web page prefer computer_snapshot + computer_click_element; use this for the desktop itself, canvas, shortcuts, and scrolling.', parameters: { type: 'object', properties: { type: { type: 'string', enum: ['click', 'double_click', 'move', 'drag', 'scroll', 'type', 'key', 'wait'] }, x: { type: 'number' }, y: { type: 'number' }, text: { type: 'string' }, keys: { type: 'string' }, dy: { type: 'number' }, ms: { type: 'number' }, from_x: { type: 'number' }, from_y: { type: 'number' }, to_x: { type: 'number' }, to_y: { type: 'number' } }, required: ['type'], additionalProperties: false } },
+  { type: 'function', name: 'computer_action', description: 'UI action on the desktop (1280x800 by default): click|double_click|move|drag|scroll|type|key|wait. Coordinates are pixels, origin top-left. keys uses xdotool syntax (ctrl+l, Return). For elements INSIDE a web page prefer computer_snapshot + computer_click_element; use this for the desktop itself, canvas, shortcuts, and scrolling.', parameters: { type: 'object', properties: { type: { type: 'string', enum: ['click', 'double_click', 'move', 'drag', 'scroll', 'type', 'key', 'wait'] }, x: { type: 'number' }, y: { type: 'number' }, button: { type: 'string', enum: ['left', 'middle', 'right'] }, text: { type: 'string' }, keys: { type: 'string' }, dy: { type: 'number' }, ms: { type: 'number' }, from_x: { type: 'number' }, from_y: { type: 'number' }, to_x: { type: 'number' }, to_y: { type: 'number' } }, required: ['type'], additionalProperties: false } },
   { type: 'function', name: 'computer_exec', description: 'Run a shell command on the computer (bash, as user agent).', parameters: { type: 'object', properties: { command: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['command'], additionalProperties: false } },
 ];
 
-export function caseRoot() {
+function caseRoot() {
   const raw = String(process.env.CASE_URL || 'http://127.0.0.1:8787/v1').trim().replace(/\/$/, '');
   return /\/v1$/.test(raw) ? raw : `${raw}/v1`;
 }
@@ -65,7 +65,8 @@ export function caseToolPlan(name, args, cid) {
 // The one HTTP client for cased in JS: the chat tool loop and serve.mjs both
 // route through it. json/body are interchangeable JSON payload keys; rawBody
 // sends bytes as-is; raw:true resolves {status, buf} instead of parsed JSON.
-export function caseCall(method, rel, { json, body, rawBody = null, raw = false, timeoutMs = 20000 } = {}) {
+// maxBytes stops reading a bigger reply and resolves {status, tooBig: true}.
+export function caseCall(method, rel, { json, body, rawBody = null, raw = false, timeoutMs = 20000, maxBytes = 0 } = {}) {
   const u = new URL(rel.startsWith('http') ? rel : caseRoot() + rel);
   const lib = u.protocol === 'https:' ? https : http;
   const data = json ?? body;
@@ -84,7 +85,14 @@ export function caseCall(method, rel, { json, body, rawBody = null, raw = false,
       },
     }, (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let n = 0;
+      const tooBig = () => { res.destroy(); resolve({ status: res.statusCode || 0, tooBig: true }); };
+      if (maxBytes && Number(res.headers['content-length']) > maxBytes) return tooBig();
+      res.on('data', (c) => {
+        n += c.length;
+        if (maxBytes && n > maxBytes) return tooBig();
+        chunks.push(c);
+      });
       res.on('end', () => {
         const buf = Buffer.concat(chunks);
         if (raw) return resolve({ status: res.statusCode || 0, buf });
@@ -274,7 +282,7 @@ export function tracesFromAnthropicMessage(message) {
   return { thinks, calls, texts };
 }
 
-export function userContentText(content) {
+function userContentText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return content == null ? '' : String(content);
   return content.map((c) => {
@@ -367,9 +375,14 @@ export function anthropicThinkingFor(messages) {
   return hasThinking ? { type: 'adaptive' } : { type: 'disabled' };
 }
 
-function clipJson(v, n = 8000) {
+export function clip(v, n = 8000) {
   const s = typeof v === 'string' ? v : JSON.stringify(v);
-  return s.length > n ? s.slice(0, n) + '…' : s;
+  if (s.length <= n) return s;
+  // Head+tail, not a tail-drop: a 150-element snapshot overruns n, and a blind cut
+  // throws away the very fields that say so (count, truncated) along with the
+  // closing brace, so the model gets mid-JSON garbage with no signal it was cut.
+  const half = Math.floor((n - 40) / 2);
+  return `${s.slice(0, half)}\n…${s.length - 2 * half} chars elided…\n${s.slice(-half)}`;
 }
 
 /** Is this the provider saying "too fast" rather than "bad request"? Callers with
@@ -382,19 +395,30 @@ export function isRateLimited(err) {
     || /rate limit|overloaded/i.test(err?.message || '');
 }
 
+/** Worth replaying the round unchanged: too fast, or a transient provider or
+ * network fault (what the SDKs retry by default). Both clients run with
+ * maxRetries: 0, so withRateRetry is the only retry policy. */
+export function isRetryable(err) {
+  const status = err?.status ?? err?.response?.status;
+  if (isRateLimited(err) || status === 408 || status === 409 || status >= 500) return true;
+  return status == null && /connection error|timed out/i.test(err?.message || '');
+}
+
 /** Seconds to wait before attempt `a`: the server's own hint ("try again in Xs"
  * or retry-after) if it gave one, else exponential. Padded, clamped to 1..60s. */
 export function rateWaitS(err, a) {
   const m = /try again in ([\d.]+)s/i.exec(err?.message || '');
-  const hdr = Number(err?.headers?.['retry-after']
-    ?? err?.response?.headers?.get?.('retry-after'));
+  // Both SDKs' APIError.headers is a fetch Headers; plain objects still pass.
+  const header = (h) => (typeof h?.get === 'function' ? h.get('retry-after') : h?.['retry-after']) ?? undefined;
+  const hdr = Number(header(err?.headers) ?? header(err?.response?.headers));
   const wait = m ? Number(m[1]) : Number.isFinite(hdr) && hdr > 0 ? hdr : 2 ** a;
   return Math.min(Math.max(wait + 0.5, 1), 60);
 }
 
-/** Retry a provider round on rate limits (429/529), honoring the server's
- * suggested wait. History is only mutated after a round completes, so replaying
- * a failed round is safe. `signal` cancels the backoff sleep on STOP. */
+/** Retry a provider round on rate limits (429/529) and transient faults,
+ * honoring the server's suggested wait. History is only mutated after a round
+ * completes, so replaying a failed round is safe. `signal` cancels the backoff
+ * sleep on STOP. */
 function abortError(signal) {
   if (signal?.reason instanceof Error) return signal.reason;
   const err = new Error(signal?.reason ? String(signal.reason) : 'stopped by user');
@@ -422,15 +446,20 @@ function abortableDelay(ms, signal) {
 }
 
 export async function withRateRetry(fn, emit, tries = 5, signal) {
+  // What was streamed is not replay-safe: a round that fails mid-stream has already
+  // emitted text and tool rows. `round` marks its start, `round_reset` rolls back to it.
+  emit?.({ type: 'round' });
   for (let a = 0; ; a++) {
     if (signal?.aborted) throw abortError(signal);
     try { return await fn(); }
     catch (err) {
       if (signal?.aborted) throw err;
-      if (!isRateLimited(err) || a >= tries - 1) throw err;
+      if (!isRetryable(err) || a >= tries - 1) throw err;
       const wait = rateWaitS(err, a);
+      const why = isRateLimited(err) ? 'rate limited' : 'provider error';
+      emit?.({ type: 'round_reset' });
       // `rate: true` so a non-UI consumer can pick the wait out of the think stream.
-      emit?.({ type: 'think', rate: true, text: `rate limited — retrying in ${Math.ceil(wait)}s` });
+      emit?.({ type: 'think', rate: true, text: `${why} — retrying in ${Math.ceil(wait)}s` });
       await abortableDelay(wait * 1000, signal);
     }
   }
@@ -440,7 +469,7 @@ export async function anthropicToolLoop({
   key, model, effort, system, messages, tools, emit, rounds, runTool, actFor, stopped,
   beforeRound, tokenBudget, signal,
 }) {
-  const client = new Anthropic({ apiKey: key });
+  const client = new Anthropic({ apiKey: key, maxRetries: 0 });
   const antTools = openaiToolsToAnthropic(tools);
   const antEffort = effort === 'none' ? 'low' : (effort || 'medium');
   const params = {
@@ -455,8 +484,11 @@ export async function anthropicToolLoop({
   };
   let text = '';
   let finished = false;
-  const spend = { in: 0, cached: 0, out: 0 };
-  const overBudget = () => Number(tokenBudget) > 0 && spend.in > tokenBudget;
+  // eff is billed input, the number the budget bounds (serve.mjs counts OpenAI's
+  // the same way): input_tokens excludes the cache, whose reads bill at 0.1x and
+  // writes at 1.25x. Raw input counts every cached re-send in full.
+  const spend = { in: 0, cached: 0, out: 0, eff: 0 };
+  const overBudget = () => Number(tokenBudget) > 0 && spend.eff > tokenBudget;
   const round = async (p) => {
     const ctx = newAnthropicStreamCtx();
     let thinkDelta = false;
@@ -487,24 +519,27 @@ export async function anthropicToolLoop({
   };
   for (let i = 0; i < rounds && !finished && !overBudget(); i++) {
     if (stopped?.()) break;
-    beforeRound?.(messages);
+    beforeRound?.(messages, { round: i, eff: spend.eff });
     let result;
     try {
       result = await withRateRetry(() => round(params), emit, 5, signal);
     } catch (err) {
       if (signal?.aborted) throw err;
       // This fallback is for models that reject output_config — not for a rate
-      // limit whose retries already ran dry, which would only buy 5 more waits.
-      if (!params.output_config || isRateLimited(err)) throw err;
+      // limit or fault whose retries already ran dry, which would only buy 5 more waits.
+      if (!params.output_config || isRetryable(err)) throw err;
       const rest = { ...params };
       delete rest.output_config;
+      emit({ type: 'round_reset' });
       result = await withRateRetry(() => round(rest), emit, 5, signal);
     }
     const { message, traces, textDelta } = result;
     const u = message.usage || {};
-    spend.in += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0)
-      + (u.cache_creation_input_tokens || 0);
-    spend.cached += u.cache_read_input_tokens || 0;
+    const read = u.cache_read_input_tokens || 0;
+    const wrote = u.cache_creation_input_tokens || 0;
+    spend.in += (u.input_tokens || 0) + read + wrote;
+    spend.cached += read;
+    spend.eff += (u.input_tokens || 0) + 1.25 * wrote + 0.1 * read;
     spend.out += u.output_tokens || 0;
     text = traces.texts.join('\n').trim();
     if (!traces.calls.length) {
@@ -526,10 +561,10 @@ export async function anthropicToolLoop({
         call_id: call.call_id,
         act: toolResult.act || act,
         ok: !!toolResult.ok,
-        detail: clipJson(toolResult.error || toolResult.result || toolResult, 400),
+        detail: clip(toolResult.error || toolResult.result || toolResult, 400),
       });
       const { image_b64, ...rest } = toolResult;
-      const content = [{ type: 'text', text: clipJson(rest) }];
+      const content = [{ type: 'text', text: clip(rest) }];
       if (image_b64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image_b64 } });
       results.push({ type: 'tool_result', tool_use_id: call.call_id || call.id, content });
     }

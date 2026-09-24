@@ -46,7 +46,7 @@ from deskclient import desk_bytes, desk_json, navigate
 from errors import ApiError
 from events import sse_gen
 from notify import notifier
-from store import store
+from store import AUTH_ATTEMPT_TERMINAL, store
 from util import now, row_get
 
 @asynccontextmanager
@@ -76,7 +76,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="cased", lifespan=lifespan)
-BLOCKER_SEEN = {}           # computer_id -> fingerprint
+BLOCKER_SEEN = {}           # computer_id -> (fingerprint, handoff id)
 
 
 # ---------- error handling ----------
@@ -200,7 +200,7 @@ async def audit_mw(request: Request, call_next):
 
 def _audit_append(line):
     os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
-    p = os.path.join(AUDIT_DIR, time.strftime("%Y-%m-%d") + ".jsonl")
+    p = os.path.join(AUDIT_DIR, line["ts"][:10] + ".jsonl")   # UTC, like the prune
     with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as f:
         f.write(json.dumps(line) + "\n")
 
@@ -302,6 +302,24 @@ def _num(value, default, lo, hi, field):
     return n
 
 
+def _int(value, default, field):
+    """A non-negative integer from a request body; blank is the default."""
+    if value in (None, ""):
+        return default
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_request", f"{field} must be an integer")
+    if n < 0:
+        raise ApiError(400, "bad_request", f"{field} must not be negative")
+    return n
+
+
+def _timeout(body, default, cap):
+    """timeout_s from a request body: blank or 0 is the default, capped at `cap`."""
+    return min(_int(body.get("timeout_s"), 0, "timeout_s") or default, cap)
+
+
 @app.get("/v1/computers")
 def list_computers():
     summaries = store.schedule_summaries()
@@ -341,9 +359,9 @@ def health(request: Request):
     # learns liveness only — the inventory is for whoever holds the bearer.
     if not bearer_ok(request.headers.get("authorization")):
         return {"ok": True}
-    n = len(store.list_computers())
+    n = store.computer_count()
     try:
-        dockerd.dc().ping()
+        dockerd.ping()
         docker_ok = True
     except Exception:
         docker_ok = False
@@ -395,7 +413,7 @@ def exec_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         if "command" not in body:
             raise ApiError(400, "bad_request", "body needs 'command'")
-        timeout = min(int(body.get("timeout_s") or 30), 600)
+        timeout = _timeout(body, 30, 600)
         return desk_json(row, "POST", "/exec", json=body, timeout=timeout + 15)
 
 
@@ -404,7 +422,7 @@ def eval_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         if "expression" not in body:
             raise ApiError(400, "bad_request", "body needs 'expression'")
-        timeout = min(int(body.get("timeout_s") or 20), 120)
+        timeout = _timeout(body, 20, 120)
         return desk_json(row, "POST", "/eval", json=body, timeout=timeout + 15)
 
 
@@ -413,7 +431,7 @@ def navigate_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         if "url" not in body:
             raise ApiError(400, "bad_request", "body needs 'url'")
-        timeout = max(1, min(int(body.get("timeout_s") or 30), 120))   # never navigate then
+        timeout = _timeout(body, 30, 120)                              # never navigate then
         out = navigate(row, body["url"], timeout)                      # report failure at t=0
         if out.get("ok") and body.get("snapshot", True):
             fresh = browse.snapshot(row)      # navigate already waited for readyState
@@ -433,9 +451,9 @@ def page_(cid: str, wake: bool = False):
 @app.post("/v1/computers/{cid}/click")
 def click_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        if "ref" not in body:
+        if body.get("ref") in (None, ""):
             raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
-        return browse.click_element(row, int(body["ref"]), name=body.get("name"),
+        return browse.click_element(row, _int(body["ref"], None, "ref"), name=body.get("name"),
                                     text=body.get("text"),
                                     screenshot=bool(body.get("screenshot")),
                                     snapshot_after=bool(body.get("snapshot", True)))
@@ -444,17 +462,18 @@ def click_(cid: str, body: dict = Body(...), wake: bool = False):
 @app.post("/v1/computers/{cid}/hover")
 def hover_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        if "ref" not in body:
+        if body.get("ref") in (None, ""):
             raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
-        return browse.hover(row, int(body["ref"]), name=body.get("name"))
+        return browse.hover(row, _int(body["ref"], None, "ref"), name=body.get("name"))
 
 
 @app.post("/v1/computers/{cid}/upload")
 def upload_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        if "ref" not in body or "path" not in body:
+        if body.get("ref") in (None, "") or "path" not in body:
             raise ApiError(400, "bad_request", "body needs 'ref' and 'path'")
-        return browse.upload(row, int(body["ref"]), body["path"], name=body.get("name"))
+        return browse.upload(row, _int(body["ref"], None, "ref"), body["path"],
+                             name=body.get("name"))
 
 
 @app.post("/v1/computers/{cid}/fill")
@@ -467,7 +486,7 @@ def fill_(cid: str, body: dict = Body(...), wake: bool = False):
 @app.post("/v1/computers/{cid}/wait")
 def wait_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        timeout = max(1, min(int(body.get("timeout_s") or 30), 120))
+        timeout = _timeout(body, 30, 120)
         return browse.wait_for(row, selector=body.get("selector"), text=body.get("text"),
                                gone=bool(body.get("gone")),
                                network_idle=bool(body.get("network_idle")),
@@ -602,8 +621,9 @@ def delete_credential(cid: str, name: str):
 
 # ---------- human links (fill + desk) ----------
 # Minted URLs are the only human auth on a box: no accounts, no sessions.
-# Minting stays loopback-only (bin/case), because the agent's token must not
-# be able to answer handoffs or mint its own links.
+# Minting is an ordinary route behind CASE_TOKEN, not a loopback-only one (Drive
+# mints over the compose network), so any caller holding that token, the
+# agent's included, can mint links and answer handoffs.
 
 @app.post("/v1/computers/{cid}/links", status_code=201)
 def mint_link(cid: str, body: dict = Body(...)):
@@ -664,13 +684,8 @@ async def fill_submit(token: str, request: Request):
 
 # ---------- Assist door (public /assist/*, token is the auth; no MCP bearer) ----------
 
-def _cookie_value(cookie_header, name):
-    return dict(p.strip().split("=", 1)
-                for p in (cookie_header or "").split(";") if "=" in p).get(name, "")
-
-
 def _assist_cookie(request):
-    return _cookie_value(request.headers.get("cookie"), assist.COOKIE)
+    return links.cookie(request.headers.get("cookie"), assist.COOKIE)
 
 
 def _assist_set_cookie(set_sess):
@@ -680,6 +695,16 @@ def _assist_set_cookie(set_sess):
     if set_sess:
         headers["Set-Cookie"] = assist.session_cookie_header(set_sess)
     return headers
+
+
+def _assist_static(html, status_code=200):
+    """A GONE or DONE page: never cached, and its URL (the token) never sent on."""
+    return HTMLResponse(html, status_code=status_code,
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+def _assist_done(title, body):
+    return _assist_static(assist.DONE_HTML.replace("{title}", title).replace("{body}", body))
 
 
 @app.get("/assist/static/assist.js")
@@ -694,8 +719,7 @@ def assist_get(token: str, request: Request):
     try:
         view, set_sess = assist.resolve_view(token, request.headers.get("cookie", ""))
     except ApiError:
-        return HTMLResponse(assist.GONE_HTML, status_code=410,
-                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        return _assist_static(assist.GONE_HTML, status_code=410)
     body = assist.render_page(view, token)
     return HTMLResponse(body, headers=_assist_set_cookie(set_sess))
 
@@ -721,8 +745,7 @@ async def _assist_form(token, request):
     or the HTMLResponse to send back instead."""
     if not assist.check_same_origin(request):
         raise ApiError(403, "csrf", "missing or mismatched Origin")
-    gone = HTMLResponse(assist.GONE_HTML, status_code=410,
-                        headers={"Cache-Control": "no-store"})
+    gone = _assist_static(assist.GONE_HTML, status_code=410)
     sess = _assist_cookie(request)
     if not sess:
         return gone
@@ -747,13 +770,9 @@ async def assist_open(token: str, request: Request):
                                 (form.get("url") or "").strip(), expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
-            return HTMLResponse(assist.GONE_HTML, status_code=410,
-                                headers={"Cache-Control": "no-store"})
+            return _assist_static(assist.GONE_HTML, status_code=410)
         raise
-    return HTMLResponse(
-        assist.DONE_HTML.replace("{title}", "Opened").replace(
-            "{body}", "The computer opened the link. Finish there, then return here."),
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+    return _assist_done("Opened", "The computer opened the link. Finish there, then return here.")
 
 
 @app.post("/assist/{token}/submit")
@@ -764,9 +783,7 @@ async def assist_submit(token: str, request: Request):
         return got
     sess, view, form, expected = got
     if "submit_value" not in view["allowed_actions"]:
-        return HTMLResponse(
-            assist.render_page(view, token),
-            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        return HTMLResponse(assist.render_page(view, token), headers=_assist_set_cookie(None))
     value = (form.get("value") or "").strip()
     if not value:
         raise ApiError(400, "bad_request", "value is required")
@@ -775,17 +792,20 @@ async def assist_submit(token: str, request: Request):
                                       expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
-            return HTMLResponse(assist.GONE_HTML, status_code=410)
+            return _assist_static(assist.GONE_HTML, status_code=410)
         raise
     st = row["status"]
-    if st in ("completed", "answered"):
+    if view["kind"] == "approval" and st != "pending":
+        title = "Approved ✓" if value.lower() == "approve" else "Denied"
+        body = "Your answer was sent. You can close this page."
+    elif st in ("completed", "answered"):
         title, body = "Submitted ✓", "The code was accepted. You can close this page."
     elif st == "failed":
         title, body = "Failed", "This challenge could not be completed. Ask for a new link."
     else:
         title, body = "Not yet", ("That code did not clear the challenge. "
                                   "Reopen the link and try again.")
-    return HTMLResponse(assist.DONE_HTML.replace("{title}", title).replace("{body}", body))
+    return _assist_done(title, body)
 
 
 @app.post("/assist/{token}/done")
@@ -800,7 +820,7 @@ async def assist_done(token: str, request: Request):
                                       expected_revision=expected)
     except ApiError as e:
         if e.status == 410:
-            return HTMLResponse(assist.GONE_HTML, status_code=410)
+            return _assist_static(assist.GONE_HTML, status_code=410)
         raise
     st = row["status"]
     if st == "completed" or st == "answered":
@@ -810,7 +830,7 @@ async def assist_done(token: str, request: Request):
     else:
         title, body = "Still open", ("The challenge still looks present. "
                                      "Finish it on the desktop, then click I'm done again.")
-    return HTMLResponse(assist.DONE_HTML.replace("{title}", title).replace("{body}", body))
+    return _assist_done(title, body)
 
 
 @app.get("/v1/desk/check")
@@ -821,7 +841,7 @@ def desk_check_ep(request: Request):
     cookie = request.headers.get("cookie", "")
     link, set_tok = links.desk_check(uri, cookie)
     if not link:
-        handoff = assist.valid_session(_cookie_value(cookie, assist.COOKIE))
+        handoff = assist.valid_session(links.cookie(cookie, assist.COOKIE))
         if handoff:
             link, set_tok = {"computer_id": handoff["computer_id"], "kind": "assist",
                              "expires_at": None, "token": None}, None
@@ -836,6 +856,7 @@ def desk_check_ep(request: Request):
     if VNC_PORT and comp["vnc_port"] != VNC_PORT:
         return HTMLResponse(links.NOTREADY_HTML.replace("{why}", links.STALE_PORT),
                             status_code=409)
+    store.touch(comp["id"])                   # a human on the desk is using the box
     if not set_tok:
         return Response(status_code=200)      # cookie already good, let the request through
     # First hit, token in the URL. forward-auth proxies only forward a NON-2xx auth
@@ -851,6 +872,9 @@ def desk_check_ep(request: Request):
 
 
 # ---------- live view (noVNC, relayed) ----------
+
+LIVE_TOUCH_S = 60   # well inside the session keeper's 15-minute busy window
+
 
 def live_upstream(row):
     """(base_url, headers) for a computer's noVNC: same dial deskclient uses for deskd."""
@@ -880,7 +904,8 @@ async def live_ws(ws: WebSocket, cid: str):
         await ws.close(code=1008)
         return
     try:
-        base, headers = live_upstream(lifecycle.ensure_running(cid, False))
+        row = await asyncio.to_thread(lifecycle.ensure_running, cid, False)
+        base, headers = live_upstream(row)
     except ApiError:
         await ws.close(code=1011)
         return
@@ -889,6 +914,14 @@ async def live_ws(ws: WebSocket, cid: str):
     async with ws_connect("ws" + base[4:] + "/websockify", additional_headers=headers,
                           subprotocols=subs or None, max_size=None) as up:
         await ws.accept(subprotocol=up.subprotocol)
+        # a human watching the live view is using the box; the session keeper must
+        # not navigate over them
+        await asyncio.to_thread(store.touch, cid)
+
+        async def keep_active():
+            while True:
+                await asyncio.sleep(LIVE_TOUCH_S)
+                await asyncio.to_thread(store.touch, cid)
 
         async def to_desk():
             try:
@@ -901,11 +934,13 @@ async def live_ws(ws: WebSocket, cid: str):
                 await up.close()
 
         pump = asyncio.create_task(to_desk())
+        active = asyncio.create_task(keep_active())
         try:
             async for msg in up:
                 await ws.send_bytes(msg if isinstance(msg, bytes) else msg.encode())
         finally:
             pump.cancel()
+            active.cancel()
             try:
                 await ws.close()
             except RuntimeError:
@@ -959,7 +994,7 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
     # Idempotent replay, never re-inject; agents poll GET /auth-attempts/{id}.
     if attempt["status"] == "awaiting_human":
         return auth_attempts.login_result(attempt)
-    if attempt["status"] in auth_attempts.TERMINAL_STATUSES:
+    if attempt["status"] in AUTH_ATTEMPT_TERMINAL:
         return auth_attempts.login_result(attempt)
     if attempt["status"] in ("advancing", "proving"):
         advanced = auth_attempts.advance_attempt(attempt["id"])
@@ -967,7 +1002,7 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
 
     try:
         result = desk_json(row, "POST", "/login",
-                           json={"credential": material, "url": body["url"]}, timeout=95)
+                           json={"credential": material, "url": body["url"]}, timeout=125)
     except ApiError:
         # domain_mismatch / desk errors must not leave the attempt stuck in
         # created, that blocks every later login with 409 auth_in_progress.
@@ -1011,7 +1046,8 @@ def answer_handoff_ep(hid: str, body: dict = Body(...)):
 def answer_public(hid: str, token: str, body: dict = Body(...)):
     """ntfy's Approve/Deny buttons. The signed token in the URL is the whole auth —
     a phone has no bearer, and the notification is the only place it leaks to."""
-    return handoffs.answer_by_token(hid, token, body.get("value"))
+    return handoffs.handoff_json(handoffs.answer_by_token(hid, token, body.get("value")),
+                                 with_screenshot=False)
 
 
 # ---------- schedules ----------
@@ -1042,7 +1078,10 @@ def run_schedule_now(sid: str):
 
 @app.get("/v1/schedules/{sid}/runs")
 def list_runs(sid: str):
-    return scheduler.list_runs(sid)
+    if not store.get_schedule(sid):
+        raise ApiError(404, "not_found", f"no schedule {sid}")
+    names = store.computer_names()
+    return [run_json(r, names) for r in store.list_runs(sid)]
 
 
 # ---------- runs (scheduled-run activity) ----------
@@ -1053,7 +1092,7 @@ def run_json(row, names=None):
     # its owners in one query rather than fifty.
     cid = row["computer_id"]
     return {"id": row["id"], "schedule_id": row["schedule_id"], "computer_id": cid,
-            "computer_name": names.get(cid, cid) if names else store.computer_name(cid),
+            "computer_name": names.get(cid, cid) if names is not None else store.computer_name(cid),
             "started_at": row["started_at"], "ended_at": row["ended_at"],
             "exit_code": row["exit_code"], "summary": row["summary"],
             "status": row["status"], "has_screenshot": bool(row["artifact_path"])}
@@ -1088,51 +1127,76 @@ def _spawn(fn, arg):
     threading.Thread(target=fn, args=(arg,), daemon=True).start()
 
 
+def _step(fn, *args):
+    """One sweeper step; its failure must not starve the steps after it."""
+    try:
+        fn(*args)
+    except Exception:
+        log.exception("sweeper: %s", getattr(fn, "__name__", fn))
+
+
+def _prune_history():
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    unlink_run_artifacts(store.prune_old_runs(keep=1000))
+    prune_old_audit_files()
+    store.prune_terminal_handoffs(cutoff)
+    store.prune_terminal_auth_attempts(cutoff)
+
+
 def sweeper():
     tick = 0
     while True:
         time.sleep(20)
         tick += 1
-        try:
-            lifecycle.reconcile()      # re-align DB with Docker if the daemon restarted
-            handoffs.expire_stale()
-            store.prune_expired_links()
-            store.prune_expired_assist_tokens()
-            if tick % 180 == 0:
-                cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-                unlink_run_artifacts(store.prune_old_runs(keep=1000))
-                prune_old_audit_files()
-                store.prune_terminal_handoffs(cutoff)
-            scheduler.fire_due_schedules(_spawn)
-            telemetry.heartbeat_if_due()   # at most one event per UTC day
-            # preflight persistent session health: it drives desks over the network,
-            # and a hung one must not stall reconcile or the schedule fire loop
-            threading.Thread(target=session_keeper.tick, daemon=True).start()
-        except Exception:
-            log.exception("sweeper")
+        _step(lifecycle.reconcile)      # re-align DB with Docker if the daemon restarted
+        _step(handoffs.expire_stale)
+        _step(store.prune_expired_links)
+        _step(store.prune_expired_assist_tokens)
+        if tick % 180 == 0:
+            _step(_prune_history)
+        _step(scheduler.fire_due_schedules, _spawn)
+        _step(telemetry.heartbeat_if_due)   # at most one event per UTC day
+        # preflight persistent session health: it drives desks over the network,
+        # and a hung one must not stall reconcile or the schedule fire loop
+        _step(threading.Thread(target=session_keeper.tick, daemon=True).start)
 
 
 def blocker_poller():
     while True:
         time.sleep(3)
         try:
-            for row in store.running_rows():
-                try:
-                    b = desk_json(row, "GET", "/blocker", timeout=5).get("blocker")
-                except ApiError:
-                    continue
-                cid = row["id"]
-                if not b:
-                    BLOCKER_SEEN.pop(cid, None)
-                    continue
-                if BLOCKER_SEEN.get(cid) == b["fingerprint"]:
-                    continue
-                if login_flow._route_blocker(row, b):
-                    # Record only after routing succeeds, so transient errors retry.
-                    BLOCKER_SEEN[cid] = b["fingerprint"]
+            rows = store.running_rows()
         except Exception:
             log.exception("blocker poller")
+            continue
+        for cid in set(BLOCKER_SEEN) - {r["id"] for r in rows}:   # slept or deleted
+            BLOCKER_SEEN.pop(cid, None)
+        for row in rows:
+            try:
+                _poll_blocker(row)
+            except Exception:
+                log.exception("blocker poller: %s", row["id"])
+
+
+def _poll_blocker(row):
+    try:
+        b = desk_json(row, "GET", "/blocker", timeout=5).get("blocker")
+    except ApiError:
+        return
+    cid = row["id"]
+    if not b:
+        BLOCKER_SEEN.pop(cid, None)
+        return
+    seen = BLOCKER_SEEN.get(cid)
+    if seen and seen[0] == b["fingerprint"]:
+        # still the same challenge: raise it again only once its handoff timed out
+        h = store.get_handoff(seen[1])
+        if h and h["status"] != "expired":
+            return
+    hid = login_flow._route_blocker(row, b)
+    if hid:
+        # Record only after routing succeeds, so transient errors retry.
+        BLOCKER_SEEN[cid] = (b["fingerprint"], hid)
 
 
 if __name__ == "__main__":

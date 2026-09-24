@@ -2,12 +2,10 @@
 """Read routes: runs, credential health, handoff list.
 Run: .venv/bin/python tests/test_runs.py"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault — these tests DELETE FROM real tables, and an inherited
-# CASE_HOME would point them at a live box's vault. Same reasoning as tests/test_links.py.
-os.environ["CASE_HOME"] = "/tmp/case-runs-test"
+import _helpers
+
+HOME = _helpers.isolated_home()
 import cased  # noqa: E402
 from store import store  # noqa: E402
 
@@ -43,7 +41,7 @@ def test_unlink_run_artifacts_only_under_runs_dir():
     from config import RUNS_DIR
     os.makedirs(RUNS_DIR, exist_ok=True)
     inside = os.path.join(RUNS_DIR, "prune_me.png")
-    outside = os.path.join("/tmp", "case-prune-outside.png")
+    outside = os.path.join(HOME, "case-prune-outside.png")
     open(inside, "wb").write(b"in")
     open(outside, "wb").write(b"out")
     try:
@@ -83,6 +81,34 @@ def test_run_json_without_an_artifact():
     store.insert_run("run_b", "sch_1", "c_1", "2026-07-27T09:00:00Z",
                      "2026-07-27T09:05:00Z", 1, "broke", None, "fail")
     assert cased.run_json(store.get_run("run_b"))["has_screenshot"] is False
+
+
+def test_schedule_runs_route_hides_the_host_path_too():
+    from fastapi.testclient import TestClient
+    from unittest import mock
+    store.q("DELETE FROM runs")
+    store.q("DELETE FROM schedules")
+    store.insert_schedule("sch_r", "c_1", "n", "p", "interval", "3600", 0, None)
+    store.insert_run("run_s", "sch_r", "c_1", "2026-07-27T09:00:00Z",
+                     "2026-07-27T09:05:00Z", 0, "ok", "/home/case/.case/runs/run_s.png", "ok")
+    c = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+    with mock.patch.dict(os.environ, {"CASE_TOKEN": ""}):
+        r = c.get("/v1/schedules/sch_r/runs")
+        assert r.status_code == 200, r.text
+        assert [j["id"] for j in r.json()] == ["run_s"], r.text
+        assert "artifact_path" not in r.json()[0] and r.json()[0]["has_screenshot"] is True
+        assert c.get("/v1/schedules/sch_nope/runs").status_code == 404
+    store.q("DELETE FROM schedules")
+
+
+def test_run_json_resolves_names_from_an_empty_map_without_a_query():
+    store.q("DELETE FROM runs")
+    store.insert_run("run_n", "sch_1", "c_gone", "2026-07-27T09:00:00Z",
+                     "2026-07-27T09:05:00Z", 0, "", None, "ok")
+    from unittest import mock
+    with mock.patch.object(store, "computer_name") as one:
+        assert cased.run_json(store.get_run("run_n"), {})["computer_name"] == "c_gone"
+    one.assert_not_called()
 
 
 def test_screenshot_serves_only_from_the_runs_dir():
@@ -251,8 +277,4 @@ def test_the_handoff_list_does_not_ship_screenshots():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

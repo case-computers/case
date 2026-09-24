@@ -72,6 +72,8 @@ export async function publish(cfg, { title, message, tags = [] }, fetchImpl = fe
   if (!r.ok) throw new Error(`ntfy publish ${r.status}`);
 }
 
+/** Subscribe loop. onMessage is not awaited, so a running turn never holds up
+ *  the next message: a steer, or the OTP / approval that very turn waits on. */
 export async function listen(cfg, onMessage, {
   fetchImpl = fetch,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -102,7 +104,9 @@ export async function listen(cfg, onMessage, {
             seen.add(ev.id);
             if (seen.size > 200) seen.delete(seen.values().next().value);
           }
-          await onMessage(text, ev);
+          Promise.resolve().then(() => onMessage(text, ev)).catch((err) => {
+            console.warn('ntfy message:', err?.message || err);
+          });
         }
       }
     } catch (err) {

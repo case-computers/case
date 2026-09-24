@@ -2,14 +2,15 @@
 """browse.py — snapshot/click/fill/wait/tabs composition logic. Pure: eval_js and
 desk_json are faked, no Docker, no deskd.
 Run: .venv/bin/python tests/test_browse.py"""
-import os
-import sys
 from urllib.parse import quote
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ.setdefault("CASE_HOME", "/tmp/case-browse-test")
+import _helpers
+
+_helpers.isolated_home()
 import browse  # noqa: E402
 from errors import ApiError  # noqa: E402
+
+browse.time = _helpers.FakeClock()
 
 ROW = {"desk_port": 1, "desk_token": "t"}
 ELS = [
@@ -246,6 +247,18 @@ def test_wait_needs_a_condition():
     assert False
 
 
+def test_wait_network_idle_with_a_selector_is_refused():
+    # the selector's boolean went stable too, so this reported ok for a missing element
+    browse.eval_js = fake_eval({"ok": True, "value": False})
+    for kw in ({"selector": "#never"}, {"text": "never"}):
+        try:
+            browse.wait_for(ROW, network_idle=True, timeout_s=5, **kw)
+        except ApiError as e:
+            assert e.status == 400, e
+            continue
+        assert False, kw
+
+
 # ---------- tabs ----------
 
 def test_tabs_list_filters_pages_and_marks_active():
@@ -421,6 +434,20 @@ def test_click_that_changes_nothing_still_returns_the_current_page():
     assert any(UNSTAMP in c for c in browse.eval_js.calls), browse.eval_js.calls
 
 
+def test_click_survives_a_snapshot_lost_to_navigation():
+    # the OS click already fired; a 502 while snapshotting must not turn it into an error
+    browse.eval_js = fake_eval_map({
+        LOCATE: [{"ok": True, "value": {"ok": True, "name": "Go", "tag": "div", "x": 1, "y": 2}}],
+        STAMP: [{"ok": True, "value": 1}],
+        POLL: [{"ok": True, "value": [True, "complete"]}],
+        SNAP: [ApiError(502, "eval_error", "Target closed")],
+    })
+    browse.desk_json = fake_desk({"ok": True})
+    out = browse.click_element(ROW, 0, name="Go")
+    assert out["ok"] and out["clicked"] == "Go", out
+    assert "snapshot" not in out, out
+
+
 def test_click_snapshot_can_be_turned_off():
     browse.eval_js = fake_eval({"ok": True, "value": {"ok": True, "name": "n", "tag": "a",
                                                       "x": 1, "y": 2}})
@@ -498,6 +525,18 @@ def test_locate_script_prefers_stored_handle_then_heal():
     assert "window.__caseEls" in src
     assert "isConnected" in src
     assert "healed" in src
+
+
+def test_locate_fast_path_names_elements_like_the_walk():
+    # a submit input's value, an image's alt or a title never matched the stored
+    # handle's own shorter name, so those clicks always fell back to a re-walk
+    browse.eval_js = fake_eval({"ok": True, "value": {
+        "ok": True, "name": "x", "tag": "a", "x": 1, "y": 1}})
+    browse.desk_json = fake_desk({"ok": True})
+    browse.click_element(ROW, 0, name="x", snapshot_after=False)
+    src = browse.eval_js.calls[0]
+    assert "const nm=__name(stored)" in src and "const name=__name(el)" in src
+    assert src.count("el.alt") == 1, src
 
 
 def test_click_activates_a_new_tab():
@@ -671,8 +710,4 @@ def test_teach_tick_504_still_raises():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

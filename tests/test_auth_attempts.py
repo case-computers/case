@@ -4,15 +4,12 @@ Run: .venv/bin/python tests/test_auth_attempts.py"""
 import json
 import os
 import shutil
-import sys
 import tempfile
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: these tests write auth_attempt rows, and an inherited
-# CASE_HOME would put them in a live box's DB.
-_HOME = tempfile.mkdtemp(prefix="case-auth-attempts-")
-os.environ["CASE_HOME"] = _HOME
+import _helpers
+
+_helpers.isolated_home()
 
 import auth_attempts  # noqa: E402
 import handoffs  # noqa: E402
@@ -30,15 +27,6 @@ def _cleanup():
     store.q("DELETE FROM handoffs")
     store.q("DELETE FROM credentials")
     handoffs.LOGIN_CTX.clear()
-
-
-def _raises(fn, code):
-    try:
-        fn()
-    except ApiError as e:
-        assert e.code == code, (e.code, e.message)
-        return e
-    assert False, f"expected ApiError {code}"
 
 
 def _obs(**kwargs):
@@ -121,7 +109,7 @@ def test_one_active_attempt_per_computer():
     auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
     assert store.active_attempt_exists("c_1")
     assert store.get_active_auth_attempt("c_1") is not None
-    _raises(lambda: auth_attempts.start_attempt(
+    _helpers.raises(lambda: auth_attempts.start_attempt(
         "c_1", "github", "https://example.com/login", idempotency_key="other"),
             "auth_in_progress")
     # different computer is fine
@@ -136,8 +124,8 @@ def test_cas_revision_conflict():
     assert n == 1
     assert store.get_auth_attempt(a["id"])["revision"] == 1
     # stale revision on cancel
-    _raises(lambda: auth_attempts.cancel_attempt(a["id"], expected_revision=0),
-            "revision_conflict")
+    _helpers.raises(lambda: auth_attempts.cancel_attempt(a["id"], expected_revision=0),
+                    "revision_conflict")
     # store-level CAS
     n = store.cas_auth_attempt_status(a["id"], "advancing", "proving", 0)
     assert n == 0
@@ -158,6 +146,69 @@ def test_cancel_attempt():
     assert not store.active_attempt_exists("c_1")
 
 
+def test_every_terminal_attempt_closes_its_live_child():
+    for end, want in (("fail", "failed"), ("prove", "completed"), ("cancel", "failed")):
+        _cleanup()
+        a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+        store.cas_auth_attempt_status(a["id"], "created", "awaiting_human", 0)
+        store.insert_handoff("h_live", "c_1", "otp", "enter code", None, "github",
+                             continuation="submit_value", attempt_id=a["id"], sequence=1)
+        store.set_attempt_handoff(a["id"], "h_live")
+        handoffs.LOGIN_CTX["h_live"] = {"computer_id": "c_1", "credential": "github"}
+        with mock.patch.object(store, "record_credential_result"):
+            {"fail": lambda: auth_attempts.fail_attempt(a["id"], reason="x"),
+             "prove": lambda: auth_attempts.prove_attempt(a["id"]),
+             "cancel": lambda: auth_attempts.cancel_attempt(a["id"])}[end]()
+        assert store.get_handoff("h_live")["status"] == want, end
+        assert "h_live" not in handoffs.LOGIN_CTX, end
+
+
+def test_raise_challenge_while_proving_creates_no_handoff():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    store.cas_auth_attempt_status(a["id"], "created", "proving", 0)
+    with mock.patch("handoffs.create_handoff") as create:
+        _helpers.raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
+                        "illegal_transition")
+    create.assert_not_called()
+
+
+def test_raise_challenge_losing_to_a_cancel_leaves_no_pending_child():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    real_create = handoffs.create_handoff
+
+    def create_then_cancel(*args, **kw):
+        h = real_create(*args, **kw)
+        auth_attempts.cancel_attempt(a["id"])   # read the attempt before the pointer moved
+        return h
+
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.screenshot_b64", return_value=None), \
+         mock.patch("handoffs.create_handoff", side_effect=create_then_cancel):
+        _helpers.raises(lambda: auth_attempts.raise_challenge(a["id"], "otp", "code?"),
+                        "revision_conflict")
+    rows = store.all("SELECT id, status FROM handoffs")
+    assert [r["status"] for r in rows] == ["failed"], [dict(r) for r in rows]
+    assert not handoffs.LOGIN_CTX, handoffs.LOGIN_CTX
+
+
+def test_repeat_raise_challenge_with_a_live_child_changes_nothing():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    store.cas_auth_attempt_status(a["id"], "created", "awaiting_human", 0)
+    store.insert_handoff("h_live", "c_1", "otp", "enter code", None, "github",
+                         continuation="submit_value", attempt_id=a["id"], sequence=1)
+    store.set_attempt_handoff(a["id"], "h_live")
+    with mock.patch("events.emit") as emit, \
+         mock.patch("handoffs.create_handoff") as create:
+        out = auth_attempts.raise_challenge(a["id"], "otp", "code?")
+    assert out["status"] == "awaiting_human" and out["revision"] == 1, out
+    assert out["current_handoff_id"] == "h_live"
+    create.assert_not_called()
+    emit.assert_not_called()
+
+
 def test_claim_challenge_cas():
     _cleanup()
     store.insert_handoff(
@@ -168,10 +219,10 @@ def test_claim_challenge_cas():
     assert claimed["revision"] == 1
     assert "answer" not in claimed
     # stale / wrong status
-    _raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=0),
-            "revision_conflict")
-    _raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=1),
-            "revision_conflict")
+    _helpers.raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=0),
+                    "revision_conflict")
+    _helpers.raises(lambda: auth_attempts.claim_challenge("h_claim", expected_revision=1),
+                    "revision_conflict")
 
 
 def test_missing_proof_spec_ends_unverified():
@@ -190,6 +241,8 @@ def test_missing_proof_spec_ends_unverified():
         out = auth_attempts.advance_attempt(a["id"])
     assert out["status"] == "unverified", out
     rec.assert_called_with("c_1", "github", "unverified")
+    emit.assert_any_call("login_completed", {"computer_id": "c_1", "credential": "github",
+                                             "status": "unverified", "attempt_id": a["id"]})
     # never authenticated
     assert store.get_auth_attempt(a["id"])["status"] == "unverified"
 
@@ -208,6 +261,14 @@ def test_prove_with_proof_spec_authenticated():
         out = auth_attempts.prove_attempt(a["id"])
     assert out["status"] == "authenticated", out
     rec.assert_called_with("c_1", "github", "success")
+
+
+def test_proof_selector_is_json_quoted_into_the_expression():
+    sel = "a[title='x\ny']"
+    with mock.patch("deskclient.eval_value", return_value="https://example.com/home"), \
+         mock.patch("deskclient.eval_js", return_value={"ok": True, "value": True}) as ev:
+        assert auth_attempts.check_proof(COMP, {"selector": sel}) is True
+    assert ev.call_args.args[1] == f"!!document.querySelector({json.dumps(sel)})", ev.call_args
 
 
 def test_captcha_then_otp_one_attempt():
@@ -314,6 +375,30 @@ def test_challenge_completion_does_not_record_success_until_prove():
     adv.assert_called_once_with(a["id"])
 
 
+def test_one_transient_observe_error_is_retried():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    clean = {"ok": True, "observation": _obs(href="https://example.com/home")}
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.observe_auth", side_effect=[
+             ApiError(502, "observe_error", "Target closed"), clean]), \
+         mock.patch("auth_attempts.time.sleep"), \
+         mock.patch.object(store, "record_credential_result"):
+        out = auth_attempts.advance_attempt(a["id"])
+    assert out["status"] == "unverified", out
+
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.observe_auth",
+                    side_effect=ApiError(502, "observe_error", "Target closed")) as observe, \
+         mock.patch("auth_attempts.time.sleep"), \
+         mock.patch.object(store, "record_credential_result"):
+        out = auth_attempts.advance_attempt(a["id"])
+    assert out["status"] == "failed" and observe.call_count == 2, out
+    assert out["fail_reason"] == "observe_failed:ApiError", out
+
+
 def test_totp_submit_carries_credential_domains():
     _cleanup()
     store.upsert_credential("c_1", "cred", "u", "secret", "JBSWY3DPEHPK3PXP",
@@ -327,6 +412,24 @@ def test_totp_submit_carries_credential_domains():
     assert submit.call_count == 1
     assert submit.call_args.kwargs["domains"] == ["example.com"]
     assert len(submit.call_args.kwargs["value"]) == 6
+
+
+def test_stale_totp_seed_is_typed_once_then_the_human_gets_the_challenge():
+    _cleanup()
+    store.upsert_credential("c_1", "cred", "u", "secret", "JBSWY3DPEHPK3PXP",
+                            None, ["example.com"])
+    a = auth_attempts.start_attempt("c_1", "cred", "https://example.com/login")
+    otp = {"ok": True, "observation": _obs(challenge_signals=["otp"],
+                                           visible_fields={"code": True})}
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.observe_auth", return_value=otp), \
+         mock.patch("deskclient.auth_submit_challenge", return_value={"ok": True}) as submit, \
+         mock.patch("deskclient.screenshot_b64", return_value=None), \
+         mock.patch("auth_attempts.time.time", return_value=1_000_000.0):
+        out = auth_attempts.advance_attempt(a["id"])
+    assert submit.call_count == 1, submit.call_count
+    assert out["status"] == "awaiting_human", out
+    assert store.get_handoff(out["current_handoff_id"])["kind"] == "otp"
 
 
 def test_handoff_submit_carries_credential_domains():
@@ -372,6 +475,28 @@ def test_bad_code_stays_pending_same_challenge():
         assert call.args[2] != "success", call
 
 
+def test_refused_code_is_not_typed_again_through_resume():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "cred", "https://example.com/login")
+    store.cas_auth_attempt_status(a["id"], "created", "awaiting_human", 0)
+    store.insert_handoff(
+        "h_bad", "c_1", "otp", "enter code", None, "cred",
+        continuation="submit_value", attempt_id=a["id"], sequence=1, revision=0)
+    store.set_attempt_handoff(a["id"], "h_bad")
+    handoffs.LOGIN_CTX["h_bad"] = {"computer_id": "c_1", "credential": "cred"}
+
+    with mock.patch.object(handoffs, "get_computer", return_value=COMP), \
+         mock.patch.object(handoffs, "auth_submit_challenge",
+                           return_value={"ok": False, "reason": "Invalid code"}) as submit, \
+         mock.patch.object(handoffs, "desk_json") as desk, \
+         mock.patch("auth_attempts.advance_attempt") as adv:
+        row = handoffs.submit_handoff_value("h_bad", "000000")
+    assert row["status"] == "pending", dict(row)
+    submit.assert_called_once()
+    desk.assert_not_called()
+    adv.assert_not_called()
+
+
 def test_list_helpers_and_set_handoff():
     _cleanup()
     a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
@@ -405,6 +530,40 @@ def test_login_result_compat_shape():
     assert lr["handoff_id"] == "h_9"
     assert lr["attempt_id"] == a["id"]
     assert "revision" in lr
+
+
+def test_fail_reason_is_kept_and_exposed():
+    _cleanup()
+    a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+    assert a["fail_reason"] is None
+    auth_attempts.fail_attempt(a["id"], reason="handoff_expired")
+    got = auth_attempts.get_attempt(a["id"])
+    assert got["fail_reason"] == "handoff_expired", got
+    assert got["login_result"]["reason"] == "authentication_failed", got
+    assert got["login_result"]["fail_reason"] == "handoff_expired", got
+    waited = auth_attempts._wait_payload(auth_attempts.attempt_public(
+        store.get_auth_attempt(a["id"])), changed=True)
+    assert waited["login_result"]["fail_reason"] == "handoff_expired", waited
+
+
+def test_fail_reason_column_is_migrated_onto_an_old_db():
+    import sqlite3
+    from store import Store
+    home = tempfile.mkdtemp(prefix="case-auth-attempts-old-")
+    try:
+        db = sqlite3.connect(os.path.join(home, "case.db"))
+        db.execute("CREATE TABLE auth_attempts (id TEXT PRIMARY KEY, computer_id TEXT NOT NULL, "
+                   "credential TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL "
+                   "DEFAULT 0, target_url TEXT, proof_spec TEXT, idempotency_key TEXT, "
+                   "current_handoff_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        db.commit()
+        db.close()
+        old = Store(home)
+        cols = {r["name"] for r in old.db.execute("PRAGMA table_info(auth_attempts)")}
+        old.db.close()
+        assert "fail_reason" in cols, cols
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_malformed_proof_spec_never_authenticates():
@@ -453,15 +612,4 @@ def test_upsert_preserves_credential_auth_profile():
 
 
 if __name__ == "__main__":
-    try:
-        for name, fn in sorted(globals().items()):
-            if name.startswith("test_"):
-                fn()
-                print("ok", name)
-        print("PASS")
-    finally:
-        try:
-            store.db.close()
-        except Exception:
-            pass
-        shutil.rmtree(_HOME, ignore_errors=True)
+    _helpers.run_tests(globals())

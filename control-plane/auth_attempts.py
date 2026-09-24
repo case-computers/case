@@ -18,19 +18,22 @@ import struct
 import time
 
 from errors import ApiError
-from store import store
+from store import AUTH_ATTEMPT_TERMINAL, HANDOFF_LIVE, store
 from util import new_id, row_get
-
-ACTIVE_STATUSES = frozenset(store.AUTH_ATTEMPT_ACTIVE)
-TERMINAL_STATUSES = frozenset({"authenticated", "unverified", "failed", "expired", "cancelled"})
 
 # Long-poll ceiling stays under a typical reverse-proxy read timeout (300s)
 # and the MCP wait budget.
 WAIT_TIMEOUT_MAX_S = 270
 WAIT_TIMEOUT_DEFAULT_S = 30
+WAIT_REREAD_S = 15.0
 
 # Optional: fn(computer_row, computer_id, credential_name) -> {"status": "success"|"failed"}|None
 _CAPTCHA_AUTO = None
+
+# attempt_id -> TOTP window its code was last typed in. A stale seed yields the
+# same wrong code for the whole window, and typing it again only spends the
+# site's lockout budget; once per window, then the human gets the challenge.
+_TOTP_WINDOW = {}
 
 # Signal priority matches deskd.classify order (generic tags only, no site names).
 _SIGNAL_PRIORITY = ("captcha", "otp", "approval", "email_verify", "passkey")
@@ -97,6 +100,7 @@ def attempt_public(row):
         "proof_level": _proof_level(proof_spec),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "fail_reason": row_get(row, "fail_reason"),
     }
 
 
@@ -117,13 +121,24 @@ def login_result(attempt, reason=None):
                 "reason": reason or "proof_missing_or_failed"}
     if st == "failed":
         return {**base, "status": "failed",
-                "reason": reason or "authentication_failed"}
+                "reason": reason or "authentication_failed",
+                "fail_reason": attempt.get("fail_reason")}
     if st == "cancelled":
         return {**base, "status": "failed", "reason": reason or "cancelled"}
     if st == "expired":
         return {**base, "status": "failed", "reason": reason or "expired"}
     # still active, caller usually shouldn't hit this via login_result
     return {**base, "status": st}
+
+
+def record_login(computer_id, credential, status, attempt_id=None):
+    """A definitive login outcome: vault health plus the login_completed event."""
+    store.record_credential_result(computer_id, credential, status)
+    data = {"computer_id": computer_id, "credential": credential, "status": status}
+    if attempt_id:
+        data["attempt_id"] = attempt_id
+    from events import emit
+    emit("login_completed", data)
 
 
 def _require(attempt_id):
@@ -147,19 +162,36 @@ def _publish_updated(pub):
     })
 
 
-def _cas_or_conflict(aid, from_status, to_status, revision_expect):
-    n = store.cas_auth_attempt_status(aid, from_status, to_status, revision_expect)
+def _cas_or_conflict(aid, from_status, to_status, revision_expect, fail_reason=None):
+    n = store.cas_auth_attempt_status(aid, from_status, to_status, revision_expect,
+                                      fail_reason=fail_reason)
     if n != 1:
         raise ApiError(409, "revision_conflict",
                        "auth attempt revision or status changed")
     pub = attempt_public(store.get_auth_attempt(aid))
+    if to_status in AUTH_ATTEMPT_TERMINAL:
+        _TOTP_WINDOW.pop(aid, None)
+        # A finished login got past its challenge; any other end leaves it unanswered.
+        _close_child(pub["current_handoff_id"],
+                     "completed" if to_status in ("authenticated", "unverified") else "failed")
     _publish_updated(pub)
     return pub
 
 
+def _close_child(hid, status):
+    """Terminalize a still-open child so handoff_list cannot keep a stale pending pin."""
+    if not hid:
+        return
+    h = store.get_handoff(hid)
+    if h and h["status"] in HANDOFF_LIVE:
+        store.transition_handoff(hid, status, answer=None)
+    import handoffs  # cycle: handoffs → auth_attempts on answer paths
+    handoffs.LOGIN_CTX.pop(hid, None)
+
+
 def _cursor_changed(pub, after_revision, after_handoff_id):
     """True when the attempt has moved past the client's last-seen cursor."""
-    if pub["status"] in TERMINAL_STATUSES:
+    if pub["status"] in AUTH_ATTEMPT_TERMINAL:
         return True
     if int(pub["revision"] or 0) > int(after_revision or 0):
         return True
@@ -173,7 +205,7 @@ def _wait_payload(pub, *, changed, wait_status=None):
     st = "changed" if changed else "timeout"
     if wait_status:
         st = wait_status
-    elif pub["status"] in TERMINAL_STATUSES:
+    elif pub["status"] in AUTH_ATTEMPT_TERMINAL:
         st = "terminal"
     # login_result on every payload: the MCP client relays it verbatim instead of
     # keeping its own copy of the status vocabulary.
@@ -190,14 +222,10 @@ def _totp(seed, at=None):
     return str((int.from_bytes(h[o:o + 4], "big") & 0x7FFFFFFF) % 10 ** 6).zfill(6)
 
 
-def _next_sequence(attempt_id):
-    return store.next_handoff_sequence(attempt_id)
-
-
 def _ensure_advancing(row, expected_revision=None):
     """CAS into advancing from created|awaiting_human; return (row, revision)."""
     status = row["status"]
-    if status in TERMINAL_STATUSES:
+    if status in AUTH_ATTEMPT_TERMINAL:
         raise ApiError(409, "illegal_transition",
                        f"attempt already terminal ({status})")
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
@@ -262,25 +290,22 @@ def get_attempt(attempt_id):
 
 def cancel_attempt(attempt_id, expected_revision=None):
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         if row["status"] == "cancelled":
             return attempt_public(row)
         raise ApiError(409, "illegal_transition",
                        f"cannot cancel terminal attempt in status {row['status']}")
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
-    hid = row_get(row, "current_handoff_id")
-    pub = _cas_or_conflict(attempt_id, row["status"], "cancelled", rev)
-    # Terminalize the open child so handoff_list cannot leave a stale pending pin.
-    if hid:
-        h = store.get_handoff(hid)
-        if h and h["status"] in ("pending", "validating"):
-            store.transition_handoff(hid, "failed", answer=None)
-            try:
-                import handoffs  # cycle: handoffs → auth_attempts on answer paths
-                handoffs.LOGIN_CTX.pop(hid, None)
-            except Exception:
-                pass
-    return pub
+    return _cas_or_conflict(attempt_id, row["status"], "cancelled", rev)
+
+
+def _observation(resp):
+    """The observation inside a deskd /auth/observe answer, or None."""
+    if not isinstance(resp, dict):
+        return None
+    if resp.get("observation") is not None:
+        return resp["observation"]
+    return resp if "challenge_signals" in resp else None
 
 
 def reobserve_if_solved(attempt_id):
@@ -291,7 +316,6 @@ def reobserve_if_solved(attempt_id):
     row = store.get_auth_attempt(attempt_id)
     if not row or row["status"] != "awaiting_human":
         return None
-    hid = row_get(row, "current_handoff_id")
 
     from deskclient import observe_auth
     from lifecycle import get_computer
@@ -300,24 +324,23 @@ def reobserve_if_solved(attempt_id):
         computer = get_computer(row["computer_id"])
         if row_get(computer, "state") != "running":
             return None
-        resp = observe_auth(computer)
+        observation = _observation(observe_auth(computer))
     except Exception:
         return None
-    observation = (resp or {}).get("observation") if isinstance(resp, dict) else None
-    if observation is None and isinstance(resp, dict) and "challenge_signals" in resp:
-        observation = resp
     if observation is None or _classify_kind(observation):
         return None  # challenge still up (or unreadable) — keep waiting
+    child = store.get_handoff(row["current_handoff_id"]) if row["current_handoff_id"] else None
+    if child is not None and child["status"] in HANDOFF_LIVE:
+        import handoffs  # cycle: handoffs → auth_attempts on answer paths
+        # deskd's text signals miss iframe gates (LinkedIn's checkpoint captcha); a
+        # page-verify child needs the same page check its "I'm done" gets.
+        if handoffs._continuation_of(child) == "verify_page" and \
+                handoffs._page_still_challenged(computer):
+            return None
     try:
-        pub = advance_attempt(attempt_id, observation=observation)
+        return advance_attempt(attempt_id, observation=observation)
     except ApiError:
         return None  # raced with an Assist submit; the waiter sees that change
-    # The pending child is answered — the human did it on the desk itself.
-    if hid and pub["status"] != "awaiting_human":
-        h = store.get_handoff(hid)
-        if h and h["status"] in ("pending", "validating"):
-            store.transition_handoff(hid, "completed", answer=None)
-    return pub
 
 
 async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,
@@ -370,7 +393,7 @@ async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,
                 return _wait_payload(pub, changed=False, wait_status="timeout")
             try:
                 type_, data = await asyncio.wait_for(
-                    q.get(), timeout=min(remaining, 15.0))
+                    q.get(), timeout=min(remaining, WAIT_REREAD_S))
             except asyncio.TimeoutError:
                 # Periodic re-read covers missed publishes (no LOOP / race).
                 pub = attempt_public(_require(attempt_id))
@@ -386,13 +409,13 @@ async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,
         unsubscribe(q)
 
 
-def claim_challenge(handoff_id, expected_revision):
-    """CAS handoff pending → validating (Assist / answer path scaffolding)."""
+def claim_challenge(handoff_id, expected_revision, answer=None):
+    """CAS handoff pending → validating, writing `answer` (never an OTP) in the same step."""
     row = store.get_handoff(handoff_id)
     if not row:
         raise ApiError(404, "not_found", f"handoff {handoff_id} not found")
     n = store.cas_handoff_status(
-        handoff_id, "pending", "validating", int(expected_revision))
+        handoff_id, "pending", "validating", int(expected_revision), answer=answer)
     if n != 1:
         raise ApiError(409, "revision_conflict",
                        "handoff revision or status changed")
@@ -417,15 +440,17 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
                     challenge_fingerprint=None, expected_revision=None):
     """Bind a child handoff and move the attempt to awaiting_human."""
     row = _require(attempt_id)
-    row, rev = _ensure_advancing(row, expected_revision)
+    if row["status"] == "proving":
+        raise ApiError(409, "illegal_transition", "cannot raise a challenge while proving")
     # One pending/validating child at a time.
-    if row["current_handoff_id"]:
-        cur = store.get_handoff(row["current_handoff_id"])
-        if cur and cur["status"] in ("pending", "validating"):
-            # Ensure status is awaiting_human if we somehow still hold a live child.
-            if row["status"] == "advancing":
-                return _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
-            return attempt_public(row)
+    cur = store.get_handoff(row["current_handoff_id"]) if row["current_handoff_id"] else None
+    live = cur is not None and cur["status"] in HANDOFF_LIVE
+    if live and row["status"] == "awaiting_human" and (
+            expected_revision is None or int(expected_revision) == int(row["revision"] or 0)):
+        return attempt_public(row)
+    row, rev = _ensure_advancing(row, expected_revision)
+    if live:
+        return _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
 
     from deskclient import screenshot_b64  # cycle: handoffs → auth_attempts → deskclient
     from handoffs import create_handoff  # cycle: handoffs → auth_attempts
@@ -438,7 +463,7 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
             screenshot = screenshot_b64(computer)
         except Exception:
             screenshot = None
-    seq = _next_sequence(attempt_id)
+    seq = store.next_handoff_sequence(attempt_id)
     h = create_handoff(
         computer, kind, prompt, screenshot=screenshot,
         login_credential=row["credential"], domain=domain,
@@ -447,30 +472,25 @@ def raise_challenge(attempt_id, kind, prompt, screenshot=None, domain=None,
     store.set_attempt_handoff(attempt_id, h["id"])
     # Pointer can change before the awaiting_human CAS; wake waiters early.
     _publish_updated(attempt_public(store.get_auth_attempt(attempt_id)))
+    try:
+        pub = _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
+    except ApiError:
+        _close_child(h["id"], "failed")   # a cancel or fail won the race; no orphan
+        raise
     # Provisional vault health, definitive answer arrives on prove/fail/expire.
     store.record_credential_result(row["computer_id"], row["credential"], "challenge")
-    return _cas_or_conflict(attempt_id, "advancing", "awaiting_human", rev)
+    return pub
 
 
 def fail_attempt(attempt_id, reason=None, expected_revision=None):
-    """Terminal failure; updates credential last_status=failed.
-
-    `reason` is for callers building a LoginResult; not stored on the attempt row.
-    """
-    _ = reason
+    """Terminal failure; updates credential last_status=failed and keeps `reason`
+    as the attempt's fail_reason."""
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         return attempt_public(row)
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
-    pub = _cas_or_conflict(attempt_id, row["status"], "failed", rev)
-    store.record_credential_result(row["computer_id"], row["credential"], "failed")
-    from events import emit
-    emit("login_completed", {
-        "computer_id": row["computer_id"],
-        "credential": row["credential"],
-        "status": "failed",
-        "attempt_id": attempt_id,
-    })
+    pub = _cas_or_conflict(attempt_id, row["status"], "failed", rev, fail_reason=reason)
+    record_login(row["computer_id"], row["credential"], "failed", attempt_id=attempt_id)
     return pub
 
 
@@ -536,9 +556,9 @@ def check_proof(computer, proof_spec, observation=None):
             return False
 
     if "selector" in predicates:
-        sel = predicates["selector"].replace("\\", "\\\\").replace("'", "\\'")
+        sel = json.dumps(predicates["selector"])
         try:
-            out = eval_js(computer, f"!!document.querySelector('{sel}')", timeout_s=10)
+            out = eval_js(computer, f"!!document.querySelector({sel})", timeout_s=10)
             val = (out or {}).get("value") if isinstance(out, dict) else out
             if not val:
                 return False
@@ -563,7 +583,7 @@ def prove_attempt(attempt_id, expected_revision=None, observation=None):
     Only `authenticated` records credential success / login_completed(success).
     """
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         raise ApiError(409, "illegal_transition",
                        f"attempt already terminal ({row['status']})")
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
@@ -581,42 +601,16 @@ def prove_attempt(attempt_id, expected_revision=None, observation=None):
         rev = int(row["revision"] or 0)
 
     proof_spec = parse_proof_spec(row["proof_spec"])
-    from events import emit
     from lifecycle import get_computer
 
-    if not proof_spec:
-        # Spec: missing proof ends unverified, never authenticated.
-        pub = _cas_or_conflict(attempt_id, "proving", "unverified", rev)
-        store.record_credential_result(row["computer_id"], row["credential"], "unverified")
-        emit("login_completed", {
-            "computer_id": row["computer_id"],
-            "credential": row["credential"],
-            "status": "unverified",
-            "attempt_id": attempt_id,
-        })
-        return pub
-
-    computer = get_computer(row["computer_id"])
-    ok = check_proof(computer, proof_spec, observation=observation)
-    if ok:
+    # Spec: missing proof ends unverified, never authenticated.
+    if proof_spec and check_proof(get_computer(row["computer_id"]), proof_spec,
+                                  observation=observation):
         pub = _cas_or_conflict(attempt_id, "proving", "authenticated", rev)
-        store.record_credential_result(row["computer_id"], row["credential"], "success")
-        emit("login_completed", {
-            "computer_id": row["computer_id"],
-            "credential": row["credential"],
-            "status": "success",
-            "attempt_id": attempt_id,
-        })
+        record_login(row["computer_id"], row["credential"], "success", attempt_id=attempt_id)
         return pub
-
     pub = _cas_or_conflict(attempt_id, "proving", "unverified", rev)
-    store.record_credential_result(row["computer_id"], row["credential"], "unverified")
-    emit("login_completed", {
-        "computer_id": row["computer_id"],
-        "credential": row["credential"],
-        "status": "unverified",
-        "attempt_id": attempt_id,
-    })
+    record_login(row["computer_id"], row["credential"], "unverified", attempt_id=attempt_id)
     return pub
 
 
@@ -631,13 +625,13 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
                             expected_revision=expected_revision)
 
     row = _require(attempt_id)
-    if row["status"] in TERMINAL_STATUSES:
+    if row["status"] in AUTH_ATTEMPT_TERMINAL:
         return attempt_public(row)
     row, rev = _ensure_advancing(row, expected_revision)
     # Clear finished child pointer while re-entering from awaiting_human.
     if row["current_handoff_id"]:
         cur = store.get_handoff(row["current_handoff_id"])
-        if cur and cur["status"] not in ("pending", "validating"):
+        if cur and cur["status"] not in HANDOFF_LIVE:
             store.set_attempt_handoff(attempt_id, None)
             row = store.get_auth_attempt(attempt_id)
 
@@ -646,22 +640,27 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
 
     computer = get_computer(row["computer_id"])
     if observation is None:
-        try:
-            resp = observe_auth(computer)
-            observation = (resp or {}).get("observation") if isinstance(resp, dict) else None
-            if observation is None and isinstance(resp, dict) and "challenge_signals" in resp:
-                observation = resp
-        except Exception as e:
-            return fail_attempt(attempt_id, reason=f"observe_failed:{type(e).__name__}")
+        # One retry: right after a human finishes a challenge the page is still
+        # navigating (502) or deskd is mid-injection (423).
+        for retry in (True, False):
+            try:
+                observation = _observation(observe_auth(computer))
+                break
+            except Exception as e:
+                if not (retry and isinstance(e, ApiError) and e.status in (502, 423)):
+                    return fail_attempt(attempt_id, reason=f"observe_failed:{type(e).__name__}")
+                time.sleep(1.0)
 
     kind = _classify_kind(observation)
 
     # Auto TOTP when vault has a seed.
     if kind == "otp":
         material = store.credential_material(row["computer_id"], row["credential"])
-        if material and material.get("totp_seed"):
+        window = int(time.time() // 30)
+        if material and material.get("totp_seed") and _TOTP_WINDOW.get(attempt_id) != window:
+            _TOTP_WINDOW[attempt_id] = window
             try:
-                code = _totp(material["totp_seed"])
+                code = _totp(material["totp_seed"], window * 30)
                 out = auth_submit_challenge(computer, "otp", value=code,
                                             domains=material.get("domains") or [])
                 if isinstance(out, dict) and out.get("ok"):

@@ -43,6 +43,9 @@ services:
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_BRAIN_URL: ${CASE_BRAIN_URL:-http://ui:4174/api/brain}
       CASE_BRAIN_CMD: ${CASE_BRAIN_CMD:-}
+      CASE_BRAIN_TIMEOUT: ${CASE_BRAIN_TIMEOUT:-}
+      CASE_SESSION_KEEPER_INTERVAL_S: ${CASE_SESSION_KEEPER_INTERVAL_S:-}
+      CASE_SESSION_KEEPER_BUSY_S: ${CASE_SESSION_KEEPER_BUSY_S:-}
       CASE_MAX_RUNNING: ${CASE_MAX_RUNNING:-4}
       # Total RAM the awake desktops may hold. Unset = 75% of what the engine sees,
       # which on a Mac is the Docker VM, not the Mac.
@@ -62,6 +65,11 @@ services:
       CASE_DBC_AUTHTOKEN: ${CASE_DBC_AUTHTOKEN:-}
       CASE_DBC_USERNAME: ${CASE_DBC_USERNAME:-}
       CASE_DBC_PASSWORD: ${CASE_DBC_PASSWORD:-}
+      CASE_DBC_PROXY: ${CASE_DBC_PROXY:-}
+      CASE_DBC_PROXYTYPE: ${CASE_DBC_PROXYTYPE:-}
+      # Usage stats opt-out (see .env.example)
+      CASE_TELEMETRY: ${CASE_TELEMETRY:-}
+      DO_NOT_TRACK: ${DO_NOT_TRACK:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - case-home:/data
@@ -87,6 +95,8 @@ services:
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_MCP_BIND: "0.0.0.0"
       CASE_MCP_PORT: "8788"
+      CASE_PUBLIC_HOST: ${CASE_PUBLIC_HOST:-}
+      CASE_ALLOWED_HOSTS: ${CASE_ALLOWED_HOSTS:-}
       # CASE_MCP_SCHEDULES=1 unlocks the schedule_* tools (see .env.example)
       CASE_MCP_SCHEDULES: ${CASE_MCP_SCHEDULES:-}
     command: ["python", "/app/mcp/case_mcp.py"]
@@ -114,7 +124,6 @@ services:
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_THREADS: /data/threads.json
       CASE_HOME: /data
-      CASE_LOCAL: "1"
       PORT: "4174"
       CASE_NTFY_URL: ${CASE_NTFY_URL:-https://ntfy.sh}
       CASE_NTFY_TOPIC: ${CASE_NTFY_TOPIC:-}

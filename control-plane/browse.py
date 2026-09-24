@@ -73,6 +73,12 @@ const __occluded=el=>{
   if(!hit)return false;
   return hit!==el&&!el.contains(hit)&&!hit.contains(el);
 };
+const __name=el=>{
+  const tag=el.tagName.toLowerCase();
+  return (el.getAttribute('aria-label')||el.placeholder||
+    ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
+    el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
+};
 const __contained=r=>__boxes.some(b=>r.x>=b.x&&r.x+r.w<=b.x+b.w&&r.y>=b.y&&r.y+r.h<=b.y+b.h);
 const __topRect=el=>{
   let r=el.getBoundingClientRect(),x=r.left,y=r.top;
@@ -92,9 +98,7 @@ const __push=(el,where)=>{
   __seen.add(el);
   __boxes.push(tr);
   const tag=el.tagName.toLowerCase();
-  const name=(el.getAttribute('aria-label')||el.placeholder||
-    ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
-    el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
+  const name=__name(el);
   const bx=(window.outerWidth-window.innerWidth)/2;
   __els.push({el,tag,type:(el.type||el.getAttribute('role')||''),name,
     value:('value'in el&&!__secretish(el)&&tag!=='button')?String(el.value).slice(0,40):'',
@@ -177,7 +181,7 @@ const __coords=(el,nm,tag,healed,oldI,newI)=>{
 const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
 if(stored&&stored.isConnected){
   const tag=stored.tagName.toLowerCase();
-  const nm=(stored.getAttribute('aria-label')||stored.placeholder||stored.innerText||'').trim().replace(/\\s+/g,' ').slice(0,80);
+  const nm=__name(stored);
   if(__nameOk(nm))return __coords(stored,nm,tag,false,__i,__i);
 }
 if(__i>=0&&__i<__els.length){
@@ -214,6 +218,14 @@ def _stamp(row):
         return False
 
 
+def _snapshot_or_none(row):
+    # the action already happened; a snapshot lost to navigation churn is no reason to raise
+    try:
+        return snapshot(row)
+    except ApiError:
+        return None
+
+
 def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
     """The page as it stands once the action stops moving it."""
     if not stamped:
@@ -229,10 +241,7 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
                 continue
             if r.get("value") == "complete":
                 break
-        try:
-            return snapshot(row)
-        except ApiError:
-            return None
+        return _snapshot_or_none(row)
     deadline = time.time() + budget_s
     grace = time.time() + settle_s
     while time.time() < deadline:
@@ -248,18 +257,15 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
             break
         navigated, ready = v[0], v[1]
         if navigated and ready == "complete":
-            return snapshot(row)
+            return _snapshot_or_none(row)
         if not navigated and time.time() >= grace:
-            fresh = snapshot(row)
+            fresh = _snapshot_or_none(row)
             try:
                 eval_js(row, f"delete {_STAMP}", 3)
             except ApiError:
                 pass
             return fresh
-    try:
-        return snapshot(row)
-    except ApiError:
-        return None
+    return _snapshot_or_none(row)
 
 
 def _attach_snapshot(row, res, want, stamped):
@@ -387,7 +393,9 @@ def hover(row, ref, name=None):
 
 
 UPLOAD_MAX = 5 * 1024 * 1024
-_UPLOAD_CHUNK = 6000
+# Base64 chars per /eval. deskd's /eval has no body cap of its own and CDP takes
+# multi-MB messages; 256 KiB keeps a 5 MiB file to ~27 round trips instead of ~1170.
+_UPLOAD_CHUNK = 256 * 1024
 
 
 def upload(row, ref, path, name=None):
@@ -424,7 +432,8 @@ def upload(row, ref, path, name=None):
     data = base64.b64encode(raw).decode("ascii")
     eval_js(row, "window.__caseUp=''", 5)
     for i in range(0, len(data), _UPLOAD_CHUNK):
-        eval_js(row, "window.__caseUp+=%s" % json.dumps(data[i:i + _UPLOAD_CHUNK]), 10)
+        # ;0 so the eval does not echo the whole buffer back on every chunk
+        eval_js(row, "window.__caseUp+=%s;0" % json.dumps(data[i:i + _UPLOAD_CHUNK]), 10)
     done = eval_js(row, _iife(f"""
 const __i={use_ref};
 const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
@@ -512,6 +521,8 @@ def wait_for(row, selector=None, text=None, gone=False, network_idle=False, time
     LLM turn per poll — the same trade navigate() already makes."""
     if not (selector or text or network_idle):
         raise ApiError(400, "bad_request", "need selector, text or network_idle")
+    if network_idle and (selector or text):
+        raise ApiError(400, "bad_request", "network_idle cannot be combined with selector or text")
     if selector:
         cond = f"!!document.querySelector({json.dumps(selector)})"
     elif text:

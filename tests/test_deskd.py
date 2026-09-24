@@ -7,9 +7,14 @@ module on the host; the functions under test don't use it.
 """
 import base64
 import os
+import subprocess
 import sys
+import threading
+import time
 import types
 import unittest.mock as mock
+
+import _helpers
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "image"))
 os.environ.setdefault("DESK_TOKEN", "test")
@@ -185,6 +190,20 @@ def test_question_challenge_is_never_injected_into_page():
     assert reason == "unknown challenge kind 'question'", reason
     fill.assert_not_called()
     press.assert_not_called()
+
+
+def test_approval_action_takes_only_approve_or_deny():
+    tab = FakeTab()
+    with mock.patch.object(deskd.time, "sleep") as sleep, \
+         mock.patch.object(deskd, "settle") as settle:
+        for bad in (None, "", "no", "123456"):
+            assert deskd.apply_challenge_action(tab, "approval", bad) == \
+                "approval expects 'approve' or 'deny'", bad
+        assert deskd.apply_challenge_action(tab, "approval", "deny") == "denied by human"
+        sleep.assert_not_called()
+        settle.assert_not_called()
+        assert deskd.apply_challenge_action(tab, "approval", "Approve") is None
+        settle.assert_called_once()
 
 
 # ---- challenge_signals_from_text: generic tags for durable-auth observations ----
@@ -573,6 +592,67 @@ def test_injection_gates_screenshot_exec_and_file():
         deskd.state["injecting"] = False
 
 
+def _exec(command, timeout_s):
+    t0 = time.time()
+    r = _client().post("/exec", headers=H, json={
+        "command": command, "timeout_s": timeout_s, "cwd": tempfile.gettempdir()})
+    return r.json(), time.time() - t0
+
+
+def _running(pattern):
+    return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
+
+
+def test_exec_returns_when_bash_exits_despite_a_background_job():
+    # the job inherits the pipes; waiting for their EOF ran the call into its timeout
+    out, took = _exec("sleep 30.17 & echo started", 10)
+    try:
+        assert out["exit_code"] == 0 and out["stdout"] == "started\n", out
+        assert took < 5, took
+        # nor are its pipe readers left blocked on the job for as long as it runs
+        assert not [t for t in threading.enumerate()
+                    if getattr(t, "_target", None) is deskd._slurp]
+    finally:
+        subprocess.run(["pkill", "-f", "sleep 30.17"])
+
+
+def test_exec_timeout_kills_the_whole_command():
+    out, took = _exec("sleep 30.23; echo done", 1)
+    assert out["exit_code"] == 124 and "timed out" in out["stderr"], out
+    assert took < 5, took
+    time.sleep(0.2)
+    assert not _running("sleep 30.23")          # only bash died, the child lingered
+
+
+def test_exec_passes_a_command_own_124_through():
+    out, _ = _exec("exit 124", 5)
+    assert out["exit_code"] == 124 and "timed out" not in out["stderr"], out
+
+
+def test_bad_input_is_400_not_500():
+    c = _client()
+    for r in (c.post("/exec", headers=H, json={"command": "id", "timeout_s": "abc"}),
+              c.post("/eval", headers=H, json={"expression": "1", "timeout_s": None}),
+              c.put("/file", headers={**H, "content-length": "x"},
+                    params={"path": "/home/agent/x"}, content=b""),
+              c.post("/login", headers=H, json={"url": "https://site.com/login"}),
+              c.post("/login/resume", headers=H, json={})):
+        assert r.status_code == 400, (r.request.url, r.status_code, r.text)
+        assert r.json()["error"]["code"] == "bad_request"
+
+
+def test_navigate_surfaces_the_navigation_error():
+    # chromium parks a failed load on chrome-error://, which login then reported as
+    # a foreign origin instead of the DNS failure it was
+    tab = RecordingTab()
+    tab.cmd = lambda method, **p: {"frameId": "f", "errorText": "net::ERR_NAME_NOT_RESOLVED"}
+    with mock.patch.object(deskd, "Tab", lambda: tab):
+        out = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
+                           "url": "https://site.com/login"})
+    assert out == {"status": "failed", "reason": "login error: RuntimeError: "
+                   "navigation failed: net::ERR_NAME_NOT_RESOLVED"}, out
+
+
 def test_file_get_rejects_paths_outside_home():
     c = _client()
     assert c.get("/file", headers=H, params={"path": "/etc/passwd"}).status_code == 400
@@ -666,6 +746,75 @@ def test_login_clears_password_field_while_still_gated():
     assert deskd.state["injecting"] is False
 
 
+def test_overlapping_injections_keep_the_gate_closed():
+    # The first injecting route to finish used to set injecting False while another
+    # was still typing, and a second /login stomped the first one's state.
+    started, release = threading.Event(), threading.Event()
+
+    def apply(tab, kind, value=None):
+        if not started.is_set():
+            started.set()
+            release.wait(5)
+
+    deskd.state["login"] = {"kind": "approval", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    with mock.patch.object(deskd, "Tab", RecordingTab), \
+         mock.patch.object(deskd, "apply_challenge_action", apply):
+        resume = threading.Thread(target=deskd.login_resume, args=({"value": "approve"},))
+        resume.start()
+        try:
+            assert started.wait(5)
+            # every injecting route refuses to type alongside another
+            assert deskd.auth_submit_challenge({"kind": "approval"}).status_code == 409
+            r = _client().post("/exec", headers=H, json={"command": "echo leaked"})
+            assert r.status_code == 423, r.text
+            again = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
+                                 "url": "https://site.com/login"})
+            assert again.status_code == 409
+        finally:
+            release.set()
+            resume.join()
+    assert deskd.state["injecting"] is False and deskd.state["injections"] == 0
+
+
+def test_resume_refused_during_an_injection_keeps_the_held_login():
+    held = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    deskd.state["login"] = held
+    assert deskd.inject_begin()
+    try:
+        r = deskd.login_resume({"value": "123456"})
+        assert r.status_code == 409
+        assert deskd.state["login"] is held
+    finally:
+        deskd.inject_end()
+        deskd.state["login"] = None
+    assert deskd.state["injections"] == 0
+
+
+class SlowEvalTab(RecordingTab):
+    """Runtime.evaluate whose promise is still pending while `during` runs."""
+
+    def __init__(self, during):
+        super().__init__()
+        self.ws = types.SimpleNamespace(settimeout=lambda t: None)
+        self.during = during
+
+    def cmd(self, method, **params):
+        self.during()
+        return {"result": {"value": "hunter2"}}
+
+
+def test_eval_started_before_an_injection_is_refused():
+    def inject():
+        deskd.inject_begin()
+        deskd.inject_end()
+    with mock.patch.object(deskd, "Tab", lambda: SlowEvalTab(inject)):
+        r = _client().post("/eval", headers=H, json={"expression": "pw.value"})
+    assert r.status_code == 423 and "hunter2" not in r.text, r.text
+    with mock.patch.object(deskd, "Tab", lambda: SlowEvalTab(lambda: None)):
+        r = _client().post("/eval", headers=H, json={"expression": "1"})
+    assert r.json() == {"ok": True, "value": "hunter2", "truncated": False}, r.text
+
+
 def test_login_rejects_http_redirect_before_form_fill():
     tab = RecordingTab()
     tab.js = lambda expr: "http://site.com/login" if expr == "location.href" else None
@@ -701,6 +850,41 @@ def test_login_resume_rechecks_nonapproval_code_path_origin():
     assert out == {"status": "failed", "reason": "page origin 'evil.example' not in credential domains"}
     assert "topsecret" not in out["reason"]
     apply.assert_not_called()
+
+
+def test_login_resume_post_check_reads_the_page_not_the_url():
+    for href in ("https://site.com/home?next=%2Fa%2Fdash", "https://site.com/home?flash=invalid"):
+        tab = FakeTab(text="Welcome back", href=href)
+        tab.close = lambda: None
+        deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+        with mock.patch.object(deskd, "Tab", lambda: tab), \
+             mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+            assert deskd.login_resume({"value": "123456"}) == {"status": "success"}, href
+    tab = FakeTab(text="That code is invalid", href="https://site.com/otp")
+    tab.close = lambda: None
+    deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+        out = deskd.login_resume({"value": "123456"})
+    assert out["status"] == "failed" and "invalid" in out["reason"], out
+
+
+def test_classify_totp_post_check_ignores_the_url():
+    class TotpTab(FakeTab):
+        def __init__(self):
+            super().__init__(text="Two-factor authentication: enter the code")
+
+        def js(self, expr):
+            if expr == "location.href" and self._text == "Welcome":
+                return "https://site.com/home?next=%2Fa%2Fdash&flash=invalid"
+            return super().js(expr)
+
+    tab = TotpTab()
+    seed = base64.b32encode(b"12345678901234567890").decode()
+    with mock.patch.object(deskd, "fill", side_effect=lambda *a: setattr(tab, "_text", "Welcome")), \
+         mock.patch.object(deskd, "press_enter"), mock.patch.object(deskd, "settle"):
+        r = deskd.classify(tab, {"name": "x", "totp_seed": seed, "domains": ["site.com"]})
+    assert r == {"status": "success", "totp_used": True}, r
 
 
 class ChallengeTab:
@@ -746,9 +930,27 @@ def test_auth_submit_challenge_rejects_foreign_https_without_query_secret():
     assert "topsecret" not in out["reason"]
     apply.assert_not_called()
 
+
+def test_auth_submit_challenge_refused_code_is_not_ok_and_keeps_the_login_held():
+    held = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    deskd.state["login"], deskd.state["in_login"] = dict(held), True
+    tab = FakeTab(text="Invalid code. Enter the verification code", href="https://site.com/otp")
+    tab.close = lambda: None
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+        out = deskd.auth_submit_challenge({"kind": "otp", "value": "000000",
+                                           "domains": ["site.com"]})
+    assert out["ok"] is False and "Invalid code" in out["reason"], out
+    assert deskd.state["login"] == held and deskd.state["in_login"] is True
+
+    tab = FakeTab(text="Welcome back", href="https://site.com/home")
+    tab.close = lambda: None
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+        out = deskd.auth_submit_challenge({"kind": "otp", "value": "123456",
+                                           "domains": ["site.com"]})
+    assert out == {"ok": True}, out
+    assert deskd.state["login"] is None and deskd.state["in_login"] is False
+
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

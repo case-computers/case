@@ -31,7 +31,7 @@ from errors import ApiError
 from events import emit
 from lifecycle import get_computer
 from notify import notifier
-from store import store
+from store import HANDOFF_TERMINAL, store
 from util import new_id, row_get
 
 
@@ -54,8 +54,9 @@ CONTINUATION_BY_KIND = {
 
 VERIFY_DONE_VALUES = frozenset({"done", "approve", "i'm done", "im done", "i am done"})
 
-TERMINAL_STATUSES = frozenset({"completed", "answered", "failed", "expired"})
-
+# The only answers an approval takes. ntfy and Telegram buttons and the Assist page
+# send these; anything else (a typed "no", an empty body) is refused, not approved.
+APPROVAL_VALUES = ("approve", "deny")
 
 def continuation_for(kind, continuation=None):
     if continuation:
@@ -99,7 +100,7 @@ def _durable_answer(kind, continuation, value):
     # Approval markers first, "approve" is also a verify_page synonym, but an
     # approval handoff must persist approve/deny, not collapse to "done".
     if kind == "approval":
-        return low if low in ("approve", "deny") else None
+        return low if low in APPROVAL_VALUES else None
     if continuation == "verify_page" or low in VERIFY_DONE_VALUES:
         return "done"
     if low in ("approve", "deny"):
@@ -195,9 +196,7 @@ def expire_stale():
             continue
         if ctx:   # login handoffs only, a plain approval must never touch the vault
             # nobody answered: the login did not happen, and the vault says so
-            store.record_credential_result(ctx["computer_id"], ctx["credential"], "failed")
-            emit("login_completed", {"computer_id": ctx["computer_id"],
-                                     "credential": ctx["credential"], "status": "failed"})
+            auth_attempts.record_login(ctx["computer_id"], ctx["credential"], "failed")
     # An attempt whose challenge was answered elsewhere (or never raised one) has no
     # handoff to expire, so it would sit `active` forever and 409 every later login.
     for a in store.stale_active_auth_attempts(cutoff):
@@ -237,7 +236,7 @@ def _require_open_handoff(hid):
     status = row["status"]
     if status == "expired":
         raise ApiError(409, "handoff_expired", "handoff expired after 15 minutes")
-    if status in TERMINAL_STATUSES:
+    if status in HANDOFF_TERMINAL:
         raise ApiError(409, "already_answered", "handoff already answered")
     if status == "validating":
         raise ApiError(409, "validating", "handoff is already being validated")
@@ -263,13 +262,11 @@ def _complete(hid, *, answer=None, value_present=False):
 
 def _claim_validating(row, answer):
     """CAS pending → validating (claim_challenge) before desk work."""
-    rev = int(row["revision"] or 0)
     import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
-    auth_attempts.claim_challenge(row["id"], rev)
     # Never park an OTP in validating.answer, soft-fail / restart paths read this row.
-    stored = _durable_answer(row["kind"], _continuation_of(row), answer)
-    store.transition_handoff(row["id"], "validating", answer=stored)
-    return store.get_handoff(row["id"])
+    auth_attempts.claim_challenge(
+        row["id"], int(row["revision"] or 0),
+        answer=_durable_answer(row["kind"], _continuation_of(row), answer))
 
 
 def _continue_attempt(attempt_id):
@@ -291,9 +288,8 @@ def _finish_attempt_child(hid, hrow, *, answer=None, value_present=False, ctx=No
         _continue_attempt(aid)
     elif ctx:
         # Legacy login handoff without an attempt, preserve prior success path.
-        store.record_credential_result(ctx["computer_id"], ctx["credential"], "success")
-        emit("login_completed", {"computer_id": ctx["computer_id"],
-                                 "credential": ctx["credential"], "status": "success"})
+        import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
+        auth_attempts.record_login(ctx["computer_id"], ctx["credential"], "success")
     return done
 
 
@@ -302,16 +298,14 @@ def _fail_attempt_child(hid, hrow, value, ctx=None):
     stored = _durable_answer(hrow["kind"], _continuation_of(hrow), value)
     store.transition_handoff(hid, "failed", answer=stored)
     aid = _attempt_id_of(hrow)
+    import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
     if aid:
         try:
-            import auth_attempts  # cycle: auth_attempts → handoffs on raise_challenge
             auth_attempts.fail_attempt(aid, reason="denied")
         except Exception as e:
             log.warning("fail_attempt after deny %s: %s", aid, e)
     elif ctx:
-        store.record_credential_result(ctx["computer_id"], ctx["credential"], "failed")
-        emit("login_completed", {"computer_id": ctx["computer_id"],
-                                 "credential": ctx["credential"], "status": "failed"})
+        auth_attempts.record_login(ctx["computer_id"], ctx["credential"], "failed")
     return store.get_handoff(hid)
 
 
@@ -325,15 +319,13 @@ def _resume_and_finish(hid, ctx, value, *, value_present=True, hrow=None):
     advance_attempt, the attempt (not LOGIN_CTX) owns credential ok / prove.
     """
     hrow = hrow or store.get_handoff(hid)
-    status, reason = "failed", None
+    status = "failed"
     try:
         row = get_computer(ctx["computer_id"])
         out = desk_json(row, "POST", "/login/resume", json={"value": value}, timeout=90)
         status = out.get("status", "failed")
-        reason = out.get("reason")
     except Exception as e:
         log.warning("login resume failed: %s", e)
-        status, reason = "failed", str(e)
 
     if status == "success":
         return _finish_attempt_child(
@@ -341,8 +333,7 @@ def _resume_and_finish(hid, ctx, value, *, value_present=True, hrow=None):
             answer=value if value_present else (hrow["answer"] if hrow else None),
             value_present=value_present, ctx=ctx)
 
-    denied = isinstance(reason, str) and "denied" in reason.lower()
-    if denied or (isinstance(value, str) and value.lower() == "deny"):
+    if isinstance(value, str) and value.lower() == "deny":
         return _fail_attempt_child(hid, hrow, value, ctx=ctx)
 
     # Soft fail: challenge still present / bad code / transient, human can retry.
@@ -357,6 +348,10 @@ def submit_handoff_value(hid, value):
     if _continuation_of(row) != "submit_value":
         raise ApiError(400, "bad_request",
                        f"handoff continuation is {_continuation_of(row)!r}, not submit_value")
+    if row["kind"] == "approval":
+        value = str(value).strip().lower() if isinstance(value, str) else ""
+        if value not in APPROVAL_VALUES:
+            raise ApiError(400, "bad_request", "approval handoff expects 'approve' or 'deny'")
     _claim_validating(row, value)
     row = store.get_handoff(hid)
     aid = _attempt_id_of(row)
@@ -366,19 +361,19 @@ def submit_handoff_value(hid, value):
         # Durable attempt: prefer generic challenge submit (works after prior resume
         # cleared deskd state["login"]); fall back to /login/resume while held.
         computer = get_computer(row["computer_id"])
-        submitted = False
+        out = None
         try:
             attempt = store.get_auth_attempt(aid)
             credential = store.get_credential(row["computer_id"], attempt["credential"])
             domains = json.loads(credential["domains"]) if credential else []
             out = auth_submit_challenge(computer, row["kind"], value=value, domains=domains)
-            submitted = bool(isinstance(out, dict) and out.get("ok"))
         except Exception as e:
             log.warning("auth_submit_challenge failed: %s", e)
-            submitted = False
-        if submitted:
+        if isinstance(out, dict) and out.get("ok"):
             return _finish_attempt_child(hid, row, answer=value, value_present=True, ctx=None)
-        if ctx:
+        # deskd already refused this code (the page kept its code wall, or the origin
+        # check failed); /login/resume would only type the same code again.
+        if ctx and not (row["kind"] == "otp" and isinstance(out, dict)):
             return _resume_and_finish(hid, ctx, value, value_present=True, hrow=row)
         # Soft fail, stay pending for retry; never keep the OTP in SQLite.
         store.transition_handoff(hid, "pending", answer=None)
@@ -396,14 +391,7 @@ def _page_still_challenged(computer_row):
     except Exception as e:
         log.warning("handoff verify eval failed: %s", e)
         return True
-    v = (verify or {}).get("value") if isinstance(verify, dict) else None
-    page_blob, has_password = "", False
-    if isinstance(v, dict):
-        page_blob = v.get("text") if isinstance(v.get("text"), str) else ""
-        has_password = bool(v.get("hasPassword"))
-    elif isinstance(v, str):
-        page_blob = v
-    if captcha.still_challenge(page_blob, has_password):
+    if captcha.verify_still_challenged(verify):
         return True
     try:
         gate = eval_js(computer_row, captcha.GATE_JS, timeout_s=10)

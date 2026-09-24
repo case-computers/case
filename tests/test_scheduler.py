@@ -5,11 +5,9 @@ import os
 import sys
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: the run-status tests below truncate the runs table, and an
-# inherited CASE_HOME (exported in a dev shell, or ~/.case/env) would point that at a
-# live box's real history. Same reasoning as tests/test_links.py.
-os.environ["CASE_HOME"] = "/tmp/case-sched-test"
+import _helpers
+
+_helpers.isolated_home()
 from scheduler import compute_next  # noqa: E402
 from store import store  # noqa: E402
 
@@ -246,6 +244,31 @@ def test_run_brain_malformed_template_is_clean_127():
         scheduler.BRAIN_CMD = old
 
 
+def test_stock_brain_resolves_case_mcp_json_from_anywhere():
+    # case-mcp.json runs `python3 mcp/case_mcp.py`, relative, with whatever python3 is
+    # on PATH: from any other cwd, or with a system python lacking the deps, the
+    # brain came up without its tools.
+    import tempfile
+    import scheduler
+    fake = os.path.join(tempfile.mkdtemp(), "claude")
+    with open(fake, "w") as f:
+        f.write("#!/bin/sh\npwd\ncommand -v python3\n")
+    os.chmod(fake, 0o755)
+    old = (scheduler.BRAIN_BIN, scheduler.BRAIN_CMD, scheduler.BRAIN_URL)
+    here = os.getcwd()
+    try:
+        scheduler.BRAIN_BIN, scheduler.BRAIN_CMD, scheduler.BRAIN_URL = fake, "", ""
+        os.chdir("/")
+        code, out = scheduler.run_brain("c_1", "hi")
+    finally:
+        os.chdir(here)
+        scheduler.BRAIN_BIN, scheduler.BRAIN_CMD, scheduler.BRAIN_URL = old
+    cwd, py = out.splitlines()
+    assert code == 0, out
+    assert os.path.exists(os.path.join(cwd, "mcp", "case_mcp.py")), cwd
+    assert os.path.dirname(py) == os.path.dirname(sys.executable), py
+
+
 def test_busy_box_is_a_skip_not_a_raw_apierror():
     # a box at CASE_MAX_RUNNING=1: a busy box must report a plain-English skip
     # (never "ApiError: …") and must never sleep someone else's live session.
@@ -385,6 +408,95 @@ def test_run_schedule_sleeps_only_when_it_woke_and_no_auth():
     assert rec.get("status") == "ok", rec
 
 
+def test_a_run_does_not_sleep_the_box_under_another_schedule():
+    # A woke the box, B started on it while A ran; A's cleanup used to sleep it
+    # under B. The last run out sleeps it instead.
+    import threading
+    import time
+    import unittest.mock as mock
+    import scheduler
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    state, seen = {"c_two": "asleep"}, []
+    for sid in ("sch_A", "sch_B"):
+        store.insert_schedule(sid, "c_two", sid, "p", "interval", "3600", 0,
+                              "2020-01-01T00:00:00Z")
+    b_started, a_done = threading.Event(), threading.Event()
+
+    def brain(cid, prompt, name=""):
+        if name == "sch_A":
+            b_started.wait(2)
+        else:
+            b_started.set()
+            a_done.wait(2)
+            seen.append(state[cid])
+        return 0, "ok"
+
+    def run_a():
+        scheduler.run_schedule("sch_A")
+        a_done.set()
+
+    with mock.patch.object(scheduler, "get_computer", lambda cid: {"id": cid, "state": state[cid]}), \
+         mock.patch.object(scheduler, "do_wake", lambda cid: state.update({cid: "running"})), \
+         mock.patch.object(scheduler, "do_sleep", lambda cid: state.update({cid: "asleep"})), \
+         mock.patch.object(scheduler, "run_brain", brain), \
+         mock.patch.object(scheduler, "capture_run_artifacts", lambda *a, **k: None), \
+         mock.patch.object(scheduler.notifier, "push"), \
+         mock.patch.object(scheduler, "emit"):
+        ta = threading.Thread(target=run_a)
+        ta.start()
+        while state["c_two"] != "running":     # B borrows a box A already woke
+            time.sleep(0.01)
+        tb = threading.Thread(target=scheduler.run_schedule, args=("sch_B",))
+        tb.start()
+        ta.join(5)
+        tb.join(5)
+    assert seen == ["running"], seen             # B still had its box after A finished
+    assert state["c_two"] == "asleep"            # and the last one out put it back
+    assert scheduler._HOLDERS == {}
+
+
+def test_a_slow_sleep_does_not_hold_up_another_computer():
+    # The last run out used to hold the scheduler's one lock while Docker stopped its
+    # box, so every other schedule waited on that stop.
+    import threading
+    import unittest.mock as mock
+    import scheduler
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    state = {"c_x": "asleep", "c_y": "running"}
+    store.insert_schedule("sch_X", "c_x", "sch_X", "p", "interval", "3600", 0,
+                          "2020-01-01T00:00:00Z")
+    store.insert_schedule("sch_Y", "c_y", "sch_Y", "p", "interval", "3600", 0,
+                          "2020-01-01T00:00:00Z")
+    sleeping, release, y_done = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_sleep(cid):
+        sleeping.set()
+        release.wait(5)
+        state[cid] = "asleep"
+
+    with mock.patch.object(scheduler, "get_computer", lambda cid: {"id": cid, "state": state[cid]}), \
+         mock.patch.object(scheduler, "do_wake", lambda cid: state.update({cid: "running"})), \
+         mock.patch.object(scheduler, "do_sleep", slow_sleep), \
+         mock.patch.object(scheduler, "run_brain", lambda cid, p, name="": (0, "ok")), \
+         mock.patch.object(scheduler, "capture_run_artifacts", lambda *a, **k: None), \
+         mock.patch.object(scheduler.notifier, "push"), \
+         mock.patch.object(scheduler, "emit"):
+        tx = threading.Thread(target=scheduler.run_schedule, args=("sch_X",))
+        tx.start()
+        try:
+            assert sleeping.wait(5)
+            ty = threading.Thread(target=lambda: (scheduler.run_schedule("sch_Y"), y_done.set()))
+            ty.start()
+            assert y_done.wait(2), "a run on another computer waited on c_x's sleep"
+        finally:
+            release.set()
+            tx.join(5)
+    assert state == {"c_x": "asleep", "c_y": "running"}, state
+    assert scheduler._HOLDERS == {}
+
+
 def test_ram_tight_box_is_a_skip_too():
     import scheduler
     from errors import ApiError
@@ -419,6 +531,51 @@ def test_ram_tight_box_is_a_skip_too():
     assert rec["status"] == "skipped", rec
     assert "not enough free RAM" in rec["summary"], rec
     assert "ApiError" not in rec["summary"], rec
+
+
+def _run_real_row(sid):
+    """run_schedule against the real store with the computer side faked out."""
+    import unittest.mock as mock
+    import scheduler
+    with mock.patch.object(scheduler, "get_computer", lambda cid: {"id": cid, "state": "running"}), \
+         mock.patch.object(scheduler, "do_wake") as wake, \
+         mock.patch.object(scheduler, "do_sleep"), \
+         mock.patch.object(scheduler, "run_brain", lambda cid, p, name="": (0, "done")), \
+         mock.patch.object(scheduler, "capture_run_artifacts", lambda *a, **k: None), \
+         mock.patch.object(scheduler.notifier, "push"), \
+         mock.patch.object(scheduler, "emit"):
+        scheduler.run_schedule(sid)
+    return wake
+
+
+def test_legacy_sub_minute_interval_runs_at_the_floor():
+    # Rows stored before the 60s floor used to raise out of compute_next on every
+    # sweep, before the reschedule, so they re-fired forever and never recorded a run.
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    store.insert_schedule("sch_legacy", "c_1", "legacy", "p", "interval", "30", 0,
+                          "2020-01-01T00:00:00Z")
+    _run_real_row("sch_legacy")
+    nxt = _dt(store.get_schedule("sch_legacy")["next_run_at"])
+    assert 55 <= (nxt - datetime.now(timezone.utc)).total_seconds() <= 65, nxt
+    assert [r["status"] for r in store.list_runs("sch_legacy")] == ["ok"]
+
+
+def test_unresolvable_tz_fails_the_run_and_backs_off_a_day():
+    store.q("DELETE FROM schedules")
+    store.q("DELETE FROM runs")
+    store.insert_schedule("sch_badtz", "c_1", "tz", "p", "daily", "07:00", 0,
+                          "2020-01-01T00:00:00Z", tz="Mars/Olympus")
+    wake = _run_real_row("sch_badtz")
+    wake.assert_not_called()
+    s = store.get_schedule("sch_badtz")
+    assert s["enabled"] == 1
+    left = (_dt(s["next_run_at"]) - datetime.now(timezone.utc)).total_seconds()
+    assert 86000 <= left <= 86400, left                # not due again next sweep
+    runs = store.list_runs("sch_badtz")
+    assert [r["status"] for r in runs] == ["fail"], runs
+    assert "Mars/Olympus" in runs[0]["summary"], runs[0]["summary"]
+    assert s["last_status"] == "fail"
 
 
 def test_run_brain_url_finished():
@@ -557,8 +714,4 @@ def test_run_brain_cmd_wins_over_url():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

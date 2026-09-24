@@ -13,11 +13,13 @@ choice (the DRIVE button, stored in `localStorage['case.drive.computer']`).
 Drive never switches computers on its own: landing on the wrong desk means
 landing in someone else's sessions, so a missing pick says so and stops.
 
-**Transport:** `CASE_LOCAL=1` (default when `CASE_URL` is loopback or compose
-`cased`). Talks to cased on `CASE_URL` — no SSH tunnel. Compose sets
+**Transport:** talks to cased on `CASE_URL` — no SSH tunnel. Compose sets
 `http://cased:8787/v1`. `/live/<id>/…` proxies to cased
 `/v1/computers/<id>/live/…`, which relays noVNC: Drive is not on the desks
 network and never dials a desktop itself.
+
+Threads persist in `threads.json` beside `serve.mjs` unless `CASE_THREADS`
+names another file (Compose: `/data/threads.json`).
 
 **Files view** uses `computer_exec` `find` (`/api/fs`) and cased `GET /files`
 (`/api/file`).
@@ -25,4 +27,5 @@ network and never dials a desktop itself.
 Run: `node web/web-ui/serve.mjs` → http://127.0.0.1:4174/  and  /deploy
 (or `docker compose up` from the repo root)
 
-Tests: `node web/web-ui/test_serve.mjs`, `test_nav.mjs`, `test_deploy.mjs`
+Tests: `npm --prefix web test` runs every `web-ui/test_*.mjs`, each in its own
+node process.

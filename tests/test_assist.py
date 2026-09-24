@@ -3,14 +3,11 @@
 Run: .venv/bin/python tests/test_assist.py"""
 import hashlib
 import json
-import os
-import sys
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: these tests write assist_tokens + handoffs, and an
-# inherited CASE_HOME would put them in a live box's DB.
-os.environ["CASE_HOME"] = "/tmp/case-assist-test"
+import _helpers
+
+_helpers.isolated_home()
 import assist  # noqa: E402
 import cased  # noqa: E402
 import handoffs  # noqa: E402
@@ -33,21 +30,6 @@ def _cleanup():
     store.q("DELETE FROM links")
     store.q("DELETE FROM credentials WHERE computer_id IN ('c_1','c_bind')")
     handoffs.LOGIN_CTX.clear()
-
-
-def _running_computer(cid="c_1"):
-    store.q("DELETE FROM computers WHERE id=?", (cid,))
-    store.insert_computer(cid, "ava", "case-desk:0.1", 1, 2048, "vol", "tok")
-    store.set_state(cid, "running")
-
-
-def _desk_check_ep(uri, cookie):
-    from starlette.requests import Request
-    scope = {"type": "http", "headers": [
-        (b"x-forwarded-uri", uri.encode()),
-        (b"cookie", cookie.encode()),
-    ], "method": "GET", "path": "/v1/desk/check", "query_string": b""}
-    return cased.desk_check_ep(Request(scope))
 
 
 def _hash(raw):
@@ -169,9 +151,9 @@ def test_desk_check_accepts_assist_cookie_for_bound_computer():
     _pending("h_cap", "captcha")
     raw, _ = assist.mint_assist_token("h_cap")
     session, _ = assist.exchange(raw)
-    _running_computer("c_1")
+    _helpers.running_computer("c_1")
     assert links.desk_check("/desk/vnc.html", f"case_assist={session}") == (None, None)
-    assert _desk_check_ep("/desk/vnc.html", f"case_assist={session}").status_code == 200
+    assert _helpers.desk_check_ep("/desk/vnc.html", f"case_assist={session}").status_code == 200
 
 
 def test_assist_cookie_does_not_unlock_fill_or_console():
@@ -197,7 +179,7 @@ def test_otp_submit_via_assist_completes_without_login_ctx():
     # desk access dies once handoff is terminal
     assert assist.valid_session(session) is None
     assert links.desk_check("/desk/", f"case_assist={session}") == (None, None)
-    assert _desk_check_ep("/desk/", f"case_assist={session}").status_code == 401
+    assert _helpers.desk_check_ep("/desk/", f"case_assist={session}").status_code == 401
     assert store.get_handoff("h_otp")["answer"] is None
 
 
@@ -293,6 +275,27 @@ def test_render_phases_submit_verify_wait_and_terminal_attempt():
     assert payload_ok["allowed_actions"] == []
 
 
+def test_approval_renders_approve_and_deny_buttons():
+    _cleanup()
+    _pending("h_otp", "approval", continuation="submit_value")
+    html = assist.render_page(
+        assist.build_view(store.get_handoff("h_otp"), store.get_handoff("h_otp"), None), "tok")
+    assert "Enter the code" not in html and "inputmode=numeric" not in html
+    assert "name=value value=approve" in html and "name=value value=deny" in html
+    assert html.count('action="/assist/tok/submit"') == 2
+
+    raw, _ = assist.mint_assist_token("h_otp")
+    session, _ = assist.exchange(raw)
+    from fastapi.testclient import TestClient
+    client = TestClient(cased.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+    response = client.post(
+        f"/assist/{raw}/submit", data={"value": "approve", "expected_revision": "0"},
+        cookies={assist.COOKIE: session}, headers={"Origin": "http://127.0.0.1"})
+    assert response.status_code == 200, response.text
+    assert "Approved" in response.text
+    assert store.get_handoff("h_otp")["answer"] == "approve"
+
+
 def test_attempt_scoped_session_follows_current_handoff():
     _cleanup()
     _attempt("aa_1", status="awaiting_human", current_handoff_id="h_cap")
@@ -311,9 +314,9 @@ def test_attempt_scoped_session_follows_current_handoff():
     assert view["continuation"] == "submit_value"
     assert "submit_value" in view["allowed_actions"]
     # desk still unlocks for the computer
-    _running_computer("c_1")
+    _helpers.running_computer("c_1")
     assert links.desk_check("/desk/", f"case_assist={session}") == (None, None)
-    assert _desk_check_ep("/desk/", f"case_assist={session}").status_code == 200
+    assert _helpers.desk_check_ep("/desk/", f"case_assist={session}").status_code == 200
 
 
 def test_proving_state_has_no_actions():
@@ -510,8 +513,4 @@ def test_first_click_of_fresh_link_sets_session_cookie_over_http():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

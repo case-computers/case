@@ -3,14 +3,12 @@
 Run: .venv/bin/python tests/test_session_keeper.py"""
 import json
 import os
-import sys
-import tempfile
 import unittest.mock as mock
+from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-# assignment, NOT setdefault: these tests write credential probe rows.
-_HOME = tempfile.mkdtemp(prefix="case-session-keeper-")
-os.environ["CASE_HOME"] = _HOME
+import _helpers
+
+_helpers.isolated_home()
 
 import session_keeper  # noqa: E402
 from store import store  # noqa: E402
@@ -116,12 +114,33 @@ def test_probe_records_failed_when_logged_out():
 
     with mock.patch("deskclient.navigate", return_value={"ok": True}), \
          mock.patch.object(session_keeper, "_observe", return_value=obs), \
-         mock.patch.object(session_keeper, "_maybe_start_recovery") as recover:
+         mock.patch.object(session_keeper, "_notify_unhealthy") as recover:
         status = session_keeper._probe_one_awake(cid, "github")
 
     assert status == "failed"
     assert store.get_credential(cid, "github")["last_status"] == "failed"
     recover.assert_called_once()
+
+
+def test_failed_probe_notifies_once_and_opens_no_auth_attempt():
+    # The old recovery "stub" opened an AuthAttempt in created that nothing ever
+    # advanced: it pinned the box awake and 409'd the agent's login, and its fixed
+    # idempotency key meant it only ever happened once.
+    _cleanup()
+    _reset_keeper_clock()
+    cid = _computer(state="running")
+    _cred(cid, probe_url="https://example.com/login", proof_spec=None, last_status="ok")
+    obs = {"href": "https://example.com/login",
+           "visible_fields": {"pass": True}, "challenge_signals": []}
+    pushed = []
+    with mock.patch("deskclient.navigate", return_value={"ok": True}), \
+         mock.patch.object(session_keeper, "_observe", return_value=obs), \
+         mock.patch.object(session_keeper.notifier, "push", side_effect=pushed.append):
+        assert session_keeper._probe_one_awake(cid, "github") == "failed"
+        assert session_keeper._probe_one_awake(cid, "github") == "failed"
+    assert not store.active_attempt_exists(cid)
+    assert len(pushed) == 1 and "github" in pushed[0], pushed
+    assert store.get_credential(cid, "github")["last_status"] == "failed"
 
 
 def test_tick_sleeps_only_if_it_woke():
@@ -147,6 +166,61 @@ def test_tick_sleeps_only_if_it_woke():
         session_keeper.tick()
     wake.assert_not_called()
     assert slept == [], slept
+
+
+def test_tick_does_not_sleep_a_box_someone_started_on_mid_probe():
+    import scheduler
+    from util import now as _now
+    for takeover in ("schedule", "desk"):
+        _cleanup()
+        _reset_keeper_clock()
+        cid = _computer(state="asleep")
+        _cred(cid, proof_spec={"url_contains": "/x"})
+        store.q("DELETE FROM schedules")
+        store.insert_schedule("sch_sk", cid, "n", "p", "interval", "3600", 0,
+                              "2999-01-01T00:00:00Z")
+        slept = []
+
+        def probe(c, n):
+            if takeover == "schedule":
+                scheduler.SCHED_RUNNING.add("sch_sk")
+            else:
+                store.q("UPDATE computers SET last_active_at=? WHERE id=?", (_now(), c))
+            return "ok"
+
+        try:
+            with mock.patch.object(session_keeper, "do_wake",
+                                   side_effect=lambda c: store.set_state(c, "running")), \
+                 mock.patch.object(session_keeper, "do_sleep",
+                                   side_effect=lambda c: slept.append(c)), \
+                 mock.patch.object(session_keeper, "_probe_one_awake", side_effect=probe):
+                session_keeper.tick()
+        finally:
+            scheduler.SCHED_RUNNING.discard("sch_sk")
+            store.q("DELETE FROM schedules")
+        assert slept == [], (takeover, slept)
+
+
+def test_tick_probes_after_its_own_wake_despite_old_activity():
+    # last_active_at from before the box slept is not a live session: the keeper's
+    # own wake made the box "running" and the in-loop check used to skip every probe.
+    from datetime import timedelta
+    _cleanup()
+    _reset_keeper_clock()
+    cid = _computer(state="asleep")
+    _cred(cid, proof_spec={"url_contains": "/x"})
+    five_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    store.q("UPDATE computers SET last_active_at=? WHERE id=?", (five_min_ago, cid))
+    probed, slept = [], []
+    with mock.patch.object(session_keeper, "do_wake",
+                           side_effect=lambda c: store.set_state(c, "running")), \
+         mock.patch.object(session_keeper, "do_sleep", side_effect=lambda c: slept.append(c)), \
+         mock.patch.object(session_keeper, "_probe_one_awake",
+                           side_effect=lambda c, n: probed.append(n) or "ok"):
+        session_keeper.tick()
+    assert probed == ["github"], probed
+    assert slept == [cid], slept
 
 
 def test_tick_batches_per_computer_one_wake():
@@ -227,6 +301,30 @@ def test_tick_respects_cadence_and_skips_recent_live_session():
     assert wakes == [], wakes
 
 
+def test_empty_env_lines_fall_back_to_defaults():
+    # bin/case sources ~/.case/env, where `CASE_MAX_RUNNING=` is an empty string,
+    # not an unset one: int("") crashed cased at import.
+    import importlib
+    import config
+    keys = ("CASE_MAX_RUNNING", "CASE_BRAIN_TIMEOUT",
+            "CASE_SESSION_KEEPER_INTERVAL_S", "CASE_SESSION_KEEPER_BUSY_S")
+    try:
+        for k in keys:
+            os.environ[k] = ""
+        importlib.reload(config)
+        importlib.reload(session_keeper)
+        assert (config.MAX_RUNNING, config.BRAIN_TIMEOUT) == (8, 1800)
+        assert (session_keeper.INTERVAL_S, session_keeper.BUSY_S) == (21600, 900)
+        os.environ["CASE_SESSION_KEEPER_BUSY_S"] = "0"      # an explicit 0 still means off
+        importlib.reload(session_keeper)
+        assert session_keeper.BUSY_S == 0
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+        importlib.reload(config)
+        importlib.reload(session_keeper)
+
+
 def test_tick_is_not_reentrant():
     session_keeper._TICK.acquire()
     try:
@@ -255,8 +353,4 @@ def test_tick_forgets_computers_that_no_longer_have_probes():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("PASS")
+    _helpers.run_tests(globals())

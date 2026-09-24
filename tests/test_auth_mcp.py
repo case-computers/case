@@ -2,22 +2,9 @@
 """MCP durable-auth handles: computer_login + auth_attempt_get/wait.
 Call-shape tests with mocked HTTP — no Docker, no network.
 Run: .venv/bin/python tests/test_auth_mcp.py"""
-import importlib
-import os
-import sys
 from unittest import mock
 
-ROOT = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, os.path.join(ROOT, "mcp"))
-
-
-def _load(schedules=False):
-    for k in ("CASE_MCP_HTTP", "CASE_MCP_PORT", "CASE_MCP_SCHEDULES"):
-        os.environ.pop(k, None)
-    if schedules:
-        os.environ["CASE_MCP_SCHEDULES"] = "1"
-    mod = importlib.import_module("case_mcp")
-    return importlib.reload(mod)
+import _helpers
 
 
 def _ok(payload):
@@ -30,7 +17,7 @@ def _ok(payload):
 
 
 def test_auth_tool_surface():
-    m = _load()
+    m = _helpers.load_case_mcp()
     names = list(m.mcp._tool_manager._tools)
     assert "auth_attempt_wait" in names, names
     assert "computer_login" in names
@@ -39,16 +26,16 @@ def test_auth_tool_surface():
 
 
 def test_schedule_tools_archived_by_default():
-    m = _load()
+    m = _helpers.load_case_mcp()
     names = list(m.mcp._tool_manager._tools)
     assert not [n for n in names if n.startswith("schedule_")], names
-    m = _load(schedules=True)
+    m = _helpers.load_case_mcp(CASE_MCP_SCHEDULES="1")
     names = list(m.mcp._tool_manager._tools)
     assert "schedule_create" in names and "schedule_runs" in names, names
 
 
 def test_computer_login_passes_idempotency_and_proof_spec():
-    m = _load()
+    m = _helpers.load_case_mcp()
     with mock.patch.object(m, "call", return_value=_ok({
         "status": "success", "attempt_id": "a_1", "revision": 1,
     })) as call:
@@ -72,7 +59,7 @@ def test_computer_login_passes_idempotency_and_proof_spec():
 
 
 def test_computer_login_omits_optional_when_unset():
-    m = _load()
+    m = _helpers.load_case_mcp()
     with mock.patch.object(m, "call", return_value=_ok({
         "status": "handoff_pending", "handoff_id": "h_1", "attempt_id": "a_2",
     })) as call:
@@ -83,7 +70,7 @@ def test_computer_login_omits_optional_when_unset():
 
 
 def test_file_get_returns_readable_text_and_flags_binary():
-    m = _load()
+    m = _helpers.load_case_mcp()
     txt = mock.Mock(status_code=200, content="hello ☃".encode("utf-8"), text="")
     with mock.patch.object(m, "call", return_value=txt):
         out = m.computer_file_get("c_1", "/home/agent/a.txt")
@@ -96,7 +83,7 @@ def test_file_get_returns_readable_text_and_flags_binary():
 
 
 def test_handoff_request_kind_in_body():
-    m = _load()
+    m = _helpers.load_case_mcp()
     with mock.patch.object(m, "call", return_value=_ok({"id": "h_d"})) as call:
         m.handoff_request("c_1", "Scan the QR", kind="device")
     assert call.call_args.kwargs["json"] == {
@@ -105,7 +92,7 @@ def test_handoff_request_kind_in_body():
 
 
 def test_auth_attempt_wait_terminal_return():
-    m = _load()
+    m = _helpers.load_case_mcp()
     terminal = {
         "changed": True,
         "wait_status": "terminal",
@@ -133,7 +120,7 @@ def test_auth_attempt_wait_terminal_return():
 
 
 def test_auth_attempt_wait_chains_intermediate_challenges():
-    m = _load()
+    m = _helpers.load_case_mcp()
     mid = {
         "changed": True,
         "wait_status": "changed",
@@ -174,7 +161,7 @@ def test_auth_attempt_wait_chains_intermediate_challenges():
 
 
 def test_auth_attempt_wait_bounded_timeout_no_login_retry():
-    m = _load()
+    m = _helpers.load_case_mcp()
     timed = {
         "changed": False,
         "wait_status": "timeout",
@@ -206,7 +193,7 @@ def test_auth_attempt_wait_bounded_timeout_no_login_retry():
 
 
 def test_auth_attempt_wait_caps_max_wait():
-    m = _load()
+    m = _helpers.load_case_mcp()
     timed = {
         "changed": False,
         "wait_status": "timeout",
@@ -231,7 +218,4 @@ def test_auth_attempt_wait_caps_max_wait():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
+    _helpers.run_tests(globals())

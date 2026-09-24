@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { envDriveAuth } from './case-tools.mjs';
 import {
   OUTBOUND_TAG, authHeaders, clipNtfy, inboundText, isOutbound, listen,
   ntfyConfig, parseSseData, publish, tagsOf,
 } from './ntfy.mjs';
-import { startPhoneNtfy } from './serve.mjs';
+
+process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
+const { startPhoneNtfy } = await import('./serve.mjs');
 
 assert.deepEqual(ntfyConfig({}), {
   url: 'https://ntfy.sh', topic: '', token: '', chat: false,
@@ -145,6 +150,45 @@ function sseBody(text) {
     );
   } catch { /* aborted */ }
   assert.deepEqual(got, ['check gmail']);
+}
+
+// A message that starts a long turn must not hold up the next one: that is a
+// steer, or the OTP the running turn is itself waiting on.
+{
+  const got = [];
+  const ac = new AbortController();
+  let n = 0;
+  const fetchImpl = async () => {
+    n += 1;
+    if (n > 1) {
+      ac.abort();
+      throw new Error('stop');
+    }
+    return { ok: true, body: sseBody(
+      'data: {"id":"a","event":"message","message":"do a long task"}\n\n'
+      + 'data: {"id":"b","event":"message","message":"123456"}\n\n'
+      + 'data: {"id":"c","event":"message","message":"boom"}\n\n'
+      + 'data: {"id":"d","event":"message","message":"after"}\n\n') };
+  };
+  const warn = console.warn;
+  const warned = [];
+  console.warn = (...a) => warned.push(a.join(' '));
+  try {
+    await listen(
+      { url: 'https://ntfy.sh', topic: 'top' },
+      (text) => {
+        got.push(text);
+        if (text === 'boom') throw new Error('handler failed');
+        return text.startsWith('do') ? new Promise(() => {}) : undefined;
+      },
+      { fetchImpl, signal: ac.signal, now: () => 1700000000, sleep: async () => {} },
+    );
+    await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(got, ['do a long task', '123456', 'boom', 'after']);
+  assert.ok(warned.some((w) => /ntfy message: handler failed/.test(w)), 'a failed handler is logged');
 }
 
 assert.equal(startPhoneNtfy({}), false);

@@ -217,6 +217,8 @@ to the same topic. It marks its own posts so it does not read them as new tasks.
 
 When one handoff is waiting, your next message answers it. If several are
 waiting, prefix the answer with its handoff ID, such as `h_ab12 483920`.
+An approval takes only `approve` or `deny`; any other reply is refused and the
+handoff keeps waiting.
 With no handoff waiting, a message steers the current Phone task or starts a
 new task on the first computer returned by cased. Create a computer before
 sending your first task.
@@ -242,7 +244,7 @@ Choose a computer's size under **+ New computer**, then **SIZE**. The default is
 
 | Setting | What it controls | Compose default |
 | --- | --- | --- |
-| `CASE_MAX_RUNNING` | Maximum number of awake computers | 4 |
+| `CASE_MAX_RUNNING` | Maximum number of awake computers | 4 (8 without Compose) |
 | `CASE_MAX_RAM_MB` | Total RAM that awake computers may reserve, in MB | 75% of the memory visible to cased |
 
 On macOS with Compose, that memory comes from the Docker VM. A 4 GB VM has room
@@ -277,7 +279,9 @@ Set `CASE_TOKEN` to that value in `.env`. Add your proxy hostname to
 `CASE_TOKEN` protects Drive and the REST API. Open Drive through the HTTPS proxy
 with `?token=<your-token>` on the first visit. MCP on port 8788 has no built-in
 client authentication: keep it local or configure authentication at its proxy.
-Setting `CASE_TOKEN` alone does not protect the MCP endpoint.
+Setting `CASE_TOKEN` alone does not protect the MCP endpoint. MCP checks `Host`
+against the same list as cased and Drive, so a proxy in front of it needs its
+hostname in `CASE_ALLOWED_HOSTS` too.
 
 For ntfy Assist links and approval buttons, set `CASE_PUBLIC_HOST` to the public
 hostname of your cased proxy, without a scheme. That hostname is allowed without
@@ -326,13 +330,20 @@ Start cased, then Drive:
 
 ```bash
 bin/case up
-CASE_LOCAL=1 CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
+CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
 ```
 
 Open the [computers page](http://127.0.0.1:4174/deploy). Drive runs in the
 foreground in this terminal. Host processes use environment variables, not the
-Compose `.env` file. If cased runs directly on macOS, set `CASE_MAX_RAM_MB`
-explicitly; its automatic memory budget requires Linux's `/proc/meminfo`.
+Compose `.env` file; `bin/case` also reads `~/.case/env` if it exists. If cased
+runs directly on macOS, set `CASE_MAX_RAM_MB` explicitly; its automatic memory
+budget requires Linux's `/proc/meminfo`.
+
+A few settings only apply here. `CASE_PORT` moves cased off 8787.
+`CASE_VNC_PORT` pins every desktop's noVNC to one host port for a reverse proxy.
+`CASE_BRAIN_BIN` points the scheduler at a `claude` binary that is not on `PATH`,
+and `CASE_MCP_CONFIG` replaces `case-mcp.json`. On macOS, `CASE_CPU` and
+`CASE_MEM` size the Colima VM that `bin/case up` starts (default 4 CPUs, 4 GB).
 
 For a client that uses stdio MCP, [case-mcp.json](case-mcp.json) starts
 `mcp/case_mcp.py` with Python. It needs the installed Python dependencies and
@@ -375,11 +386,13 @@ installation, or the `case-home` volume mounted at `/data` in Compose. Back up
 the database and key together, along with the desktop volumes you want to keep.
 Treat these backups as sensitive data.
 
-Drive keeps `threads.json`, screenshots under `drive/shots`, and attachments
-under `drive/inbox` in its home directory. This is `~/.case` by default; Compose
-uses the `ui-data` volume mounted at `/data`. Deleting a thread does not remove
-its screenshots or attachments. Files added through the plus menu stay on the
-Drive host for the model to read; they are not copied onto the desktop computer.
+Drive keeps screenshots under `drive/shots` and attachments under `drive/inbox`
+in its home directory, `~/.case` by default. Its threads are in
+`web/web-ui/threads.json` by default, or the file `CASE_THREADS` names. Compose
+keeps all of them on the `ui-data` volume mounted at `/data`. Deleting a thread
+does not remove its screenshots or attachments. Files added through the plus
+menu stay on the Drive host for the model to read; they are not copied onto the
+desktop computer.
 
 </details>
 

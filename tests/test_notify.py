@@ -2,12 +2,12 @@
 """ntfy notifier wiring. Run: .venv/bin/python tests/test_notify.py"""
 import importlib
 import os
-import sys
 import threading
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
-os.environ["CASE_HOME"] = "/tmp/case-notify-test"
+import _helpers
+
+_helpers.isolated_home()
 
 # Force a clean import under known env for module-level notifier wiring tests.
 os.environ.pop("CASE_NTFY_TOPIC", None)
@@ -122,6 +122,11 @@ def test_multiline_prompt_is_flattened_into_the_header():
     assert h["X-Message"] == "line one line two line three"
 
 
+def test_title_is_plain_ascii_not_a_replaced_dash():
+    h = _post_once({"id": "h_1", "kind": "otp", "prompt": "code?", "screenshot": None}, "ava")
+    assert h["X-Title"] == "[Case] otp - ava", h["X-Title"]
+
+
 def test_assist_url_becomes_the_click_action():
     h = _post_once({"id": "h_1", "kind": "question", "prompt": "hi", "screenshot": None,
                     "assist_url": "https://acme.example/assist/tok"})
@@ -202,8 +207,4 @@ def test_create_handoff_mints_assist_and_passes_url_to_notifier():
 
 
 if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print("ok", name)
-    print("all passed")
+    _helpers.run_tests(globals())

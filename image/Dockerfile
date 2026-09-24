@@ -41,14 +41,11 @@ RUN curl -fsSL -o /tmp/novnc.tgz "https://github.com/novnc/noVNC/archive/refs/ta
     && echo "${NOVNC_SHA256}  /tmp/novnc.tgz" | sha256sum -c - \
     && tar xz -f /tmp/novnc.tgz -C /usr/share && mv "/usr/share/noVNC-${NOVNC_VERSION}" /usr/share/novnc && rm /tmp/novnc.tgz
 
-# Transitives pinned alongside the four direct deps: the image is the computer,
-# and a rebuild months from now must produce the deskd that was tested.
+# Pinned with its transitives in requirements.txt, which CI tests deskd against.
+COPY requirements.txt /tmp/deskd-requirements.txt
 RUN python3 -m venv /opt/deskd \
     && /opt/deskd/bin/pip install --no-cache-dir --upgrade pip==26.2 setuptools==83.0.0 \
-    && /opt/deskd/bin/pip install --no-cache-dir \
-       fastapi==0.141.1 uvicorn==0.52.4 websocket-client==1.9.2 requests==2.34.2 \
-       anyio==4.15.0 certifi==2026.7.22 charset-normalizer==3.5.1 click==8.5.0 \
-       h11==0.16.0 idna==3.19 pydantic==2.13.5 starlette==1.6.0 urllib3==2.7.0 \
+    && /opt/deskd/bin/pip install --no-cache-dir -r /tmp/deskd-requirements.txt \
     && /opt/deskd/bin/pip install --no-cache-dir --no-deps websockify==0.13.0
 
 # Passwordless sudo: the container IS the agent's sandbox — self-serve apt
@@ -62,20 +59,22 @@ RUN useradd -m -u 1000 -s /bin/bash agent \
 RUN apt-get update && apt-get install -y --no-install-recommends thunar xfdesktop4 \
     && rm -rf /var/lib/apt/lists/*
 
+# Unlock PEP-668 so pip works. Non-root pip defaults to --user (~/.local),
+# which lives on the volume — pip installs survive container recreation.
+RUN printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
+
 # Desktop look: wallpaper, single-bar panel config, Greybird theme, and a custom
 # cursor theme ("case", left_ptr in 24/32/48px). Per-user configs are seeded from
-# /usr/share/case by start.sh only when missing, so user changes survive.
+# /usr/share/case by start.sh: only when missing, except once after each LOOK bump.
 COPY assets/wallpaper.png /usr/share/backgrounds/case.png
 COPY assets/cursor-left_ptr /usr/share/icons/case/cursors/left_ptr
-RUN printf '[Icon Theme]\nName=case\n' > /usr/share/icons/case/index.theme
+# Inherits: every cursor but left_ptr comes from Adwaita, which GTK 3 depends on
+RUN printf '[Icon Theme]\nName=case\nInherits=Adwaita\n' > /usr/share/icons/case/index.theme
 COPY assets/gtk-settings.ini assets/xfce4-panel.xml assets/xfwm4.xml assets/xfce4-desktop.xml /usr/share/case/
 
 COPY deskd.py /opt/deskd/deskd.py
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
-# Unlock PEP-668 so pip works. Non-root pip defaults to --user (~/.local),
-# which lives on the volume — pip installs survive container recreation.
-RUN printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
 
 USER agent
 WORKDIR /home/agent
