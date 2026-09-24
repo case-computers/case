@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at TEXT, ended_at TEXT, exit_code INTEGER, summary TEXT, artifact_path TEXT,
   status TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_runs_schedule_started ON runs(schedule_id, started_at);
 CREATE TABLE IF NOT EXISTS links (
   token TEXT PRIMARY KEY, computer_id TEXT, kind TEXT,
   created_at TEXT, expires_at TEXT, used_at TEXT
@@ -204,6 +205,9 @@ class Store:
 
     def all_non_deleted(self):
         return self.all("SELECT * FROM computers WHERE state != 'deleted'")
+
+    def computer_count(self):
+        return self.one("SELECT COUNT(*) c FROM computers WHERE state != 'deleted'")["c"]
 
     def running_rows(self):
         return self.all("SELECT * FROM computers WHERE state='running'")

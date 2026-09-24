@@ -359,7 +359,7 @@ def health(request: Request):
     # learns liveness only — the inventory is for whoever holds the bearer.
     if not bearer_ok(request.headers.get("authorization")):
         return {"ok": True}
-    n = len(store.list_computers())
+    n = store.computer_count()
     try:
         dockerd.ping()
         docker_ok = True
