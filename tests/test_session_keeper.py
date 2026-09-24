@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest.mock as mock
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "control-plane"))
 # assignment, NOT setdefault: these tests write credential probe rows.
@@ -147,6 +148,61 @@ def test_tick_sleeps_only_if_it_woke():
         session_keeper.tick()
     wake.assert_not_called()
     assert slept == [], slept
+
+
+def test_tick_does_not_sleep_a_box_someone_started_on_mid_probe():
+    import scheduler
+    from util import now as _now
+    for takeover in ("schedule", "desk"):
+        _cleanup()
+        _reset_keeper_clock()
+        cid = _computer(state="asleep")
+        _cred(cid, proof_spec={"url_contains": "/x"})
+        store.q("DELETE FROM schedules")
+        store.insert_schedule("sch_sk", cid, "n", "p", "interval", "3600", 0,
+                              "2999-01-01T00:00:00Z")
+        slept = []
+
+        def probe(c, n):
+            if takeover == "schedule":
+                scheduler.SCHED_RUNNING.add("sch_sk")
+            else:
+                store.q("UPDATE computers SET last_active_at=? WHERE id=?", (_now(), c))
+            return "ok"
+
+        try:
+            with mock.patch.object(session_keeper, "do_wake",
+                                   side_effect=lambda c: store.set_state(c, "running")), \
+                 mock.patch.object(session_keeper, "do_sleep",
+                                   side_effect=lambda c: slept.append(c)), \
+                 mock.patch.object(session_keeper, "_probe_one_awake", side_effect=probe):
+                session_keeper.tick()
+        finally:
+            scheduler.SCHED_RUNNING.discard("sch_sk")
+            store.q("DELETE FROM schedules")
+        assert slept == [], (takeover, slept)
+
+
+def test_tick_probes_after_its_own_wake_despite_old_activity():
+    # last_active_at from before the box slept is not a live session: the keeper's
+    # own wake made the box "running" and the in-loop check used to skip every probe.
+    from datetime import timedelta
+    _cleanup()
+    _reset_keeper_clock()
+    cid = _computer(state="asleep")
+    _cred(cid, proof_spec={"url_contains": "/x"})
+    five_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    store.q("UPDATE computers SET last_active_at=? WHERE id=?", (five_min_ago, cid))
+    probed, slept = [], []
+    with mock.patch.object(session_keeper, "do_wake",
+                           side_effect=lambda c: store.set_state(c, "running")), \
+         mock.patch.object(session_keeper, "do_sleep", side_effect=lambda c: slept.append(c)), \
+         mock.patch.object(session_keeper, "_probe_one_awake",
+                           side_effect=lambda c, n: probed.append(n) or "ok"):
+        session_keeper.tick()
+    assert probed == ["github"], probed
+    assert slept == [cid], slept
 
 
 def test_tick_batches_per_computer_one_wake():

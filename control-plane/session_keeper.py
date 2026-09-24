@@ -3,8 +3,8 @@
 
 Cadenced probe (default 6h, env `CASE_SESSION_KEEPER_INTERVAL_S`): for each credential
 with a `probe_url` and/or `proof_spec`, wake if needed, load the probe URL, observe/prove,
-update `last_status`. Sleeps only when *this* probe woke the box and no AuthAttempt is
-pinning it awake.
+update `last_status`. Sleeps only when *this* probe woke the box and nobody started on
+it meanwhile (an AuthAttempt, a schedule, a desk call).
 
 Skips busy computers: active AuthAttempt, in-flight schedule brain, or a recently
 touched live session (last_active_at within CASE_SESSION_KEEPER_BUSY_S, default 15m).
@@ -25,7 +25,7 @@ from auth_attempts import (
 from config import log
 from lifecycle import do_sleep, do_wake, get_computer
 from store import store
-from util import row_get
+from util import now, row_get
 
 # Default: every 6 hours per computer, not every 20s sweeper tick.
 INTERVAL_S = max(60, int(os.environ.get("CASE_SESSION_KEEPER_INTERVAL_S", "21600")))
@@ -138,6 +138,19 @@ def _busy(computer_id):
     return _recently_active(row)
 
 
+def _taken_over(computer_id, since):
+    """Someone else started on the box after `since`: a login, a schedule, or a desk
+    call. last_active_at from before a keeper wake is the old session, not a new one."""
+    if store.active_attempt_exists(computer_id) or _schedule_owns(computer_id):
+        return True
+    try:
+        row = get_computer(computer_id)
+    except Exception:
+        return True
+    ts = _parse_iso(row_get(row, "last_active_at"))
+    return bool(ts and ts >= since)
+
+
 def _probe_one_awake(computer_id, name):
     """Probe a credential on an already-running computer. Returns status or None."""
     crow = store.get_credential(computer_id, name)
@@ -209,11 +222,12 @@ def _tick():
         except Exception:
             continue
         woke = row["state"] == "asleep"
+        since = _parse_iso(now())
         try:
             if woke:
                 do_wake(cid)
             for c in group:
-                if _busy(cid):
+                if _taken_over(cid, since):
                     break
                 try:
                     _probe_one_awake(cid, c["name"])
@@ -223,7 +237,7 @@ def _tick():
             log.exception("session_keeper: tick for %s failed", cid)
         finally:
             _last_probe_at[cid] = time.monotonic()
-            if woke and not store.active_attempt_exists(cid):
+            if woke and not _taken_over(cid, since):
                 try:
                     do_sleep(cid)
                 except Exception:
