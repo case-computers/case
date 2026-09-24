@@ -18,7 +18,7 @@ export const CASE_TOOLS = [
   { type: 'function', name: 'computer_exec', description: 'Run a shell command on the computer (bash, as user agent).', parameters: { type: 'object', properties: { command: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['command'], additionalProperties: false } },
 ];
 
-export function caseRoot() {
+function caseRoot() {
   const raw = String(process.env.CASE_URL || 'http://127.0.0.1:8787/v1').trim().replace(/\/$/, '');
   return /\/v1$/.test(raw) ? raw : `${raw}/v1`;
 }
@@ -282,7 +282,7 @@ export function tracesFromAnthropicMessage(message) {
   return { thinks, calls, texts };
 }
 
-export function userContentText(content) {
+function userContentText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return content == null ? '' : String(content);
   return content.map((c) => {

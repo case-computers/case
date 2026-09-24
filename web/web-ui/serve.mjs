@@ -385,7 +385,7 @@ async function power(res, req, action) {
   }
 }
 
-// Chat: same NDJSON contract as web/serve.mjs, hands always local REST.
+// Chat tools beyond CASE_TOOLS; hands are always cased REST.
 // Tool names + semantics match mcp/case_mcp.py.
 const EXTRA_TOOLS = [
   { type: 'function', name: 'computer_list', description: 'List all computers with state, resources and credential names. Reuse an existing computer — only computer_create for an identity that should stay separate.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
@@ -630,7 +630,7 @@ function saveThreads() {
   }, 400);
 }
 if (THREADS.size) saveThreads();
-export function newThread(title, agent) {
+function newThread(title, agent) {
   const t = {
     id: 't_' + Math.random().toString(36).slice(2, 10),
     title: String(title).replace(/\s+/g, ' ').trim().slice(0, 72),
@@ -778,7 +778,7 @@ export function histCloseOpenCalls(items, { keepReasoning = false } = {}) {
   }
   return out;
 }
-export function shotsDir(home = HOME) {
+function shotsDir(home = HOME) {
   return path.join(home, 'drive', 'shots');
 }
 
@@ -837,9 +837,9 @@ function hydrateShot(shot, root) {
 }
 
 export const ATTACH_MAX = 5 * 1024 * 1024;
-export const ATTACH_MAX_N = 4;
+const ATTACH_MAX_N = 4;
 
-export function inboxDir(home = HOME) {
+function inboxDir(home = HOME) {
   return path.join(home, 'drive', 'inbox');
 }
 
@@ -852,7 +852,7 @@ export function attachKind(mime, name = '') {
   return '';
 }
 
-export function safeAttachName(name) {
+function safeAttachName(name) {
   const base = path.basename(String(name || 'file')).replace(/[^\w.\-]+/g, '_').slice(0, 80);
   return base || 'file';
 }
@@ -1016,7 +1016,7 @@ async function steer(req, res) {
   STEER.set(tid, q);
   return json(res, 200, { queued: true });
 }
-export function phoneThread() {
+function phoneThread() {
   let t = THREADS.get(PHONE_THREAD_ID);
   if (t) return t;
   t = {
@@ -1368,7 +1368,7 @@ export async function schedulesRoute(req, res, url) {
   }
 }
 
-export async function brainRoute(req, res) {
+async function brainRoute(req, res) {
   const buf = await readBody(req, res);
   if (!buf) return;
   let body;
