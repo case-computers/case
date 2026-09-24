@@ -716,6 +716,39 @@ def test_try_captcha_auto_resume_failed_returns_failed_not_none():
         rec.assert_called_once_with("c_1", "linkedin.com", "failed")
 
 
+def test_try_captcha_auto_no_pending_login_takes_the_gate_path():
+    """The advance hook resumes, but deskd may no longer hold the login (409): a
+    verified solve is then judged by the gate, not refunded and handed to a human."""
+    import login_flow
+    from errors import ApiError
+
+    row = {"id": "c_1", "desk_port": 1, "desk_token": "t"}
+
+    def eval_side_effect(row, expr, timeout_s=15):
+        if expr == captcha.DETECT_JS:
+            return _detect_ok()
+        if expr == "location.href":
+            return {"ok": True, "value": "https://x/checkpoint"}
+        if expr == captcha.VERIFY_JS:
+            return {"ok": True, "value": {"text": "Welcome home", "hasPassword": False}}
+        if expr == captcha.GATE_JS:
+            return {"ok": True, "value": {"gated": False}}
+        return {"ok": True, "value": {"ok": True, "method": "recaptcha_callback"}}
+
+    with mock.patch("login_flow.captcha.enabled", return_value=True), \
+         mock.patch("deskclient.eval_js", side_effect=eval_side_effect), \
+         mock.patch("login_flow.eval_js", side_effect=eval_side_effect), \
+         mock.patch("login_flow.captcha.solve_if_capable",
+                    return_value={"id": "42", "token": "tok"}), \
+         mock.patch("login_flow.desk_json", side_effect=ApiError(
+             409, "no_pending_login", "no login is waiting on a handoff")), \
+         mock.patch("login_flow.captcha.report") as report, \
+         mock.patch("login_flow._settle_after_inject"):
+        out = login_flow._try_captcha_auto(row, "c_1", "x.com", resume=True, record=False)
+    assert out == {"status": "success", "captcha_auto": True}, out
+    report.assert_not_called()
+
+
 def _seed_login_computer(cid="c_1"):
     """Durable login needs a store computer (raise_challenge → get_computer)."""
     from store import store

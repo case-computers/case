@@ -13,6 +13,7 @@ import events
 import handoffs
 import links
 from config import log
+from errors import ApiError
 from deskclient import desk_json, eval_js, eval_value, screenshot_b64
 from store import HANDOFF_LIVE, store
 from util import row_get
@@ -240,7 +241,18 @@ def _try_captcha_auto(row, cid, name, resume=True, record=True):
             if captcha_id:
                 captcha.report(captcha_id)
             return None
-        if not resume:
+        resumed = None
+        if resume:
+            # Verified clean, only now approve the deskd login hold.
+            try:
+                resumed = desk_json(row, "POST", "/login/resume",
+                                    json={"value": "approve"}, timeout=25)
+            except ApiError as e:
+                # The advance path runs after deskd let go of the login: same as
+                # resume=False, not a bad solve.
+                if e.status != 409 or e.code != "no_pending_login":
+                    raise
+        if resumed is None:
             # No deskd login hold to approve. Require the gate itself to be closed
             # before calling this a login, verify text alone can be clean on a page
             # that is still a checkpoint shell.
@@ -255,9 +267,6 @@ def _try_captcha_auto(row, cid, name, resume=True, record=True):
                                                 "status": "success"})
             log.info("captcha_auto=ok path=gate")
             return {"status": "success", "captcha_auto": True}
-        # Verified clean, only now approve the deskd login hold.
-        resumed = desk_json(row, "POST", "/login/resume",
-                            json={"value": "approve"}, timeout=25)
         if resumed.get("status") == "failed":
             log.info("captcha_auto=fail reason=resume_failed")
             if record:
