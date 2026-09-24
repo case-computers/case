@@ -29,6 +29,11 @@ WAIT_TIMEOUT_DEFAULT_S = 30
 # Optional: fn(computer_row, computer_id, credential_name) -> {"status": "success"|"failed"}|None
 _CAPTCHA_AUTO = None
 
+# attempt_id -> TOTP window its code was last typed in. A stale seed yields the
+# same wrong code for the whole window, and typing it again only spends the
+# site's lockout budget; once per window, then the human gets the challenge.
+_TOTP_WINDOW = {}
+
 # Signal priority matches deskd.classify order (generic tags only, no site names).
 _SIGNAL_PRIORITY = ("captcha", "otp", "approval", "email_verify", "passkey")
 
@@ -154,6 +159,7 @@ def _cas_or_conflict(aid, from_status, to_status, revision_expect, fail_reason=N
                        "auth attempt revision or status changed")
     pub = attempt_public(store.get_auth_attempt(aid))
     if to_status in AUTH_ATTEMPT_TERMINAL:
+        _TOTP_WINDOW.pop(aid, None)
         # A finished login got past its challenge; any other end leaves it unanswered.
         _close_child(pub["current_handoff_id"],
                      "completed" if to_status in ("authenticated", "unverified") else "failed")
@@ -655,9 +661,11 @@ def advance_attempt(attempt_id, expected_revision=None, observation=None, _depth
     # Auto TOTP when vault has a seed.
     if kind == "otp":
         material = store.credential_material(row["computer_id"], row["credential"])
-        if material and material.get("totp_seed"):
+        window = int(time.time() // 30)
+        if material and material.get("totp_seed") and _TOTP_WINDOW.get(attempt_id) != window:
+            _TOTP_WINDOW[attempt_id] = window
             try:
-                code = _totp(material["totp_seed"])
+                code = _totp(material["totp_seed"], window * 30)
                 out = auth_submit_challenge(computer, "otp", value=code,
                                             domains=material.get("domains") or [])
                 if isinstance(out, dict) and out.get("ok"):

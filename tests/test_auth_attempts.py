@@ -392,6 +392,24 @@ def test_totp_submit_carries_credential_domains():
     assert len(submit.call_args.kwargs["value"]) == 6
 
 
+def test_stale_totp_seed_is_typed_once_then_the_human_gets_the_challenge():
+    _cleanup()
+    store.upsert_credential("c_1", "cred", "u", "secret", "JBSWY3DPEHPK3PXP",
+                            None, ["example.com"])
+    a = auth_attempts.start_attempt("c_1", "cred", "https://example.com/login")
+    otp = {"ok": True, "observation": _obs(challenge_signals=["otp"],
+                                           visible_fields={"code": True})}
+    with mock.patch("lifecycle.get_computer", return_value=COMP), \
+         mock.patch("deskclient.observe_auth", return_value=otp), \
+         mock.patch("deskclient.auth_submit_challenge", return_value={"ok": True}) as submit, \
+         mock.patch("deskclient.screenshot_b64", return_value=None), \
+         mock.patch("auth_attempts.time.time", return_value=1_000_000.0):
+        out = auth_attempts.advance_attempt(a["id"])
+    assert submit.call_count == 1, submit.call_count
+    assert out["status"] == "awaiting_human", out
+    assert store.get_handoff(out["current_handoff_id"])["kind"] == "otp"
+
+
 def test_handoff_submit_carries_credential_domains():
     _cleanup()
     store.upsert_credential("c_1", "cred", "u", "secret", None, None, ["example.com"])
