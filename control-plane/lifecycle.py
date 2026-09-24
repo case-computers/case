@@ -8,8 +8,11 @@ can't be silently clobbered. Docker is the ground truth: `reconcile` *forces* th
 to match reality after a daemon restart, it corrects the machine rather than
 transitioning it, so it deliberately bypasses the transition guard.
 """
+import functools
 import secrets
+import threading
 import time
+from contextlib import contextmanager
 
 from config import DESK_H, DESK_W, IMAGE, MAX_RAM_MB, MAX_RUNNING, log
 from errors import ApiError
@@ -28,6 +31,40 @@ TRANSITIONS = {
     "asleep":   {"waking", "deleted"},
     "deleted":  set(),
 }
+
+# Wake, sleep and destroy of one computer run one at a time, and reconcile leaves a
+# row alone while anything (create included) is in flight on it: mid-wake the
+# container is not up yet, and "force the DB to Docker truth" would undo the wake.
+_GUARD = threading.Lock()        # guards the two maps below
+_IN_FLIGHT = {}                  # cid -> operations in progress
+_LOCKS = {}                      # cid -> RLock, dropped with its last operation
+
+
+@contextmanager
+def _in_flight(cid, serialize=True):
+    with _GUARD:
+        _IN_FLIGHT[cid] = _IN_FLIGHT.get(cid, 0) + 1
+        lock = _LOCKS.setdefault(cid, threading.RLock())
+    try:
+        if serialize:
+            with lock:
+                yield
+        else:
+            yield
+    finally:
+        with _GUARD:
+            _IN_FLIGHT[cid] -= 1
+            if not _IN_FLIGHT[cid]:
+                del _IN_FLIGHT[cid]
+                del _LOCKS[cid]
+
+
+def _serialized(fn):
+    @functools.wraps(fn)
+    def run(cid, *a, **kw):
+        with _in_flight(cid):
+            return fn(cid, *a, **kw)
+    return run
 
 
 def get_computer(cid):
@@ -53,19 +90,19 @@ def set_state(cid, to):
     if not can_transition(current, to):
         raise ApiError(409, "illegal_transition", f"{current} → {to} not allowed")
     if store.set_state(cid, to, expect=current) == 0:
-        # someone transitioned it between our read and write, don't emit a stale edge.
-        # The CAS makes the write safe; orchestration races (wake vs sleep) remain —
-        # add per-cid locks only if they actually bite.
+        # someone transitioned it between our read and write, don't emit a stale edge
         return False
     emit("state_changed", {"computer_id": cid, "from": current, "to": to})
     return True
 
 
-def _force_state(cid, current, to):
-    """Reconcile-only: align the DB to Docker truth, bypassing the transition guard."""
+def _force_state(cid, current, to, expect=None):
+    """Align the DB to Docker truth, bypassing the transition guard. `expect` makes
+    it a compare-and-set, so a stale read can't clobber a newer transition."""
     if current == to:
         return
-    store.set_state(cid, to)
+    if store.set_state(cid, to, expect=expect) == 0:
+        return
     emit("state_changed", {"computer_id": cid, "from": current, "to": to})
 
 
@@ -129,6 +166,11 @@ def provision(name=None, cpus=1, ram_mb=2048):
     name = str(name or cid)
     token = secrets.token_hex(16)
     volume = f"case-{cid}"
+    with _in_flight(cid, serialize=False):
+        return _provision(cid, name, cpus, ram_mb, volume, token)
+
+
+def _provision(cid, name, cpus, ram_mb, volume, token):
     store.insert_computer(cid, name, IMAGE, cpus, ram_mb, volume, token)
     try:
         dockerd.create_volume(volume)
@@ -162,6 +204,7 @@ def _try_set(cid, to):
         return False
 
 
+@_serialized
 def destroy(cid):
     row = get_computer(cid)
     dockerd.destroy_infra(cid, row["volume"])
@@ -172,6 +215,7 @@ def destroy(cid):
     _force_state(cid, row["state"], "deleted")
 
 
+@_serialized
 def do_sleep(cid):
     row = get_computer(cid)
     if row["state"] == "asleep":
@@ -208,6 +252,7 @@ def sleep_all():
     return slept
 
 
+@_serialized
 def do_wake(cid):
     row = get_computer(cid)
     if row["state"] == "running" and dockerd.container_up(cid):
@@ -238,9 +283,14 @@ def do_wake(cid):
         _try_set(cid, "asleep")   # tolerate a concurrent delete here too
         raise
     if not _try_set(cid, "running"):
-        # a DELETE landed while we were waking → we rebuilt a container the delete didn't
-        # know about. Tear it down instead of leaking a zombie on a 'deleted' row.
-        dockerd.destroy_infra(cid, row["volume"])
+        now_row = store.get_computer(cid)
+        if not now_row or now_row["state"] == "deleted":
+            # a DELETE landed while we were waking → we rebuilt a container the delete
+            # didn't know about. Tear it down instead of leaking a zombie on a 'deleted' row.
+            dockerd.destroy_infra(cid, row["volume"])
+        else:
+            # the row moved on (asleep) without us; the volume is still the user's
+            dockerd.stop_container(cid)
         raise ApiError(409, "wake_lost_race", "computer was deleted/changed during wake")
 
 
@@ -257,14 +307,21 @@ def ensure_running(cid, wake):
 
 
 def reconcile():
-    """After cased/daemon restart: force the DB to match what Docker actually has."""
-    for row in store.all_non_deleted():
+    """After cased/daemon restart: force the DB to match what Docker actually has.
+
+    Each correction is a compare-and-set on the state read before Docker was asked,
+    so a wake/sleep that starts in between wins. Rows with an operation in flight
+    are skipped; after a restart there are none, so a stale waking/creating row is
+    still repaired."""
+    with _GUARD:
+        rows = [r for r in store.all_non_deleted() if r["id"] not in _IN_FLIGHT]
+    for row in rows:
         cid, current = row["id"], row["state"]
         try:
             container = dockerd.get_container(cid)
         except dockerd.NotFound:
             log.warning("container for %s missing; will recreate from volume on wake", cid)
-            _force_state(cid, current, "asleep")
+            _force_state(cid, current, "asleep", expect=current)
             continue
         except Exception as e:
             log.warning("reconcile skipped (docker unavailable): %s", e)
@@ -274,8 +331,8 @@ def reconcile():
                 desk_port, vnc_port = dockerd.container_ports(container)
                 if (desk_port, vnc_port) != (row["desk_port"], row["vnc_port"]):
                     store.set_ports(cid, desk_port, vnc_port)
-                _force_state(cid, current, "running")
+                _force_state(cid, current, "running", expect=current)
             except ApiError:
-                _force_state(cid, current, "asleep")
+                _force_state(cid, current, "asleep", expect=current)
         else:
-            _force_state(cid, current, "asleep")
+            _force_state(cid, current, "asleep", expect=current)

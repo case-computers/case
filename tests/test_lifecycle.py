@@ -183,6 +183,168 @@ def test_wake_rebuilds_a_container_docker_no_longer_has():
         store.delete_computer(cid)
 
 
+class _Box:
+    """Just enough of a container for do_wake/reconcile."""
+    def __init__(self, st):
+        self.st = st
+
+    @property
+    def status(self):
+        return self.st["container"]
+
+
+def _wake_harness(cid, during_wait):
+    """do_wake with Docker faked; `during_wait` runs while deskd is coming up."""
+    from unittest import mock
+    import deskclient
+    import dockerd
+    import lifecycle
+    st = {"container": "exited", "destroyed": [], "stopped": []}
+
+    def stop(c, timeout=10):
+        st["container"] = "exited"
+        st["stopped"].append(c)
+
+    with mock.patch.object(dockerd, "start_container",
+                           lambda c: st.update(container="running")), \
+         mock.patch.object(dockerd, "get_container", lambda c: _Box(st)), \
+         mock.patch.object(dockerd, "container_ports", lambda c, deadline=10: (1, 2)), \
+         mock.patch.object(dockerd, "container_up", lambda c: st["container"] == "running"), \
+         mock.patch.object(dockerd, "stop_container", stop), \
+         mock.patch.object(dockerd, "destroy_infra",
+                           lambda c, v: st["destroyed"].append(v)), \
+         mock.patch.object(deskclient, "wait_desk", lambda *a: during_wait(cid, st)):
+        try:
+            lifecycle.do_wake(cid)
+            st["error"] = None
+        except ApiError as e:
+            st["error"] = e.code
+    return st
+
+
+def _asleep_row(cid):
+    store.delete_computer(cid)
+    store.insert_computer(cid, "t", "img", 1, 512, "case-" + cid, "tok")
+    store.set_state(cid, "asleep")
+
+
+def test_sleep_landing_mid_wake_keeps_the_volume():
+    # The row went asleep under a wake: that is not a delete, so the user's home
+    # volume must survive; the container is just stopped to match the row.
+    import lifecycle
+    cid = "c_unittest_wake_sleep"
+    _asleep_row(cid)
+    try:
+        st = _wake_harness(cid, lambda c, st: lifecycle.do_sleep(c))
+        assert st["error"] == "wake_lost_race", st
+        assert st["destroyed"] == [], st
+        assert st["container"] == "exited", st
+        assert store.get_computer(cid)["state"] == "asleep"
+    finally:
+        store.delete_computer(cid)
+
+
+def test_sleep_from_another_thread_waits_for_the_wake():
+    import threading
+    from unittest import mock
+    import time as _time
+    import lifecycle
+    cid = "c_unittest_wake_serial"
+    _asleep_row(cid)
+    other = {}
+
+    def during(c, st):
+        other["t"] = threading.Thread(target=lifecycle.do_sleep, args=(c,))
+        other["t"].start()
+        _time.sleep(0.2)
+        assert store.get_computer(c)["state"] == "waking"   # the sleep is queued behind us
+
+    try:
+        with mock.patch.object(lifecycle.dockerd, "stop_container"):   # outlives the harness
+            st = _wake_harness(cid, during)
+            other["t"].join(5)
+        assert st["error"] is None, st
+        assert st["destroyed"] == [], st
+        assert store.get_computer(cid)["state"] == "asleep"
+    finally:
+        store.delete_computer(cid)
+
+
+def test_delete_landing_mid_wake_still_tears_down():
+    import lifecycle
+    cid = "c_unittest_wake_delete"
+    _asleep_row(cid)
+    try:
+        st = _wake_harness(cid, lambda c, st: lifecycle._force_state(c, "waking", "deleted"))
+        assert st["error"] == "wake_lost_race", st
+        assert st["destroyed"] == ["case-" + cid], st
+    finally:
+        store.delete_computer(cid)
+
+
+def test_reconcile_leaves_a_wake_in_flight_alone():
+    # The sweeper ticks every 20s; mid-wake the container is not up yet, and forcing
+    # waking → asleep used to make the wake destroy the computer's volume.
+    import lifecycle
+
+    def sweep(cid, st):
+        st["container"] = "created"
+        lifecycle.reconcile()
+        assert store.get_computer(cid)["state"] == "waking"
+        st["container"] = "running"
+
+    cid = "c_unittest_wake_recon"
+    _asleep_row(cid)
+    try:
+        st = _wake_harness(cid, sweep)
+        assert st["error"] is None, st
+        assert st["destroyed"] == [], st
+        assert store.get_computer(cid)["state"] == "running"
+    finally:
+        store.delete_computer(cid)
+
+
+def test_reconcile_still_repairs_a_stale_waking_row():
+    # cased restarted mid-wake: nothing is in flight, so the row is fixed as before.
+    from unittest import mock
+    import dockerd
+    import lifecycle
+    cid = "c_unittest_stale_waking"
+    _asleep_row(cid)
+    store.set_state(cid, "waking")
+    try:
+        with mock.patch.object(dockerd, "get_container", side_effect=dockerd.NotFound("x")):
+            lifecycle.reconcile()
+        assert store.get_computer(cid)["state"] == "asleep"
+    finally:
+        store.delete_computer(cid)
+
+
+def test_reconcile_during_provision_does_not_lose_the_create():
+    from unittest import mock
+    import deskclient
+    import dockerd
+    import lifecycle
+
+    def volume(v):
+        # the sweeper ticks before the container exists
+        with mock.patch.object(dockerd, "get_container", side_effect=dockerd.NotFound("x")):
+            lifecycle.reconcile()
+
+    with mock.patch.object(dockerd, "create_volume", volume), \
+         mock.patch.object(dockerd, "create_container", lambda *a: None), \
+         mock.patch.object(dockerd, "container_ports", lambda c, deadline=10: (1, 2)), \
+         mock.patch.object(dockerd, "destroy_infra") as destroy, \
+         mock.patch.object(deskclient, "wait_desk"), \
+         mock.patch.object(lifecycle, "admit"):
+        out = lifecycle.provision("race")
+    try:
+        assert out["state"] == "running", out
+        destroy.assert_not_called()
+    finally:
+        store.delete_computer(out["id"])
+
+
 def test_vault_directory_and_database_are_private():
     # ~/.case holds the Fernet key and every encrypted secret. An install that
     # predates this (or a loose umask) leaves them world-readable.
