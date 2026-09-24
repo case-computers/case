@@ -43,6 +43,9 @@ services:
       CASE_TOKEN: ${CASE_TOKEN:-}
       CASE_BRAIN_URL: ${CASE_BRAIN_URL:-http://ui:4174/api/brain}
       CASE_BRAIN_CMD: ${CASE_BRAIN_CMD:-}
+      CASE_BRAIN_TIMEOUT: ${CASE_BRAIN_TIMEOUT:-}
+      CASE_SESSION_KEEPER_INTERVAL_S: ${CASE_SESSION_KEEPER_INTERVAL_S:-}
+      CASE_SESSION_KEEPER_BUSY_S: ${CASE_SESSION_KEEPER_BUSY_S:-}
       CASE_MAX_RUNNING: ${CASE_MAX_RUNNING:-4}
       # Total RAM the awake desktops may hold. Unset = 75% of what the engine sees,
       # which on a Mac is the Docker VM, not the Mac.
@@ -62,6 +65,8 @@ services:
       CASE_DBC_AUTHTOKEN: ${CASE_DBC_AUTHTOKEN:-}
       CASE_DBC_USERNAME: ${CASE_DBC_USERNAME:-}
       CASE_DBC_PASSWORD: ${CASE_DBC_PASSWORD:-}
+      CASE_DBC_PROXY: ${CASE_DBC_PROXY:-}
+      CASE_DBC_PROXYTYPE: ${CASE_DBC_PROXYTYPE:-}
       # Usage stats opt-out (see .env.example)
       CASE_TELEMETRY: ${CASE_TELEMETRY:-}
       DO_NOT_TRACK: ${DO_NOT_TRACK:-}

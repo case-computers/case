@@ -242,7 +242,7 @@ Choose a computer's size under **+ New computer**, then **SIZE**. The default is
 
 | Setting | What it controls | Compose default |
 | --- | --- | --- |
-| `CASE_MAX_RUNNING` | Maximum number of awake computers | 4 |
+| `CASE_MAX_RUNNING` | Maximum number of awake computers | 4 (8 without Compose) |
 | `CASE_MAX_RAM_MB` | Total RAM that awake computers may reserve, in MB | 75% of the memory visible to cased |
 
 On macOS with Compose, that memory comes from the Docker VM. A 4 GB VM has room
@@ -333,8 +333,16 @@ CASE_URL=http://127.0.0.1:8787 node web/web-ui/serve.mjs
 
 Open the [computers page](http://127.0.0.1:4174/deploy). Drive runs in the
 foreground in this terminal. Host processes use environment variables, not the
-Compose `.env` file. If cased runs directly on macOS, set `CASE_MAX_RAM_MB`
-explicitly; its automatic memory budget requires Linux's `/proc/meminfo`.
+Compose `.env` file; `bin/case` also reads `~/.case/env` if it exists. If cased
+runs directly on macOS, set `CASE_MAX_RAM_MB` explicitly; its automatic memory
+budget requires Linux's `/proc/meminfo`.
+
+A few settings only apply here. `CASE_PORT` moves cased off 8787.
+`CASE_VNC_PORT` pins every desktop's noVNC to one host port for a reverse
+proxy. `CASE_BRAIN_BIN`
+points the scheduler at a `claude` binary that is not on `PATH`, and
+`CASE_MCP_CONFIG` replaces `case-mcp.json`. On macOS, `CASE_CPU` and `CASE_MEM`
+size the Colima VM that `bin/case up` starts (default 4 CPUs, 4 GB).
 
 For a client that uses stdio MCP, [case-mcp.json](case-mcp.json) starts
 `mcp/case_mcp.py` with Python. It needs the installed Python dependencies and
