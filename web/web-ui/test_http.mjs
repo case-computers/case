@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -11,6 +12,11 @@ process.env.CASE_TOKEN = 'tok';
 delete process.env.CASE_DRIVE_API_KEY;
 delete process.env.CASE_DRIVE_PROVIDER;
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
+// cased is down: a port that was just free and is closed again.
+const dead = http.createServer();
+await new Promise((r) => dead.listen(0, '127.0.0.1', r));
+process.env.CASE_URL = `http://127.0.0.1:${dead.address().port}`;
+await new Promise((r) => dead.close(r));
 const serve = await import('./serve.mjs');
 const { server } = serve;
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -67,6 +73,25 @@ try {
   serve.driveLoop.turn = origTurn;
   delete process.env.CASE_DRIVE_API_KEY;
   delete process.env.CASE_DRIVE_PROVIDER;
+}
+
+// One bad request is that request's problem: a client hanging up mid-body (STOP
+// during an attachment upload) or cased being down must not kill the process.
+{
+  const auth = { authorization: 'Bearer tok' };
+  for (const [route, extra] of [['/api/chat', ''], ['/api/attach', 'x-filename: notes.txt\r\n']]) {
+    await new Promise((resolve) => {
+      const c = net.connect(server.address().port, '127.0.0.1', () => {
+        c.write(`POST ${route} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer tok\r\n${extra}`
+          + 'Content-Type: application/json\r\nContent-Length: 100000\r\n\r\n{"input":"hi"');
+        setTimeout(() => { c.destroy(); resolve(); }, 100);
+      });
+    });
+  }
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal((await get('/api/threads', auth)).status, 200, 'still serving after aborted bodies');
+  assert.equal((await get('/api/schedules', auth)).status, 502);
+  assert.equal((await post('/api/teach-tick', {}, auth)).status, 500);
 }
 
 server.close();

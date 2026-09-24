@@ -196,10 +196,14 @@ const BODY_CAP = 1 << 20; // 1 MB, chat input is capped to 32k anyway
 async function readBody(req, res, cap = BODY_CAP) {
   const chunks = [];
   let n = 0;
-  for await (const c of req) {
-    n += c.length;
-    if (n > cap) { json(res, 413, { error: 'body too large' }); req.destroy(); return null; }
-    chunks.push(c);
+  try {
+    for await (const c of req) {
+      n += c.length;
+      if (n > cap) { json(res, 413, { error: 'body too large' }); req.destroy(); return null; }
+      chunks.push(c);
+    }
+  } catch {
+    return null; // client hung up mid-body (STOP during an upload): nobody to answer
   }
   return Buffer.concat(chunks);
 }
@@ -1297,10 +1301,10 @@ export async function runTurn({
 export const driveLoop = { turn: runTurn };
 
 export async function schedulesRoute(req, res, url) {
-  const id = await cid();
-  if (!id) return json(res, 409, { error: 'no computer' });
   const sid = String(url.searchParams.get('id') || '').trim();
   try {
+    const id = await cid();
+    if (!id) return json(res, 409, { error: 'no computer' });
     if (req.method === 'GET' && url.pathname === '/api/schedules') {
       const r = await api('GET', `/computers/${encodeURIComponent(id)}/schedules`);
       return json(res, r.status >= 400 ? r.status : 200, r.json || []);
@@ -1784,28 +1788,29 @@ export const server = http.createServer(async (req, res) => {
     }
   }
   try {
-    if (req.method === 'GET' && p === '/api/computers') return computers(res);
-    if (req.method === 'POST' && p === '/api/computers') return createComputer(res, req);
-    if (req.method === 'DELETE' && p === '/api/computers') return deleteComputer(res, req);
-    if (req.method === 'GET' && p === '/api/fs') return fsList(res, url);
-    if (p === '/api/creds') return creds(req, res, url);
+    if (req.method === 'GET' && p === '/api/computers') return await computers(res);
+    if (req.method === 'POST' && p === '/api/computers') return await createComputer(res, req);
+    if (req.method === 'DELETE' && p === '/api/computers') return await deleteComputer(res, req);
+    if (req.method === 'GET' && p === '/api/fs') return await fsList(res, url);
+    if (p === '/api/creds') return await creds(req, res, url);
     if (p === '/api/threads') return threadsRoute(req, res, url);
-    if (req.method === 'GET' && p === '/api/file') return fsFile(res, url);
-    if (req.method === 'POST' && p === '/api/brain') return brainRoute(req, res);
-    if (p === '/api/schedules' || p === '/api/schedules/run') return schedulesRoute(req, res, url);
-    if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
-    if (req.method === 'POST' && p === '/api/chat/steer') return steer(req, res);
-    if (req.method === 'POST' && p === '/api/attach') return attach(req, res);
+    if (req.method === 'GET' && p === '/api/file') return await fsFile(res, url);
+    if (req.method === 'POST' && p === '/api/brain') return await brainRoute(req, res);
+    if (p === '/api/schedules' || p === '/api/schedules/run') return await schedulesRoute(req, res, url);
+    if (req.method === 'POST' && p === '/api/chat') return await chat(req, res);
+    if (req.method === 'POST' && p === '/api/chat/steer') return await steer(req, res);
+    if (req.method === 'POST' && p === '/api/attach') return await attach(req, res);
     if (req.method === 'POST' && p === '/api/teach-tick') {
       const id = await cid();
       if (!id) return json(res, 409, { error: 'no computer' });
       const r = await api('POST', `/computers/${encodeURIComponent(id)}/teach-tick?wake=true`, { timeoutMs: 15000 });
       return json(res, r.status >= 400 ? r.status : 200, r.json || {});
     }
-    if (req.method === 'POST' && p === '/api/wake') return power(res, req, 'wake');
-    if (req.method === 'POST' && p === '/api/sleep') return power(res, req, 'sleep');
+    if (req.method === 'POST' && p === '/api/wake') return await power(res, req, 'wake');
+    if (req.method === 'POST' && p === '/api/sleep') return await power(res, req, 'sleep');
     if (p.startsWith('/live')) return vncHttp(req, res);
   } catch (err) {
+    if (res.headersSent) return res.destroy();
     return json(res, 500, { error: err.message || 'internal' });
   }
   const file = pageFile(p);
@@ -1824,6 +1829,8 @@ server.on('upgrade', (req, socket, head) => {
 const isMain = fileURLToPath(import.meta.url) === path.resolve(process.argv[1] || '');
 if (isMain) {
   server.on('clientError', (_e, s) => { try { s.destroy(); } catch { /* gone */ } });
+  // One bad request must never take Drive (and every running turn) down with it.
+  process.on('unhandledRejection', (err) => console.error('drive unhandled:', err));
   server.listen(PORT, BIND, () => {
     process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port}${LOCAL ? ', local' : ''})\n`);
     startPhoneNtfy();
