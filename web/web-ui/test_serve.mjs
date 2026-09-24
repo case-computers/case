@@ -469,7 +469,7 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(loopFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);
   assert.ok(!/responses\.create\(params\)/.test(loopFn), 'every round is abortable');
   assert.match(loopFn, /if \(gone\.signal\.aborted\) throw err;/, 'an abort never retries as a param fallback');
-  assert.match(loopFn, /if \(isRateLimited\(err\)\) throw err;/);
+  assert.match(loopFn, /if \(isRetryable\(err\)\) throw err;/);
   assert.match(loopFn, /else if \(summary !== 'auto'\)/);
   assert.ok(loopFn.lastIndexOf('histApplyCompaction') > loopFn.indexOf("histCloseOpenCalls(hist.items, { keepReasoning: true })"),
     'the tool round applies compaction only after closing its open calls');

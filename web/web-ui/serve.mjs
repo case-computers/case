@@ -20,7 +20,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRateLimited } from './case-tools.mjs';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRetryable } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
 import * as telegram from './telegram.mjs';
@@ -1104,7 +1104,7 @@ export async function runTurn({
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
       return { text, computerId: id, threadId: thread.id, finished };
     }
-    const client = new OpenAI({ apiKey: auth.key });
+    const client = new OpenAI({ apiKey: auth.key, maxRetries: 0 });
     let text = '';
     const spend = { in: 0, cached: 0, out: 0 };
     const effSoFar = () => Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
@@ -1137,11 +1137,11 @@ export async function runTurn({
         try { stream = await client.responses.create(params, { signal: rc.signal }); break; }
         catch (err) {
           // Only param fallbacks retry here. An abort must not — and neither may a
-          // rate limit: `summary`/`compact` outlive the round, so treating a 429 as
-          // "unsupported" retries with no backoff AND thins reasoning / drops the
-          // window guard for every later round. Let withRateRetry have it.
+          // rate limit or a 5xx: `summary`/`compact` outlive the round, so treating a
+          // 429 as "unsupported" retries with no backoff AND thins reasoning / drops
+          // the window guard for every later round. Let withRateRetry have it.
           if (gone.signal.aborted) throw err;
-          if (isRateLimited(err)) throw err;
+          if (isRetryable(err)) throw err;
           if (compact && /context_management|compaction/i.test(err?.message || '')) {
             console.log(`drive turn ${thread.id}: compaction rejected — ${err?.message || 'no message'}`);
             compact = false;
