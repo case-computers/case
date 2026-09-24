@@ -153,8 +153,23 @@ def _cas_or_conflict(aid, from_status, to_status, revision_expect, fail_reason=N
         raise ApiError(409, "revision_conflict",
                        "auth attempt revision or status changed")
     pub = attempt_public(store.get_auth_attempt(aid))
+    if to_status in AUTH_ATTEMPT_TERMINAL:
+        # A finished login got past its challenge; any other end leaves it unanswered.
+        _close_child(pub["current_handoff_id"],
+                     "completed" if to_status in ("authenticated", "unverified") else "failed")
     _publish_updated(pub)
     return pub
+
+
+def _close_child(hid, status):
+    """Terminalize a still-open child so handoff_list cannot keep a stale pending pin."""
+    if not hid:
+        return
+    h = store.get_handoff(hid)
+    if h and h["status"] in HANDOFF_LIVE:
+        store.transition_handoff(hid, status, answer=None)
+    import handoffs  # cycle: handoffs → auth_attempts on answer paths
+    handoffs.LOGIN_CTX.pop(hid, None)
 
 
 def _cursor_changed(pub, after_revision, after_handoff_id):
@@ -264,19 +279,7 @@ def cancel_attempt(attempt_id, expected_revision=None):
         raise ApiError(409, "illegal_transition",
                        f"cannot cancel terminal attempt in status {row['status']}")
     rev = int(row["revision"] or 0) if expected_revision is None else int(expected_revision)
-    hid = row_get(row, "current_handoff_id")
-    pub = _cas_or_conflict(attempt_id, row["status"], "cancelled", rev)
-    # Terminalize the open child so handoff_list cannot leave a stale pending pin.
-    if hid:
-        h = store.get_handoff(hid)
-        if h and h["status"] in HANDOFF_LIVE:
-            store.transition_handoff(hid, "failed", answer=None)
-            try:
-                import handoffs  # cycle: handoffs → auth_attempts on answer paths
-                handoffs.LOGIN_CTX.pop(hid, None)
-            except Exception:
-                pass
-    return pub
+    return _cas_or_conflict(attempt_id, row["status"], "cancelled", rev)
 
 
 def reobserve_if_solved(attempt_id):
@@ -287,7 +290,6 @@ def reobserve_if_solved(attempt_id):
     row = store.get_auth_attempt(attempt_id)
     if not row or row["status"] != "awaiting_human":
         return None
-    hid = row_get(row, "current_handoff_id")
 
     from deskclient import observe_auth
     from lifecycle import get_computer
@@ -305,15 +307,9 @@ def reobserve_if_solved(attempt_id):
     if observation is None or _classify_kind(observation):
         return None  # challenge still up (or unreadable) — keep waiting
     try:
-        pub = advance_attempt(attempt_id, observation=observation)
+        return advance_attempt(attempt_id, observation=observation)
     except ApiError:
         return None  # raced with an Assist submit; the waiter sees that change
-    # The pending child is answered — the human did it on the desk itself.
-    if hid and pub["status"] != "awaiting_human":
-        h = store.get_handoff(hid)
-        if h and h["status"] in HANDOFF_LIVE:
-            store.transition_handoff(hid, "completed", answer=None)
-    return pub
 
 
 async def wait_attempt(attempt_id, after_revision=0, after_handoff_id=None,

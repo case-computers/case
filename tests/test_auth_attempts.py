@@ -158,6 +158,23 @@ def test_cancel_attempt():
     assert not store.active_attempt_exists("c_1")
 
 
+def test_every_terminal_attempt_closes_its_live_child():
+    for end, want in (("fail", "failed"), ("prove", "completed"), ("cancel", "failed")):
+        _cleanup()
+        a = auth_attempts.start_attempt("c_1", "github", "https://example.com/login")
+        store.cas_auth_attempt_status(a["id"], "created", "awaiting_human", 0)
+        store.insert_handoff("h_live", "c_1", "otp", "enter code", None, "github",
+                             continuation="submit_value", attempt_id=a["id"], sequence=1)
+        store.set_attempt_handoff(a["id"], "h_live")
+        handoffs.LOGIN_CTX["h_live"] = {"computer_id": "c_1", "credential": "github"}
+        with mock.patch.object(store, "record_credential_result"):
+            {"fail": lambda: auth_attempts.fail_attempt(a["id"], reason="x"),
+             "prove": lambda: auth_attempts.prove_attempt(a["id"]),
+             "cancel": lambda: auth_attempts.cancel_attempt(a["id"])}[end]()
+        assert store.get_handoff("h_live")["status"] == want, end
+        assert "h_live" not in handoffs.LOGIN_CTX, end
+
+
 def test_claim_challenge_cas():
     _cleanup()
     store.insert_handoff(
