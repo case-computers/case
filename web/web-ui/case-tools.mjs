@@ -65,7 +65,8 @@ export function caseToolPlan(name, args, cid) {
 // The one HTTP client for cased in JS: the chat tool loop and serve.mjs both
 // route through it. json/body are interchangeable JSON payload keys; rawBody
 // sends bytes as-is; raw:true resolves {status, buf} instead of parsed JSON.
-export function caseCall(method, rel, { json, body, rawBody = null, raw = false, timeoutMs = 20000 } = {}) {
+// maxBytes stops reading a bigger reply and resolves {status, tooBig: true}.
+export function caseCall(method, rel, { json, body, rawBody = null, raw = false, timeoutMs = 20000, maxBytes = 0 } = {}) {
   const u = new URL(rel.startsWith('http') ? rel : caseRoot() + rel);
   const lib = u.protocol === 'https:' ? https : http;
   const data = json ?? body;
@@ -84,7 +85,14 @@ export function caseCall(method, rel, { json, body, rawBody = null, raw = false,
       },
     }, (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let n = 0;
+      const tooBig = () => { res.destroy(); resolve({ status: res.statusCode || 0, tooBig: true }); };
+      if (maxBytes && Number(res.headers['content-length']) > maxBytes) return tooBig();
+      res.on('data', (c) => {
+        n += c.length;
+        if (maxBytes && n > maxBytes) return tooBig();
+        chunks.push(c);
+      });
       res.on('end', () => {
         const buf = Buffer.concat(chunks);
         if (raw) return resolve({ status: res.statusCode || 0, buf });

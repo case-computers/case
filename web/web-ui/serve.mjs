@@ -296,12 +296,12 @@ async function fsFile(res, url) {
     if (!id) return json(res, 409, { error: 'no computer picked' });
     const r = await api('GET',
       `/computers/${encodeURIComponent(id)}/files?path=${encodeURIComponent(p)}&wake=true`,
-      { timeoutMs: 60000, raw: true });
+      { timeoutMs: 60000, raw: true, maxBytes: FILE_CAP });
+    if (r.tooBig) return json(res, 413, { error: 'file over 8MB' });
     if (r.status >= 400) {
       const msg = parseErr(r.buf, 'read failed');
       return json(res, r.status, { error: msg });
     }
-    if (r.buf.length > FILE_CAP) return json(res, 413, { error: 'file over 8MB' });
     const ext = path.extname(p).toLowerCase();
     const inline = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'].includes(ext);
     res.writeHead(200, {

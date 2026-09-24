@@ -139,6 +139,33 @@ try {
   }
 }
 
+// A file over the 8MB cap is refused as soon as that is known — from its
+// content-length, or once the bytes read pass it — not after buffering it whole.
+{
+  const auth = { authorization: 'Bearer tok' };
+  const fake = http.createServer((req, res) => {
+    if (req.url.includes('declared')) {
+      res.writeHead(200, { 'content-length': String(9 * 1024 * 1024) });
+      return res.write('x');   // and never the rest
+    }
+    res.writeHead(200);   // chunked: the size is only known by reading
+    res.write(Buffer.alloc(8 * 1024 * 1024 + 1));
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  const was = process.env.CASE_URL;
+  process.env.CASE_URL = `http://127.0.0.1:${fake.address().port}/v1`;
+  try {
+    for (const name of ['declared.bin', 'streamed.bin']) {
+      const r = await get(`/api/file?path=/home/agent/${name}&computer_id=c_1`, auth);
+      assert.equal(r.status, 413, name);
+    }
+  } finally {
+    process.env.CASE_URL = was;
+    fake.closeAllConnections();
+    fake.close();
+  }
+}
+
 // /live websockets: a refused upgrade is answered, not left hanging, and bytes the
 // browser sent right behind its upgrade request reach the desk.
 {
