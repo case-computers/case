@@ -329,15 +329,13 @@ def _resume_and_finish(hid, ctx, value, *, value_present=True, hrow=None):
     advance_attempt, the attempt (not LOGIN_CTX) owns credential ok / prove.
     """
     hrow = hrow or store.get_handoff(hid)
-    status, reason = "failed", None
+    status = "failed"
     try:
         row = get_computer(ctx["computer_id"])
         out = desk_json(row, "POST", "/login/resume", json={"value": value}, timeout=90)
         status = out.get("status", "failed")
-        reason = out.get("reason")
     except Exception as e:
         log.warning("login resume failed: %s", e)
-        status, reason = "failed", str(e)
 
     if status == "success":
         return _finish_attempt_child(
@@ -345,8 +343,7 @@ def _resume_and_finish(hid, ctx, value, *, value_present=True, hrow=None):
             answer=value if value_present else (hrow["answer"] if hrow else None),
             value_present=value_present, ctx=ctx)
 
-    denied = isinstance(reason, str) and "denied" in reason.lower()
-    if denied or (isinstance(value, str) and value.lower() == "deny"):
+    if isinstance(value, str) and value.lower() == "deny":
         return _fail_attempt_child(hid, hrow, value, ctx=ctx)
 
     # Soft fail: challenge still present / bad code / transient, human can retry.

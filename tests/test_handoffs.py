@@ -349,6 +349,24 @@ def test_approval_deny_is_terminal_failed():
         _cleanup("h_otp")
 
 
+def test_resume_reason_mentioning_denied_is_a_soft_fail():
+    # A page saying "permission denied" is not the human saying deny.
+    _cleanup("h_otp")
+    try:
+        _persist("h_otp", "otp", "enter code", login_credential="chase",
+                 continuation="submit_value")
+        with mock.patch.object(handoffs, "get_computer", return_value=ROW), \
+             mock.patch.object(handoffs, "desk_json",
+                               return_value={"status": "failed", "reason": "Permission denied"}), \
+             mock.patch.object(store, "record_credential_result") as rec:
+            row = handoffs.submit_handoff_value("h_otp", "123456")
+        assert row["status"] == "pending", dict(row)
+        assert "h_otp" in handoffs.LOGIN_CTX
+        rec.assert_not_called()
+    finally:
+        _cleanup("h_otp")
+
+
 def test_approval_approve_persists_approve_not_done():
     """'approve' is also a verify_page synonym — must not collapse approval answers."""
     _cleanup("h_plain")

@@ -122,6 +122,11 @@ def test_multiline_prompt_is_flattened_into_the_header():
     assert h["X-Message"] == "line one line two line three"
 
 
+def test_title_is_plain_ascii_not_a_replaced_dash():
+    h = _post_once({"id": "h_1", "kind": "otp", "prompt": "code?", "screenshot": None}, "ava")
+    assert h["X-Title"] == "[Case] otp - ava", h["X-Title"]
+
+
 def test_assist_url_becomes_the_click_action():
     h = _post_once({"id": "h_1", "kind": "question", "prompt": "hi", "screenshot": None,
                     "assist_url": "https://acme.example/assist/tok"})
