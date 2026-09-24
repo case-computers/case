@@ -113,7 +113,7 @@ jobs:
           # The list is built first so a git failure fails the step instead of an empty loop.
           files=$(git ls-files \
                     'control-plane/*.py' 'image/*.py' 'image/*.sh' \
-                    'mcp/*.py' 'tests/*.py' 'web/*.mjs' 'bin/case')
+                    'mcp/*.py' 'tests/*.py' 'web/*.mjs' 'web/*.html' 'bin/case')
           missing=0
           for f in $files; do
             grep -q 'SPDX-License-Identifier' "$f" || { echo "no SPDX header: $f"; missing=1; }
