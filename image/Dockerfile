@@ -47,8 +47,10 @@ RUN python3 -m venv /opt/deskd \
     && /opt/deskd/bin/pip install --no-cache-dir --upgrade pip==26.2 setuptools==83.0.0 \
     && /opt/deskd/bin/pip install --no-cache-dir \
        fastapi==0.141.1 uvicorn==0.52.4 websocket-client==1.9.2 requests==2.34.2 \
-       anyio==4.15.0 certifi==2026.7.22 charset-normalizer==3.5.1 click==8.5.0 \
-       h11==0.16.0 idna==3.19 pydantic==2.13.5 starlette==1.6.0 urllib3==2.7.0 \
+       annotated-doc==0.0.5 annotated-types==0.8.0 anyio==4.15.0 certifi==2026.7.22 \
+       charset-normalizer==3.5.1 click==8.5.0 h11==0.16.0 idna==3.19 pydantic==2.13.5 \
+       pydantic-core==2.46.5 starlette==1.6.0 typing-extensions==4.16.0 \
+       typing-inspection==0.4.4 urllib3==2.7.0 \
     && /opt/deskd/bin/pip install --no-cache-dir --no-deps websockify==0.13.0
 
 # Passwordless sudo: the container IS the agent's sandbox — self-serve apt
