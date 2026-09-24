@@ -702,8 +702,7 @@ def classify(tab, cred):
             fill(tab, FOCUS_CODE, totp(cred["totp_seed"]))
             press_enter(tab)
             settle(tab)
-            after = (tab.js(PAGE_TEXT) or "") + " " + (tab.js("location.href") or "")
-            if RE_FAIL.search(after) or RE_OTP.search(after):
+            if code_refused(tab):
                 return {"status": "failed", "reason": "totp code rejected"}
             return {"status": "success", "totp_used": True}
         # SMS OTP / other code challenge -> human (or Twilio, decided by cased)
@@ -716,6 +715,17 @@ def classify(tab, cred):
     if fields.get("pass"):
         return {"status": "failed", "reason": "still on login form after submit"}
     return {"status": "success"}
+
+
+def code_refused(tab):
+    """Why the page still refuses a submitted code, or None. Page text only, the
+    URL is the same `%2Fa` trap as in classify()."""
+    text = tab.js(PAGE_TEXT) or ""
+    if RE_FAIL.search(text):
+        return snippet(text, RE_FAIL)
+    if RE_OTP.search(text):
+        return "challenge still present"
+    return None
 
 
 def advanced_past_identifier(tab):
@@ -846,13 +856,8 @@ def login_resume(b: dict = Body(...)):
                 reason = apply_challenge_action(tab, "otp", value)
                 if reason:
                     return {"status": "failed", "reason": reason}
-            blob = (tab.js(PAGE_TEXT) or "") + " " + (tab.js("location.href") or "")
-            if RE_FAIL.search(blob):
-                return {"status": "failed", "reason": snippet(blob, RE_FAIL)}
-            page_text = tab.js(PAGE_TEXT) or ""
-            fields_ok = tab.js(HAS_FIELDS) is not None      # eval reachable
-            if fields_ok and RE_OTP.search(page_text):      # text only: href %2Fa trap, see classify()
-                return {"status": "failed", "reason": "challenge still present"}
+            if reason := code_refused(tab):
+                return {"status": "failed", "reason": reason}
             return {"status": "success"}
         finally:
             try:

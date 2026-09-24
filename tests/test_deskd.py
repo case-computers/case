@@ -832,6 +832,41 @@ def test_login_resume_rechecks_nonapproval_code_path_origin():
     apply.assert_not_called()
 
 
+def test_login_resume_post_check_reads_the_page_not_the_url():
+    for href in ("https://site.com/home?next=%2Fa%2Fdash", "https://site.com/home?flash=invalid"):
+        tab = FakeTab(text="Welcome back", href=href)
+        tab.close = lambda: None
+        deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+        with mock.patch.object(deskd, "Tab", lambda: tab), \
+             mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+            assert deskd.login_resume({"value": "123456"}) == {"status": "success"}, href
+    tab = FakeTab(text="That code is invalid", href="https://site.com/otp")
+    tab.close = lambda: None
+    deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
+    with mock.patch.object(deskd, "Tab", lambda: tab), \
+         mock.patch.object(deskd, "apply_challenge_action", return_value=None):
+        out = deskd.login_resume({"value": "123456"})
+    assert out["status"] == "failed" and "invalid" in out["reason"], out
+
+
+def test_classify_totp_post_check_ignores_the_url():
+    class TotpTab(FakeTab):
+        def __init__(self):
+            super().__init__(text="Two-factor authentication: enter the code")
+
+        def js(self, expr):
+            if expr == "location.href" and self._text == "Welcome":
+                return "https://site.com/home?next=%2Fa%2Fdash&flash=invalid"
+            return super().js(expr)
+
+    tab = TotpTab()
+    seed = base64.b32encode(b"12345678901234567890").decode()
+    with mock.patch.object(deskd, "fill", side_effect=lambda *a: setattr(tab, "_text", "Welcome")), \
+         mock.patch.object(deskd, "press_enter"), mock.patch.object(deskd, "settle"):
+        r = deskd.classify(tab, {"name": "x", "totp_seed": seed, "domains": ["site.com"]})
+    assert r == {"status": "success", "totp_used": True}, r
+
+
 class ChallengeTab:
     def __init__(self, href):
         self.href = href
