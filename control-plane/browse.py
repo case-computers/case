@@ -514,6 +514,8 @@ def wait_for(row, selector=None, text=None, gone=False, network_idle=False, time
     LLM turn per poll — the same trade navigate() already makes."""
     if not (selector or text or network_idle):
         raise ApiError(400, "bad_request", "need selector, text or network_idle")
+    if network_idle and (selector or text):
+        raise ApiError(400, "bad_request", "network_idle cannot be combined with selector or text")
     if selector:
         cond = f"!!document.querySelector({json.dumps(selector)})"
     elif text:

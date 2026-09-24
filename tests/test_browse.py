@@ -246,6 +246,18 @@ def test_wait_needs_a_condition():
     assert False
 
 
+def test_wait_network_idle_with_a_selector_is_refused():
+    # the selector's boolean went stable too, so this reported ok for a missing element
+    browse.eval_js = fake_eval({"ok": True, "value": False})
+    for kw in ({"selector": "#never"}, {"text": "never"}):
+        try:
+            browse.wait_for(ROW, network_idle=True, timeout_s=5, **kw)
+        except ApiError as e:
+            assert e.status == 400, e
+            continue
+        assert False, kw
+
+
 # ---------- tabs ----------
 
 def test_tabs_list_filters_pages_and_marks_active():
