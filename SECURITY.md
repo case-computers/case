@@ -8,9 +8,11 @@ Case holds logins. These are promises, with code you can read.
 - **deskd returns 423 while a credential is being injected.** Not just
   screenshots: `/exec`, `/action`, `/file` (read and write), `/eval`,
   `/auth/observe` and the capture reads all refuse until the injection finishes,
-  and network capture drops anything in flight. The password field is cleared
-  (`CLEAR_PASS`) before the gate reopens, so the first screenshot after a login
-  sees an empty box.
+  and network capture drops anything in flight. An `/exec`, `/action` or `/eval`
+  that was already running when the injection started returns 423 instead of
+  its result, and a second login is refused (409) rather than overlapping.
+  The password field is cleared (`CLEAR_PASS`) before the gate reopens, so the
+  first screenshot after a login sees an empty box.
 - **That gate is "we do not hand it over", not "cannot obtain".** `computer_exec`
   runs bash in the same container as Chromium, and Chromium's CDP port is on
   that container's loopback. An agent that goes looking can reach what the
