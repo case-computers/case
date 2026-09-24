@@ -815,27 +815,33 @@ export function pushShot(items, shots, b64, dir = shotsDir()) {
   items.push(stashShot(b64, dir));
 }
 
-export function hydrateShots(items, dir = shotsDir()) {
+/** memo (shot path -> item) lets a turn read and encode each file once, not once
+ *  per round; the request is still rebuilt whole every round (store:false). */
+export function hydrateShots(items, dir = shotsDir(), memo = new Map()) {
   const root = path.resolve(dir) + path.sep;
   return (items || []).map((it) => {
     if (!it?.shot) return it;
-    const abs = path.resolve(it.shot);
-    if (!abs.startsWith(root) || path.extname(abs) !== '.png') {
-      return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
-    }
-    try {
-      const buf = fs.readFileSync(abs);
-      return {
-        role: 'user',
-        content: [{
-          type: 'input_image', detail: 'high',
-          image_url: 'data:image/png;base64,' + buf.toString('base64'),
-        }],
-      };
-    } catch {
-      return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
-    }
+    if (!memo.has(it.shot)) memo.set(it.shot, hydrateShot(it.shot, root));
+    return memo.get(it.shot);
   });
+}
+function hydrateShot(shot, root) {
+  const abs = path.resolve(shot);
+  if (!abs.startsWith(root) || path.extname(abs) !== '.png') {
+    return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
+  }
+  try {
+    const buf = fs.readFileSync(abs);
+    return {
+      role: 'user',
+      content: [{
+        type: 'input_image', detail: 'high',
+        image_url: 'data:image/png;base64,' + buf.toString('base64'),
+      }],
+    };
+  } catch {
+    return { role: 'user', content: [{ type: 'input_text', text: '[screenshot]' }] };
+  }
 }
 
 export const ATTACH_MAX = 5 * 1024 * 1024;
@@ -938,7 +944,7 @@ function hydrateOneAttach(a, dir) {
   return [note];
 }
 
-export function hydrateAttaches(items, dir = inboxDir()) {
+export function hydrateAttaches(items, dir = inboxDir(), memo = new Map()) {
   return (items || []).map((it) => {
     if (!it?.attaches?.length) return it;
     const parts = [];
@@ -947,7 +953,11 @@ export function hydrateAttaches(items, dir = inboxDir()) {
     } else if (Array.isArray(it.content)) {
       for (const c of it.content) parts.push(c);
     }
-    for (const a of it.attaches) parts.push(...hydrateOneAttach(a, dir));
+    for (const a of it.attaches) {
+      const key = String(a?.path || '');
+      if (!memo.has(key)) memo.set(key, hydrateOneAttach(a, dir));
+      parts.push(...memo.get(key));
+    }
     return { role: 'user', content: parts };
   });
 }
@@ -1134,6 +1144,8 @@ export async function runTurn({
     const effSoFar = () => Math.round((spend.in - spend.cached) + 0.1 * spend.cached);
     let summary = 'detailed';
     let compact = COMPACT_AT > 0;
+    const shotMemo = new Map();
+    const attachMemo = new Map();
     const round = async () => {
       // The SDK leaves its abort listener on the signal after the round ends; over a
       // 200-round turn that is 200 dead listeners on one signal. A per-round
@@ -1144,7 +1156,7 @@ export async function runTurn({
       if (gone.signal.aborted) rc.abort();
       try {
       const params = {
-        model, input: [dev, ...hydrateShots(hydrateAttaches(hist.items))], tools: ALL_TOOLS,
+        model, input: [dev, ...hydrateShots(hydrateAttaches(hist.items, inboxDir(), attachMemo), shotsDir(), shotMemo)], tools: ALL_TOOLS,
         reasoning: { effort, summary }, stream: true, store: false,
         // The loop is append-only: every round re-sends [dev, ...items], which is
         // exactly the shape the prefix cache wants. A stable key is required for

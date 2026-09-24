@@ -561,6 +561,14 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(missing[0].content[0].type, 'input_text');
   const outside = hydrateShots([{ role: 'user', shot: '/etc/passwd', content: [{ type: 'input_text', text: '[screenshot]' }] }], dir);
   assert.equal(outside[0].content[0].type, 'input_text', 'paths outside the shots dir are refused');
+  // A turn reads each file once: with its memo, a later round needs no disk.
+  const memo = new Map();
+  const first = hydrateShots([item], dir, memo)[0];
+  const copy = path.join(dir, 'keep.png');
+  fs.renameSync(item.shot, copy);
+  assert.equal(hydrateShots([item], dir, memo)[0], first);
+  assert.equal(hydrateShots([item], dir)[0].content[0].type, 'input_text', 'without it the file is read again');
+  fs.renameSync(copy, item.shot);
   const legacy = [{ role: 'user', content: [{ type: 'input_image', detail: 'high', image_url: 'data:image/png;base64,' + png }] }];
   const moved = migrateShots(legacy, dir);
   assert.ok(moved[0].shot);
@@ -603,6 +611,16 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.equal(hyd[0].content[2].type, 'input_text');
   assert.match(hyd[0].content[2].text, /notes\.md/);
   assert.match(hyd[0].content[2].text, /hello notes/);
+  {
+    const memo = new Map();
+    const turn = [{ role: 'user', content: '', attaches: [{ path: img.path, name: img.name, mime: img.mime }] }];
+    const once = hydrateAttaches(turn, dir, memo);
+    fs.renameSync(img.path, img.path + '.moved');
+    const again = hydrateAttaches(turn, dir, memo);
+    fs.renameSync(img.path + '.moved', img.path);
+    assert.deepEqual(again, once, 'an attachment is read once per turn');
+    assert.equal(again[0].content[0].type, 'input_image');
+  }
   const missing = hydrateAttaches([{
     role: 'user', content: '',
     attaches: [{ path: path.join(dir, 'nope.md'), name: 'gone.md', mime: 'text/plain' }],
