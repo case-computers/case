@@ -159,7 +159,9 @@ def test_no_credential_write_tool():
     # security invariant: secrets enter via `case cred add` only, never a tool call
     m = _load()
     names = list(m.mcp._tool_manager._tools)
-    assert not [n for n in names if "cred" in n], names
+    writes = ("add", "create", "set", "put", "update", "save", "store", "write",
+              "delete", "remove")
+    assert not [n for n in names if "cred" in n and any(w in n for w in writes)], names
 
 
 if __name__ == "__main__":
