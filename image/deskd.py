@@ -335,16 +335,21 @@ def file_get(path: str):
 
 # ---------- CDP ----------
 
+def page_ws():
+    """A websocket to the most-recently-active Chromium page."""
+    pages = [t for t in requests.get(f"{CDP}/json/list", timeout=5).json() if t["type"] == "page"]
+    if not pages:
+        raise RuntimeError("no chromium page target")
+    # suppress_origin: chromium 136+ rejects CDP websockets with an Origin header
+    return websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=30,
+                                       suppress_origin=True)
+
+
 class Tab:
     """One websocket to the most-recently-active Chromium page."""
 
     def __init__(self):
-        pages = [t for t in requests.get(f"{CDP}/json/list", timeout=5).json() if t["type"] == "page"]
-        if not pages:
-            raise RuntimeError("no chromium page target")
-        # suppress_origin: chromium 136+ rejects CDP websockets with an Origin header
-        self.ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=30,
-                                              suppress_origin=True)
+        self.ws = page_ws()
         self._id = 0
 
     def cmd(self, method, **params):
@@ -1013,12 +1018,7 @@ def capture_worker(cap):
     pending = {}          # our command id -> {url,status}, awaiting body reply
     next_id = [10000]     # keep clear of any low ids; events have no id anyway
     try:
-        pages = [t for t in requests.get(f"{CDP}/json/list", timeout=5).json()
-                 if t["type"] == "page"]
-        if not pages:
-            raise RuntimeError("no chromium page target")
-        ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=30,
-                                         suppress_origin=True)
+        ws = page_ws()
         ws.settimeout(2)
         ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
         while not cap["stop"].is_set():
