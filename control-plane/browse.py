@@ -393,7 +393,9 @@ def hover(row, ref, name=None):
 
 
 UPLOAD_MAX = 5 * 1024 * 1024
-_UPLOAD_CHUNK = 6000
+# Base64 chars per /eval. deskd's /eval has no body cap of its own and CDP takes
+# multi-MB messages; 256 KiB keeps a 5 MiB file to ~27 round trips instead of ~1170.
+_UPLOAD_CHUNK = 256 * 1024
 
 
 def upload(row, ref, path, name=None):
@@ -430,7 +432,8 @@ def upload(row, ref, path, name=None):
     data = base64.b64encode(raw).decode("ascii")
     eval_js(row, "window.__caseUp=''", 5)
     for i in range(0, len(data), _UPLOAD_CHUNK):
-        eval_js(row, "window.__caseUp+=%s" % json.dumps(data[i:i + _UPLOAD_CHUNK]), 10)
+        # ;0 so the eval does not echo the whole buffer back on every chunk
+        eval_js(row, "window.__caseUp+=%s;0" % json.dumps(data[i:i + _UPLOAD_CHUNK]), 10)
     done = eval_js(row, _iife(f"""
 const __i={use_ref};
 const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
