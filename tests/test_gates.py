@@ -118,6 +118,37 @@ def test_login_url_must_be_https():
             assert r.status_code != 400, (ok, r.text)
 
 
+def test_non_integer_body_values_are_a_400_not_a_500():
+    os.environ.pop("CASE_TOKEN", None)
+    row = {"id": "c_x", "desk_port": 1, "desk_token": "t"}
+    with mock.patch.object(cased.lifecycle, "ensure_running", return_value=row), \
+         mock.patch.object(cased.store, "touch"), \
+         mock.patch.object(cased, "desk_json", return_value={"ok": True}) as desk, \
+         mock.patch.object(cased.browse, "click_element", return_value={"ok": True}):
+        c = _client()
+        for path, body in (("exec", {"command": "ls", "timeout_s": "soon"}),
+                           ("exec", {"command": "ls", "timeout_s": -5}),
+                           ("eval", {"expression": "1", "timeout_s": [1]}),
+                           ("navigate", {"url": "https://x", "timeout_s": "1.5"}),
+                           ("wait", {"timeout_s": "x"}),
+                           ("click", {"ref": "abc"}),
+                           ("click", {"ref": None}),
+                           ("click", {"ref": -1}),
+                           ("hover", {"ref": {}}),
+                           ("upload", {"ref": "x", "path": "/home/agent/f"})):
+            r = c.post(f"/v1/computers/c_x/{path}", json=body)
+            assert r.status_code == 400, (path, body, r.status_code, r.text)
+            assert r.json()["error"]["code"] == "bad_request", r.text
+        # the forms that always worked still do: blank/0 is the default, the cap holds
+        assert c.post("/v1/computers/c_x/exec", json={"command": "ls", "timeout_s": 0}
+                      ).status_code == 200
+        assert desk.call_args.kwargs["timeout"] == 45
+        assert c.post("/v1/computers/c_x/exec", json={"command": "ls", "timeout_s": "9999"}
+                      ).status_code == 200
+        assert desk.call_args.kwargs["timeout"] == 615
+        assert c.post("/v1/computers/c_x/click", json={"ref": "7"}).status_code == 200
+
+
 def test_live_relay_needs_the_bearer_on_both_halves():
     # HTTP middleware never sees a websocket scope, so the socket has to check the
     # token itself or the desktop is one upgrade away from anyone.

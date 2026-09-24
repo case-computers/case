@@ -302,6 +302,24 @@ def _num(value, default, lo, hi, field):
     return n
 
 
+def _int(value, default, field):
+    """A non-negative integer from a request body; blank is the default."""
+    if value in (None, ""):
+        return default
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_request", f"{field} must be an integer")
+    if n < 0:
+        raise ApiError(400, "bad_request", f"{field} must not be negative")
+    return n
+
+
+def _timeout(body, default, cap):
+    """timeout_s from a request body: blank or 0 is the default, capped at `cap`."""
+    return min(_int(body.get("timeout_s"), 0, "timeout_s") or default, cap)
+
+
 @app.get("/v1/computers")
 def list_computers():
     summaries = store.schedule_summaries()
@@ -395,7 +413,7 @@ def exec_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         if "command" not in body:
             raise ApiError(400, "bad_request", "body needs 'command'")
-        timeout = min(int(body.get("timeout_s") or 30), 600)
+        timeout = _timeout(body, 30, 600)
         return desk_json(row, "POST", "/exec", json=body, timeout=timeout + 15)
 
 
@@ -404,7 +422,7 @@ def eval_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         if "expression" not in body:
             raise ApiError(400, "bad_request", "body needs 'expression'")
-        timeout = min(int(body.get("timeout_s") or 20), 120)
+        timeout = _timeout(body, 20, 120)
         return desk_json(row, "POST", "/eval", json=body, timeout=timeout + 15)
 
 
@@ -413,7 +431,7 @@ def navigate_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         if "url" not in body:
             raise ApiError(400, "bad_request", "body needs 'url'")
-        timeout = max(1, min(int(body.get("timeout_s") or 30), 120))   # never navigate then
+        timeout = _timeout(body, 30, 120)                              # never navigate then
         out = navigate(row, body["url"], timeout)                      # report failure at t=0
         if out.get("ok") and body.get("snapshot", True):
             fresh = browse.snapshot(row)      # navigate already waited for readyState
@@ -433,9 +451,9 @@ def page_(cid: str, wake: bool = False):
 @app.post("/v1/computers/{cid}/click")
 def click_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        if "ref" not in body:
+        if body.get("ref") in (None, ""):
             raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
-        return browse.click_element(row, int(body["ref"]), name=body.get("name"),
+        return browse.click_element(row, _int(body["ref"], None, "ref"), name=body.get("name"),
                                     text=body.get("text"),
                                     screenshot=bool(body.get("screenshot")),
                                     snapshot_after=bool(body.get("snapshot", True)))
@@ -444,17 +462,18 @@ def click_(cid: str, body: dict = Body(...), wake: bool = False):
 @app.post("/v1/computers/{cid}/hover")
 def hover_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        if "ref" not in body:
+        if body.get("ref") in (None, ""):
             raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
-        return browse.hover(row, int(body["ref"]), name=body.get("name"))
+        return browse.hover(row, _int(body["ref"], None, "ref"), name=body.get("name"))
 
 
 @app.post("/v1/computers/{cid}/upload")
 def upload_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        if "ref" not in body or "path" not in body:
+        if body.get("ref") in (None, "") or "path" not in body:
             raise ApiError(400, "bad_request", "body needs 'ref' and 'path'")
-        return browse.upload(row, int(body["ref"]), body["path"], name=body.get("name"))
+        return browse.upload(row, _int(body["ref"], None, "ref"), body["path"],
+                             name=body.get("name"))
 
 
 @app.post("/v1/computers/{cid}/fill")
@@ -467,7 +486,7 @@ def fill_(cid: str, body: dict = Body(...), wake: bool = False):
 @app.post("/v1/computers/{cid}/wait")
 def wait_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
-        timeout = max(1, min(int(body.get("timeout_s") or 30), 120))
+        timeout = _timeout(body, 30, 120)
         return browse.wait_for(row, selector=body.get("selector"), text=body.get("text"),
                                gone=bool(body.get("gone")),
                                network_idle=bool(body.get("network_idle")),
