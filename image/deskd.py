@@ -11,6 +11,7 @@ import hmac
 import json
 import os
 import re
+import select
 import signal
 import struct
 import subprocess
@@ -234,9 +235,16 @@ def home_path(path):
     return p if p.startswith(HOME + "/") else None
 
 
-def _slurp(f, buf):
-    # drains until EOF even past CAP, so a writer never blocks on a full pipe
-    for chunk in iter(lambda: f.read1(65536), b""):
+def _slurp(f, buf, stop):
+    # drains past CAP so a writer never blocks on a full pipe, and polls so /exec can
+    # let go of a pipe a background job still holds instead of waiting out the job
+    fd = f.fileno()
+    while not stop.is_set():
+        if not select.select([fd], [], [], 0.1)[0]:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
         if len(buf) <= CAP:
             buf.extend(chunk)
     f.close()
@@ -261,8 +269,8 @@ def exec_(b: dict = Body(...)):
                              start_new_session=True)
     except (FileNotFoundError, NotADirectoryError, PermissionError):
         return err(400, "bad_cwd", f"no such directory: {cwd}")
-    out, errb = bytearray(), bytearray()
-    readers = [threading.Thread(target=_slurp, args=io, daemon=True)
+    out, errb, stop = bytearray(), bytearray(), threading.Event()
+    readers = [threading.Thread(target=_slurp, args=(*io, stop), daemon=True)
                for io in ((p.stdout, out), (p.stderr, errb))]
     for t in readers:
         t.start()
@@ -280,6 +288,9 @@ def exec_(b: dict = Body(...)):
     grace = time.time() + 0.5
     for t in readers:
         t.join(max(0, grace - time.time()))
+    stop.set()
+    for t in readers:
+        t.join()
     out, errb = bytes(out), bytes(errb)
     if code is None:
         code, errb = 124, errb + b"\n[deskd] command timed out"

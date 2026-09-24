@@ -609,6 +609,9 @@ def test_exec_returns_when_bash_exits_despite_a_background_job():
     try:
         assert out["exit_code"] == 0 and out["stdout"] == "started\n", out
         assert took < 5, took
+        # nor are its pipe readers left blocked on the job for as long as it runs
+        assert not [t for t in threading.enumerate()
+                    if getattr(t, "_target", None) is deskd._slurp]
     finally:
         subprocess.run(["pkill", "-f", "sleep 30.17"])
 
