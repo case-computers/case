@@ -18,6 +18,9 @@ landing in someone else's sessions, so a missing pick says so and stops.
 `/v1/computers/<id>/live/…`, which relays noVNC: Drive is not on the desks
 network and never dials a desktop itself.
 
+Threads persist in `threads.json` beside `serve.mjs` unless `CASE_THREADS`
+names another file (Compose: `/data/threads.json`).
+
 **Files view** uses `computer_exec` `find` (`/api/fs`) and cased `GET /files`
 (`/api/file`).
 

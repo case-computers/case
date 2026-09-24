@@ -377,11 +377,13 @@ installation, or the `case-home` volume mounted at `/data` in Compose. Back up
 the database and key together, along with the desktop volumes you want to keep.
 Treat these backups as sensitive data.
 
-Drive keeps `threads.json`, screenshots under `drive/shots`, and attachments
-under `drive/inbox` in its home directory. This is `~/.case` by default; Compose
-uses the `ui-data` volume mounted at `/data`. Deleting a thread does not remove
-its screenshots or attachments. Files added through the plus menu stay on the
-Drive host for the model to read; they are not copied onto the desktop computer.
+Drive keeps screenshots under `drive/shots` and attachments under `drive/inbox`
+in its home directory, `~/.case` by default. Its threads are in
+`web/web-ui/threads.json` by default, or the file `CASE_THREADS` names. Compose
+keeps all of them on the `ui-data` volume mounted at `/data`. Deleting a thread
+does not remove its screenshots or attachments. Files added through the plus
+menu stay on the Drive host for the model to read; they are not copied onto the
+desktop computer.
 
 </details>
 
