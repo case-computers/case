@@ -380,7 +380,7 @@ def computer_login(computer_id: str, credential: str, url: str,
 
     Optional CAPTCHA auto-solve (CASE_DBC_*) is capability-gated; unsupported or
     terminal solver responses fail fast into the same handoff_pending path.
-    Timeout 280s: deskd login ≤95s plus optional DBC solve (≤60s) + settle/verify
+    Timeout 280s: deskd login ≤125s plus optional DBC solve (≤60s) + settle/verify
     + resume; under a typical 300s proxy read timeout."""
     body = {"credential": credential, "url": url}
     if idempotency_key is not None:

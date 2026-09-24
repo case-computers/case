@@ -967,7 +967,7 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
 
     try:
         result = desk_json(row, "POST", "/login",
-                           json={"credential": material, "url": body["url"]}, timeout=95)
+                           json={"credential": material, "url": body["url"]}, timeout=125)
     except ApiError:
         # domain_mismatch / desk errors must not leave the attempt stuck in
         # created, that blocks every later login with 409 auth_in_progress.
