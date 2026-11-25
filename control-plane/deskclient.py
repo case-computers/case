@@ -12,6 +12,7 @@ import http.cookiejar
 import json
 import threading
 import time
+from urllib.parse import urljoin
 
 import requests
 
@@ -69,10 +70,11 @@ def desk_bytes(row, method, path, timeout=35, **kw):
     return r.content
 
 
-def eval_js(row, expression, timeout_s=20):
-    return desk_json(row, "POST", "/eval",
-                     json={"expression": expression, "timeout_s": timeout_s},
-                     timeout=timeout_s + 15)
+def eval_js(row, expression, timeout_s=20, target_id=None):
+    body = {"expression": expression, "timeout_s": timeout_s}
+    if target_id:
+        body["target_id"] = target_id
+    return desk_json(row, "POST", "/eval", json=body, timeout=timeout_s + 15)
 
 
 def eval_value(row, expression, timeout_s=15, default=None):
@@ -85,28 +87,69 @@ def eval_value(row, expression, timeout_s=15, default=None):
     return v if v is not None else default
 
 
+def targeted_tabs(row):
+    """Probe this desktop: a replacement container may have newer capabilities."""
+    health = desk_json(row, "GET", "/health", timeout=5)
+    return bool(health.get("targeted_tabs"))
+
+
 # Built on /eval instead of a deskd /navigate route on purpose: wake starts the
 # *existing* container (lifecycle.do_wake), so a new deskd route would reach only
 # computers created after an image rebuild. This reaches every computer that
 # exists today, on a cased restart.
+
+def _strip_fragment(u):
+    return (u or "").split("#", 1)[0]
+
+
+def _same_document(current, target):
+    """True when `target` resolves to `current`'s document and differs only by fragment.
+
+    Resolve first: a bare "#section" shares no prefix with an absolute href, so a
+    plain string compare calls it a real navigation and then waits out the whole
+    budget for a document swap that fragment jumps never perform.
+
+    Deliberately conservative: unknown current URL, no '#' in the target, or any
+    difference before the '#' means treat it as a real navigation and wait.
+    """
+    if not current or not target:
+        return False
+    if "#" not in target:
+        return False
+    try:
+        resolved = urljoin(current, target)
+    except ValueError:
+        return False
+    return _strip_fragment(resolved) == _strip_fragment(current)
+
+
+def current_url(row, target_id=None):
+    try:
+        r = eval_js(row, "location.href", 3, target_id=target_id)
+        v = r.get("value") if r.get("ok") else None
+        return v if isinstance(v, str) else ""
+    except ApiError:
+        return ""
+
+
 _PAGE_TEXT = "document.body?document.body.innerText.slice(0,2000):''"
 
 
-def page_text(row, _eval=None):
+def page_text(row, _eval=None, target_id=None):
     """Best-effort first 2000 chars of the page. None on any failure so a
     navigation or click that already happened still returns what it did.
     `_eval` is the eval_js to use — browse patches its own copy."""
     fn = _eval or eval_js
     try:
-        r = fn(row, _PAGE_TEXT, 3)
+        r = fn(row, _PAGE_TEXT, 3, target_id=target_id)
         t = r.get("value") if r.get("ok") else None
         return t if isinstance(t, str) and t else None
     except ApiError:
         return None
 
 
-def _with_text(row, arrived):
-    t = page_text(row)
+def _with_text(row, arrived, target_id=None):
+    t = page_text(row, target_id=target_id)
     if t:
         arrived["text"] = t
     return arrived
@@ -115,40 +158,47 @@ def _with_text(row, arrived):
 _HYDRATE_N = ("document.readyState==='complete'"
               "?document.querySelectorAll('a,button,input,select,textarea').length:0")
 
+SETTLE_N = 8
 
-def _hydrate(row, arrived, deadline):
-    """SPA: readyState can complete before React mounts any controls."""
+
+def _hydrate(row, arrived, n0, deadline, target_id=None):
+    """SPA: readyState can complete before the framework mounts its controls.
+
+    `n0` is the count at arrival; growth past it is the signal that mounting
+    happened. A page that really is this small never grows, waits once, and is
+    returned as-is — only an empty one is worth a reload.
+    """
     time.sleep(min(2.0, max(0.0, deadline - time.time())))
     try:
-        r = eval_js(row, _HYDRATE_N, 3)
+        r = eval_js(row, _HYDRATE_N, 3, target_id=target_id)
         n = r.get("value") if r.get("ok") else 0
-        if n:
-            return _with_text(row, arrived)
+        if isinstance(n, int) and n > n0:
+            return _with_text(row, arrived, target_id=target_id)
     except ApiError as e:
         if e.status != 502:
             raise
-    if time.time() >= deadline:
-        return _with_text(row, arrived)
+    if n0 or time.time() >= deadline:
+        return _with_text(row, arrived, target_id=target_id)
     try:
-        eval_js(row, "location.reload()", 10)
+        eval_js(row, "location.reload()", 10, target_id=target_id)
     except ApiError as e:
         if e.status != 502:
             raise
-        return _with_text(row, arrived)
+        return _with_text(row, arrived, target_id=target_id)
     while time.time() < deadline:
         time.sleep(0.4)
         try:
-            r = eval_js(row, _HYDRATE_N, 3)
+            r = eval_js(row, _HYDRATE_N, 3, target_id=target_id)
         except ApiError as e:
             if e.status != 502:
                 raise
             continue
         if r.get("ok") and r.get("value"):
-            return _with_text(row, arrived)
-    return _with_text(row, arrived)
+            return _with_text(row, arrived, target_id=target_id)
+    return _with_text(row, arrived, target_id=target_id)
 
 
-def navigate(row, url, timeout_s=30):
+def navigate(row, url, timeout_s=30, target_id=None):
     """Load `url` in the browser tab and block until the new document is ready.
 
     Stamps a sentinel on the current document, assigns location, then polls until a
@@ -170,9 +220,12 @@ def navigate(row, url, timeout_s=30):
     poll = ("window.__case_nav===undefined&&document.readyState==='complete'"
             "?[location.href,document.title,"
             "document.querySelectorAll('a,button,input,select,textarea').length]:null")
+    same_doc = ("#" in url
+                and _same_document(current_url(row, target_id=target_id), url))
     while True:
         try:
-            r = eval_js(row, f"window.__case_nav=1;location.assign({json.dumps(url)})", 10)
+            r = eval_js(row, f"window.__case_nav=1;location.assign({json.dumps(url)})", 10,
+                        target_id=target_id)
             break
         except ApiError as e:
             # right after a wake deskd can have no Chromium page target yet (502))
@@ -182,10 +235,21 @@ def navigate(row, url, timeout_s=30):
             time.sleep(0.4)
     if not r.get("ok"):   # malformed URL etc, say so now, don't burn the whole timeout
         return {"ok": False, "error": r.get("error") or "navigation rejected"}
+    if same_doc:
+        try:
+            eval_js(row, "delete window.__case_nav", 3, target_id=target_id)
+        except ApiError:
+            pass
+        got = eval_js(row, "[location.href,document.title]", 5, target_id=target_id)
+        v = got.get("value") if got.get("ok") else None
+        arrived = {"ok": True, "url": v[0] if isinstance(v, list) else url,
+                   "title": v[1] if isinstance(v, list) and len(v) > 1 else "",
+                   "same_document": True}
+        return _with_text(row, arrived, target_id=target_id)
     while time.time() < deadline:
         time.sleep(0.4)
         try:
-            r = eval_js(row, poll, 3)
+            r = eval_js(row, poll, 3, target_id=target_id)
         except ApiError as e:
             if e.status != 502:
                 raise          # asleep / injecting / wedged, not something to wait out
@@ -193,11 +257,11 @@ def navigate(row, url, timeout_s=30):
         v = r.get("value")
         if isinstance(v, list) and len(v) >= 2:   # a >64KB result is a truncated *string*
             arrived = {"ok": True, "url": v[0], "title": v[1]}
-            if len(v) > 2 and v[2] == 0:
-                return _hydrate(row, arrived, deadline)
-            return _with_text(row, arrived)
+            if len(v) > 2 and isinstance(v[2], int) and v[2] < SETTLE_N:
+                return _hydrate(row, arrived, v[2], deadline, target_id=target_id)
+            return _with_text(row, arrived, target_id=target_id)
     try:   # don't leave a uniquely-named global on a live page for site JS to find
-        eval_js(row, "delete window.__case_nav", 3)
+        eval_js(row, "delete window.__case_nav", 3, target_id=target_id)
     except ApiError:
         pass
     return {"ok": False, "error": f"page did not finish loading within {timeout_s}s"}

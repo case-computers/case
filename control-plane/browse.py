@@ -28,13 +28,13 @@ import posixpath
 import re
 import shlex
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from config import DESK_W as SCREEN_W, DESK_H as SCREEN_H
 from errors import ApiError
 import base64
 
-from deskclient import desk_bytes, desk_json, eval_js, page_text
+from deskclient import desk_bytes, desk_json, eval_js, page_text, targeted_tabs
 
 MAX_ELS = 150
 
@@ -48,14 +48,24 @@ const __secretish=el=>el.type==='password'
 const __sel='a[href],button,input,select,textarea,summary,label,'+
  '[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],'+
  '[role="radio"],[role="combobox"],[role="option"],[role="switch"],[role="searchbox"],'+
- '[role="textbox"],[onclick],[tabindex],[contenteditable="true"]';
+ '[role="textbox"],[onclick],[tabindex]:not([tabindex="-1"]),[contenteditable="true"]';
 const __seen=new Set(),__els=[],__boxes=[];
-const __clickable=el=>{
+const __ownClick=el=>{
   try{if(el.matches&&el.matches(__sel))return true;}catch(e){}
-  if(el.onclick)return true;
+  return !!el.onclick;
+};
+const __clickable=el=>{
+  if(__ownClick(el))return true;
   try{if(getComputedStyle(el).cursor==='pointer')return true;}catch(e){}
   return false;
 };
+const __inheritedPointer=el=>{
+  const p=el.parentElement;if(!p)return false;
+  try{return getComputedStyle(p).cursor==='pointer';}catch(e){return false;}
+};
+const __nameOf=(el,tag)=>(el.getAttribute('aria-label')||el.placeholder||
+    ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
+    el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
 const __vis=el=>{
   if(el.disabled)return false;
   try{if(el.closest&&el.closest('[aria-hidden="true"]'))return false;}catch(e){}
@@ -73,12 +83,6 @@ const __occluded=el=>{
   if(!hit)return false;
   return hit!==el&&!el.contains(hit)&&!hit.contains(el);
 };
-const __name=el=>{
-  const tag=el.tagName.toLowerCase();
-  return (el.getAttribute('aria-label')||el.placeholder||
-    ((tag==='input'&&(el.type==='submit'||el.type==='button'))?el.value:'')||
-    el.innerText||el.title||el.alt||'').trim().replace(/\\s+/g,' ').slice(0,80);
-};
 const __contained=r=>__boxes.some(b=>r.x>=b.x&&r.x+r.w<=b.x+b.w&&r.y>=b.y&&r.y+r.h<=b.y+b.h);
 const __topRect=el=>{
   let r=el.getBoundingClientRect(),x=r.left,y=r.top;
@@ -93,12 +97,14 @@ const __topRect=el=>{
 const __push=(el,where)=>{
   if(__seen.has(el)||!__clickable(el)||!__vis(el)||__occluded(el))return;
   const r=el.getBoundingClientRect();
+  try{for(const k of el.querySelectorAll(__sel)){if(__vis(k)&&!__occluded(k))return;}}catch(e){}
   const tr=__topRect(el);
   if(__contained(tr))return;
+  const tag=el.tagName.toLowerCase();
+  const name=__nameOf(el,tag);
+  if(!name&&!__ownClick(el)&&__inheritedPointer(el))return;
   __seen.add(el);
   __boxes.push(tr);
-  const tag=el.tagName.toLowerCase();
-  const name=__name(el);
   const bx=(window.outerWidth-window.innerWidth)/2;
   __els.push({el,tag,type:(el.type||el.getAttribute('role')||''),name,
     value:('value'in el&&!__secretish(el)&&tag!=='button')?String(el.value).slice(0,40):'',
@@ -139,7 +145,23 @@ def _fmt(i, e, star=False):
     return line
 
 
-def snapshot(row, timeout_s=15):
+def prepare_target(row, target_id, *, front=False):
+    """Validate target_id. Activate when the click needs the painted tab, or
+    when deskd cannot eval a background tab. Return the id to forward to
+    eval/capture, or None after an activate-on-old-deskd fallback."""
+    if target_id is None or target_id == "":
+        return None
+    if not _TARGET_RE.fullmatch(str(target_id)):
+        raise ApiError(400, "bad_request", "need a valid target_id from tabs list")
+    tid = str(target_id)
+    capable = targeted_tabs(row)
+    if front or not capable:
+        tabs(row, action="activate", target_id=tid)
+        return tid if capable else None
+    return tid
+
+
+def snapshot(row, timeout_s=15, target_id=None):
     """Numbered visible interactive elements of the active tab, document order."""
     body = """
 const keys=__els.map(e=>e.tag+'\\0'+e.name+'\\0'+(e.href||''));
@@ -148,7 +170,8 @@ window.__caseEls={els:__els.map(e=>e.el),keys:keys};
 return {url:location.href,title:document.title,count:__els.length,
   els:__els.slice(0,%d).map(({el,...r})=>r),keys:keys.slice(0,%d),prev:prev.slice(0,%d)};
 """ % (MAX_ELS, MAX_ELS, MAX_ELS)
-    r = eval_js(row, _iife(body), timeout_s)
+    tid = prepare_target(row, target_id)
+    r = eval_js(row, _iife(body), timeout_s, target_id=tid)
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "snapshot failed"}
     v = r.get("value")
@@ -165,7 +188,7 @@ return {url:location.href,title:document.title,count:__els.length,
                          for i, e in enumerate(els)]}
 
 
-def _locate(row, ref, name, timeout_s=15):
+def _locate(row, ref, name, timeout_s=15, target_id=None):
     """Re-derive the walk, verify ref+name, scroll into view, return screen coords."""
     checks = f"const __i={int(ref)};const __n={json.dumps(name) if name else 'null'};"
     body = checks + """
@@ -181,7 +204,7 @@ const __coords=(el,nm,tag,healed,oldI,newI)=>{
 const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
 if(stored&&stored.isConnected){
   const tag=stored.tagName.toLowerCase();
-  const nm=__name(stored);
+  const nm=__nameOf(stored,tag);
   if(__nameOk(nm))return __coords(stored,nm,tag,false,__i,__i);
 }
 if(__i>=0&&__i<__els.length){
@@ -199,7 +222,7 @@ if(__n!==null){
 }
 return {ok:false,stale:true,count:__els.length};
 """
-    r = eval_js(row, _iife(body), timeout_s)
+    r = eval_js(row, _iife(body), timeout_s, target_id=target_id)
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "locate failed"}
     return r.get("value") if isinstance(r.get("value"), dict) else {"ok": False, "error": "bad locate result"}
@@ -211,22 +234,22 @@ return {ok:false,stale:true,count:__els.length};
 _STAMP = "window.__case_act"
 
 
-def _stamp(row):
+def _stamp(row, target_id=None):
     try:
-        return bool(eval_js(row, f"{_STAMP}=1", 3).get("ok"))
+        return bool(eval_js(row, f"{_STAMP}=1", 3, target_id=target_id).get("ok"))
     except ApiError:
         return False
 
 
-def _snapshot_or_none(row):
+def _snapshot_or_none(row, target_id=None):
     # the action already happened; a snapshot lost to navigation churn is no reason to raise
     try:
-        return snapshot(row)
+        return snapshot(row, target_id=target_id)
     except ApiError:
         return None
 
 
-def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
+def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0, target_id=None):
     """The page as it stands once the action stops moving it."""
     if not stamped:
         time.sleep(settle_s)
@@ -234,20 +257,20 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
         while time.time() < deadline:
             time.sleep(0.25)
             try:
-                r = eval_js(row, "document.readyState", 3)
+                r = eval_js(row, "document.readyState", 3, target_id=target_id)
             except ApiError as e:
                 if e.status != 502:
                     return None
                 continue
             if r.get("value") == "complete":
                 break
-        return _snapshot_or_none(row)
+        return _snapshot_or_none(row, target_id=target_id)
     deadline = time.time() + budget_s
     grace = time.time() + settle_s
     while time.time() < deadline:
         time.sleep(0.25)
         try:
-            r = eval_js(row, f"[{_STAMP}===undefined,document.readyState]", 3)
+            r = eval_js(row, f"[{_STAMP}===undefined,document.readyState]", 3, target_id=target_id)
         except ApiError as e:
             if e.status != 502:
                 return None
@@ -257,34 +280,36 @@ def _settled_snapshot(row, stamped, settle_s=1.0, budget_s=8.0):
             break
         navigated, ready = v[0], v[1]
         if navigated and ready == "complete":
-            return _snapshot_or_none(row)
+            return _snapshot_or_none(row, target_id=target_id)
         if not navigated and time.time() >= grace:
-            fresh = _snapshot_or_none(row)
+            fresh = _snapshot_or_none(row, target_id=target_id)
             try:
-                eval_js(row, f"delete {_STAMP}", 3)
+                eval_js(row, f"delete {_STAMP}", 3, target_id=target_id)
             except ApiError:
                 pass
             return fresh
-    return _snapshot_or_none(row)
+    return _snapshot_or_none(row, target_id=target_id)
 
 
-def _attach_snapshot(row, res, want, stamped):
+def _attach_snapshot(row, res, want, stamped, target_id=None):
     if not want:
         return res
-    fresh = _settled_snapshot(row, stamped)
+    fresh = _settled_snapshot(row, stamped, target_id=target_id)
     if fresh and fresh.get("ok"):
         res["snapshot"] = fresh
     return res
 
 
-def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_after=True):
+def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_after=True,
+                  target_id=None):
     """Verify + scroll + real OS click, then hand back the page it produced. On stale
     ref: refuse and hand back a fresh snapshot (a wrong click is worse than a slow
     click). text, when given, is typed after the click (the click focuses the field)."""
-    loc = _locate(row, ref, name)
+    tid = prepare_target(row, target_id, front=True)
+    loc = _locate(row, ref, name, target_id=tid)
     if not loc.get("ok"):
         if loc.get("stale"):
-            fresh = snapshot(row)
+            fresh = snapshot(row, target_id=tid)
             return {"ok": False, "stale": True,
                     "error": ("element list changed"
                               + (f" — [{ref}] is now \"{loc['found']}\"" if loc.get("found") else "")),
@@ -294,7 +319,7 @@ def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_aft
     if not (0 <= x < SCREEN_W and 0 <= y < SCREEN_H):
         return {"ok": False, "error": f"element resolves off-screen ({x},{y})"}
     before = _page_ids(row) if loc.get("tag") in ("a", "button") and text is None else []
-    stamped = snapshot_after and _stamp(row)
+    stamped = snapshot_after and _stamp(row, target_id=tid)
     out = desk_json(row, "POST", "/action",
                     json={"type": "click", "x": x, "y": y,
                           "screenshot": bool(screenshot) and not text},
@@ -313,10 +338,11 @@ def click_element(row, ref, name=None, text=None, screenshot=False, snapshot_aft
         switched = _activate_new_tab(row, before)
         if switched:
             res["switched_tab"] = switched
+            tid = switched["id"] if tid else None
     if isinstance(out, dict) and out.get("screenshot_png_b64"):
         res["screenshot_png_b64"] = out["screenshot_png_b64"]
-    res = _attach_snapshot(row, res, snapshot_after, stamped)
-    t = page_text(row, eval_js)
+    res = _attach_snapshot(row, res, snapshot_after, stamped, target_id=tid)
+    t = page_text(row, eval_js, target_id=tid)
     if t:
         res["text"] = t
     return res
@@ -368,22 +394,24 @@ def overlay_marks(png, rects):
         return png
 
 
-def element_rects(row, timeout_s=15):
+def element_rects(row, timeout_s=15, target_id=None):
     body = ("return __els.slice(0,%d).map((e,i)=>({i:i,sx:e.sx,sy:e.sy,vw:e.vw,vh:e.vh}));"
             % MAX_ELS)
-    r = eval_js(row, _iife(body), timeout_s)
+    tid = prepare_target(row, target_id)
+    r = eval_js(row, _iife(body), timeout_s, target_id=tid)
     if not r.get("ok") or not isinstance(r.get("value"), list):
         return []
     return r["value"]
 
 
-def hover(row, ref, name=None):
+def hover(row, ref, name=None, target_id=None):
     """Move the OS pointer over [ref] without clicking."""
-    loc = _locate(row, ref, name)
+    tid = prepare_target(row, target_id, front=True)
+    loc = _locate(row, ref, name, target_id=tid)
     if not loc.get("ok"):
         if loc.get("stale"):
             return {"ok": False, "stale": True, "error": "element list changed",
-                    "snapshot": snapshot(row)}
+                    "snapshot": snapshot(row, target_id=tid)}
         return loc
     x, y = loc["x"], loc["y"]
     if not (0 <= x < SCREEN_W and 0 <= y < SCREEN_H):
@@ -398,7 +426,7 @@ UPLOAD_MAX = 5 * 1024 * 1024
 _UPLOAD_CHUNK = 256 * 1024
 
 
-def upload(row, ref, path, name=None):
+def upload(row, ref, path, name=None, target_id=None):
     """Assign a file already on the computer to input[type=file] [ref]."""
     p = str(path or "")
     if "\n" in p or not p.startswith("/home/agent/") or any(part == ".." for part in p.split("/")):
@@ -416,11 +444,12 @@ def upload(row, ref, path, name=None):
         raise ApiError(400, "bad_request", "file not found on the computer")
     if size > UPLOAD_MAX:
         raise ApiError(400, "bad_request", f"file larger than {UPLOAD_MAX} bytes")
-    loc = _locate(row, ref, name)
+    tid = prepare_target(row, target_id)
+    loc = _locate(row, ref, name, target_id=tid)
     if not loc.get("ok"):
         if loc.get("stale"):
             return {"ok": False, "stale": True, "error": "element list changed",
-                    "snapshot": snapshot(row)}
+                    "snapshot": snapshot(row, target_id=tid)}
         return loc
     use_ref = int(loc["new_ref"]) if loc.get("new_ref") is not None else int(ref)
     if loc.get("type") != "file":
@@ -430,10 +459,11 @@ def upload(row, ref, path, name=None):
     if len(raw) != size:
         return {"ok": False, "error": "file size changed during read"}
     data = base64.b64encode(raw).decode("ascii")
-    eval_js(row, "window.__caseUp=''", 5)
+    eval_js(row, "window.__caseUp=''", 5, target_id=tid)
     for i in range(0, len(data), _UPLOAD_CHUNK):
         # ;0 so the eval does not echo the whole buffer back on every chunk
-        eval_js(row, "window.__caseUp+=%s;0" % json.dumps(data[i:i + _UPLOAD_CHUNK]), 10)
+        eval_js(row, "window.__caseUp+=%s;0" % json.dumps(data[i:i + _UPLOAD_CHUNK]), 10,
+                target_id=tid)
     done = eval_js(row, _iife(f"""
 const __i={use_ref};
 const stored=window.__caseEls&&window.__caseEls.els&&window.__caseEls.els[__i];
@@ -447,12 +477,12 @@ const f=new File([u],{json.dumps(fname)});
 const dt=new DataTransfer();dt.items.add(f);e.el.files=dt.files;
 e.el.dispatchEvent(new Event('change',{{bubbles:true}}));
 return {{ok:true,name:{json.dumps(fname)},bytes:raw.length}};
-"""), 15)
+"""), 15, target_id=tid)
     val = done.get("value") if done.get("ok") else None
     return val if isinstance(val, dict) else {"ok": False, "error": "upload eval failed"}
 
 
-def fill(row, fields, submit=False, timeout_s=20, snapshot_after=True):
+def fill(row, fields, submit=False, timeout_s=20, snapshot_after=True, target_id=None):
     """Batch form fill. fields=[{ref, value}]. Native setters + input/change events
     so React/Vue see the change. Password and OTP inputs are refused inside the
     page — vaulted computer_login owns credentials, always."""
@@ -508,15 +538,21 @@ if(__submit&&out.length&&out.every(o=>o.ok)){
 return {ok:out.every(o=>o.ok),fields:out};
 """
     want = bool(snapshot_after and submit)
-    stamped = want and _stamp(row)
-    r = eval_js(row, _iife(body), timeout_s)
+    tid = prepare_target(row, target_id)
+    stamped = want and _stamp(row, target_id=tid)
+    r = eval_js(row, _iife(body), timeout_s, target_id=tid)
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "fill failed"}
     out = r.get("value") if isinstance(r.get("value"), dict) else {"ok": False, "error": "bad fill result"}
-    return _attach_snapshot(row, out, want and out.get("ok"), stamped)
+    return _attach_snapshot(row, out, want and out.get("ok"), stamped, target_id=tid)
 
 
-def wait_for(row, selector=None, text=None, gone=False, network_idle=False, timeout_s=30):
+_WAIT_STATE_JS = ("({url:location.href,title:document.title,"
+                  "text:document.body?document.body.innerText.slice(0,300):''})")
+
+
+def wait_for(row, selector=None, text=None, gone=False, network_idle=False, timeout_s=30,
+             target_id=None):
     """Block server-side until the condition holds. One MCP call instead of one
     LLM turn per poll — the same trade navigate() already makes."""
     if not (selector or text or network_idle):
@@ -535,9 +571,10 @@ def wait_for(row, selector=None, text=None, gone=False, network_idle=False, time
     deadline = t0 + max(1, min(int(timeout_s), 120))
     last_count = -1
     stable = 0
+    tid = prepare_target(row, target_id)
     while time.time() < deadline:
         try:
-            r = eval_js(row, cond, 5)
+            r = eval_js(row, cond, 5, target_id=tid)
         except ApiError as e:
             if e.status != 502:   # asleep/injecting/wedged — surface, don't wait out
                 raise
@@ -556,8 +593,16 @@ def wait_for(row, selector=None, text=None, gone=False, network_idle=False, time
             return {"ok": True, "waited_ms": int((time.time() - t0) * 1000)}
         time.sleep(0.4)
     what = selector or text or "network idle"
-    return {"ok": False, "error": f"'{what}' not {'gone' if gone else 'satisfied'} within {timeout_s}s",
-            "waited_ms": int((time.time() - t0) * 1000)}
+    res = {"ok": False, "error": f"'{what}' not {'gone' if gone else 'satisfied'} within {timeout_s}s",
+           "waited_ms": int((time.time() - t0) * 1000)}
+    try:
+        st = eval_js(row, _WAIT_STATE_JS, 2, target_id=tid)
+        if st.get("ok") and isinstance(st.get("value"), dict):
+            v = st["value"]
+            res.update(url=v.get("url"), title=v.get("title"), text=str(v.get("text") or "")[:300])
+    except ApiError:
+        pass
+    return res
 
 
 # ---------- teach-a-task recorder ----------
@@ -616,21 +661,36 @@ _CDP = "http://127.0.0.1:9222"
 
 
 def _cdp_curl(row, path, method="GET", timeout_s=10):
-    cmd = f"curl -s -m 8 {'-X PUT ' if method == 'PUT' else ''}{shlex.quote(_CDP + path)}"
+    cmd = f"curl -fsS -m 8 {'-X PUT ' if method == 'PUT' else ''}{shlex.quote(_CDP + path)}"
     out = desk_json(row, "POST", "/exec",
                     json={"command": cmd, "timeout_s": timeout_s}, timeout=timeout_s + 15)
+    if out.get("exit_code", 0) != 0:
+        raise ApiError(502, "cdp_unreachable", "chromium CDP request failed")
     return out.get("stdout", "")
 
 
 def tabs(row, action="list", target_id=None, url=None):
     """Tab management via Chromium's CDP HTTP endpoint (container loopback :9222),
-    reached with curl through the existing /exec route. eval/capture bind to the
-    ACTIVE tab, so after activate/new the next eval talks to that tab."""
+    reached with curl through the existing /exec route. Page tools take an optional
+    target_id from this list so they can talk to a tab without activate; click/hover
+    still activate so the OS pointer hits the painted tab."""
+    def _after(**res):
+        now = tabs(row)["tabs"]
+        return {"ok": True, "action": action, **res,
+                "count": len(now), "active": now[0]["id"] if now else None}
+
     if action in ("activate", "close"):
-        if not target_id or not _TARGET_RE.match(str(target_id)):
+        if not target_id or not _TARGET_RE.fullmatch(str(target_id)):
             raise ApiError(400, "bad_request", "need a valid target_id from tabs list")
-        _cdp_curl(row, f"/json/{action}/{target_id}")
-        return {"ok": True, "action": action, "target_id": target_id, "tabs": tabs(row)["tabs"]}
+        result = _cdp_curl(row, f"/json/{action}/{target_id}")
+        if action == "activate" and result.strip() != "Target activated":
+            raise ApiError(502, "cdp_unreachable", "chromium did not activate the requested tab")
+        return _after(target_id=target_id)
+    if action == "close_others":
+        others = [t["id"] for t in tabs(row)["tabs"][1:] if t.get("id")]
+        for tid in others:
+            _cdp_curl(row, f"/json/close/{tid}")
+        return _after(closed=len(others))
     if action == "new":
         if not url or not re.match(r"^https?://", str(url)):
             raise ApiError(400, "bad_request", "need an http(s) url")
@@ -640,8 +700,9 @@ def tabs(row, action="list", target_id=None, url=None):
             made = json.loads(raw)
         except ValueError:
             pass
-        return {"ok": bool(made), "action": "new",
-                "target_id": (made or {}).get("id"), "tabs": tabs(row)["tabs"]}
+        res = _after(target_id=(made or {}).get("id"))
+        res["ok"] = bool(made)
+        return res
     # list
     raw = _cdp_curl(row, "/json/list")
     try:
@@ -652,3 +713,64 @@ def tabs(row, action="list", target_id=None, url=None):
         {"id": t.get("id"), "title": (t.get("title") or "")[:80],
          "url": (t.get("url") or "")[:200], "active": i == 0}
         for i, t in enumerate(pages)]}
+
+
+NAV_ELS = 40
+
+_WALL_RE = re.compile(
+    r"blocked|access denied|forbidden|are you a (?:human|robot)|"
+    r"unusual traffic|too many requests|just a moment|checking your browser|"
+    r"log ?in to continue|sign ?in to continue|captcha",
+    re.I)
+
+
+def _host(url):
+    try:
+        return (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def credential_for(creds, url):
+    """Vault name whose domains cover this url's host, else None.
+
+    Suffix match on the stored labels, the same shape deskd's domain_ok enforces at
+    injection time, so a name offered here is one login will actually accept.
+    """
+    h = _host(url)
+    if not h:
+        return None
+    for c in creds or []:
+        for d in (c.get("domains") or []):
+            d = str(d).lower().lstrip(".")
+            if d and (h == d or h.endswith("." + d)):
+                return c.get("name")
+    return None
+
+
+def with_elements(row, out, creds=None, target_id=None, limit=NAV_ELS):
+    """Attach the page's interactive elements, and name the vault credential for it."""
+    if not out.get("ok"):
+        return out
+    try:
+        snap = snapshot(row, target_id=target_id)
+    except ApiError:
+        return out
+    if not snap.get("ok"):
+        return out
+    els = snap.get("elements") or []
+    out["elements"] = els[:limit]
+    out["elements_count"] = snap.get("count", len(els))
+    if len(els) > limit or snap.get("truncated"):
+        out["elements_truncated"] = True
+    if _WALL_RE.search(out.get("text") or ""):
+        out["wall"] = True
+        cred = credential_for(creds, out.get("url"))
+        if cred:
+            out["vault_credential"] = cred
+        out["hint"] = ("A wall is a page with controls, not a dead end: act on the "
+                       "elements above" + (f", then computer_login(credential={cred!r})"
+                                           if cred else
+                                           ", then handoff_request(kind=device)") +
+                       ". Never a different url for the same goal.")
+    return out

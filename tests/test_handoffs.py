@@ -269,6 +269,49 @@ def test_captcha_verify_success_without_login_completes():
         _cleanup("h_cap")
 
 
+def test_freehand_device_done_completes_even_if_page_looks_challenged():
+    _cleanup("h_dev")
+    try:
+        _persist("h_dev", "device", "clear cloudflare", continuation="verify_page")
+        handoffs.LOGIN_CTX.pop("h_dev", None)
+        looks_challenged = {"value": {"text": "Sign in. Try again", "hasPassword": True}}
+        with mock.patch.object(handoffs, "get_computer", return_value=ROW), \
+             mock.patch.object(handoffs, "eval_js", return_value=looks_challenged):
+            row = handoffs.answer_handoff("h_dev", "done")
+        assert row["status"] == "completed" and row["answer"] == "done", dict(row)
+    finally:
+        _cleanup("h_dev")
+
+
+def test_otp_done_verifies_page_instead_of_typing_done():
+    _cleanup("h_otp")
+    try:
+        _persist("h_otp", "otp", "enter code", login_credential="chase",
+                 continuation="submit_value")
+        challenged = {"value": {"text": "Enter the verification code", "hasPassword": False}}
+        with mock.patch.object(handoffs, "get_computer", return_value=ROW), \
+             mock.patch.object(handoffs, "eval_js", return_value=challenged), \
+             mock.patch.object(handoffs, "desk_json") as desk, \
+             mock.patch.object(handoffs, "auth_submit_challenge") as sub:
+            row = handoffs.answer_handoff("h_otp", "done")
+        assert row["status"] == "pending", dict(row)
+        desk.assert_not_called()
+        sub.assert_not_called()
+
+        clean = {"value": {"text": "Projects", "hasPassword": False, "gated": False}}
+        with mock.patch.object(handoffs, "get_computer", return_value=ROW), \
+             mock.patch.object(handoffs, "eval_js", return_value=clean), \
+             mock.patch.object(handoffs, "desk_json", return_value={"status": "success"}) as desk, \
+             mock.patch.object(handoffs, "auth_submit_challenge") as sub, \
+             mock.patch.object(store, "record_credential_result"):
+            row = handoffs.answer_handoff("h_otp", "done")
+        assert row["status"] == "completed" and row["answer"] == "done", dict(row)
+        assert desk.call_args.kwargs["json"] == {"value": "approve"}
+        sub.assert_not_called()
+    finally:
+        _cleanup("h_otp")
+
+
 def test_captcha_verify_success_with_login_resumes_approve():
     _cleanup("h_cap")
     try:

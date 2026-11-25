@@ -20,7 +20,7 @@ def fake(polls, assigns=(OK,)):
     Records every expression seen."""
     seen, a, p = [], iter(assigns), iter(polls)
 
-    def _eval(row, expression, timeout_s=20):
+    def _eval(row, expression, timeout_s=20, target_id=None):
         seen.append(expression)
         r = next(a) if "location.assign" in expression else next(p, None)
         if isinstance(r, Exception):
@@ -143,6 +143,92 @@ def test_two_element_arrival_skips_hydrate():
     out = deskclient.navigate(ROW, "https://x.test", timeout_s=5)
     assert out["ok"] is True
     assert not any("location.reload()" in e for e in ev.seen)
+
+
+def test_thin_spa_arrival_settles_and_keeps_the_grown_page():
+    ev = fake([
+        ["https://x.test/", "T", 3],
+        128,
+        "body text",
+    ])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test", timeout_s=8)
+    assert out["ok"] is True and out["text"] == "body text", out
+    assert not any("location.reload()" in e for e in ev.seen), "a grown page is not reloaded"
+
+
+def test_genuinely_small_page_is_returned_not_reloaded():
+    ev = fake([
+        ["https://x.test/login", "T", 3],
+        3,
+        "login body",
+    ])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test/login", timeout_s=8)
+    assert out["ok"] is True and out["text"] == "login body", out
+    assert not any("location.reload()" in e for e in ev.seen), ev.seen
+
+
+def test_busy_page_skips_the_settle_entirely():
+    ev = fake([["https://x.test/", "T", deskclient.SETTLE_N], "body"])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test", timeout_s=5)
+    assert out["ok"] is True
+    assert not any(e == deskclient._HYDRATE_N for e in ev.seen), ev.seen
+
+
+def test_relative_fragment_is_resolved_against_the_current_url():
+    assert deskclient._same_document("https://x.test/page?q=1", "#section") is True
+    assert deskclient._same_document("https://x.test/page#a", "#a") is True
+    assert deskclient._same_document("https://x.test/page", "/other#s") is False
+    assert deskclient._same_document("https://x.test/page", "https://y.test/page#s") is False
+    assert deskclient._same_document("", "#s") is False
+
+
+def test_relative_fragment_hop_returns_without_waiting():
+    ev = fake([
+        "https://x.test/page",
+        None,
+        ["https://x.test/page#section", "T"],
+        "body",
+    ])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "#section", timeout_s=30)
+    assert out["ok"] is True and out.get("same_document") is True, out
+
+
+def test_same_document_hop_returns_without_waiting():
+    ev = fake([
+        "https://x.test/page",
+        {"ok": True},
+        ["https://x.test/page#s2", "T"],
+        "section two",
+    ])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test/page#s2", timeout_s=30)
+    assert out["ok"] is True and out.get("same_document") is True, out
+    assert out["url"] == "https://x.test/page#s2"
+    assert out["text"] == "section two"
+
+
+def test_a_real_navigation_to_a_fragment_url_still_waits():
+    ev = fake([
+        "https://other.test/",
+        ["https://x.test/page#s2", "T"],
+        "hello",
+    ])
+    deskclient.eval_js = ev
+    out = deskclient.navigate(ROW, "https://x.test/page#s2", timeout_s=5)
+    assert out["ok"] is True and "same_document" not in out, out
+
+
+def test_same_document_helper_is_conservative():
+    assert deskclient._same_document("https://a/b", "https://a/b#x") is True
+    assert deskclient._same_document("https://a/b#x", "https://a/b#y") is True
+    assert deskclient._same_document("https://a/b", "https://a/c#x") is False
+    assert deskclient._same_document("", "https://a/b#x") is False
+    assert deskclient._same_document("https://a/b#x", "https://a/b#x") is True
+    assert deskclient._same_document("https://a/b", "https://a/b") is False
 
 
 def test_arrival_carries_page_text():
