@@ -944,11 +944,11 @@ exit 1
   assert.deepEqual(chatBrainAuth({}, { provider: 'chatgpt' }, home), { provider: 'chatgpt', key: 'chatgpt' });
   const authFile = path.join(home, 'codex', 'auth.json');
   fs.mkdirSync(path.dirname(authFile), { recursive: true });
-  fs.writeFileSync(authFile, '{}');
-  fs.utimesSync(authFile, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+  const loginFile = path.join(home, 'codex', 'login_at');
+  fs.writeFileSync(loginFile, new Date(Date.now() + 60_000).toISOString());
   assert.deepEqual(brainAuth({}, home), { auth: { provider: 'chatgpt', key: 'chatgpt' }, model: 'codex' }, 'the newest login wins');
   assert.equal(brainAuth(env, home).auth.provider, 'openai');
-  fs.utimesSync(authFile, new Date(0), new Date(0));
+  fs.writeFileSync(loginFile, new Date(0).toISOString());
   assert.equal(brainAuth({}, home).auth.provider, 'anthropic');
   fs.rmSync(home, { recursive: true, force: true });
 
@@ -970,7 +970,7 @@ exit 1
     await turn('again');
     const argvLines = fs.readFileSync(on.log, 'utf8').trim().split('\n');
     assert.ok(!argvLines[0].includes(' resume '));
-    assert.match(argvLines[1], /resume thr_1 again$/);
+    assert.match(argvLines[1], /resume thr_1 -- again$/);
     events.length = 0;
     const refused = await turn('read it', [{ path: '/tmp/a.pdf', name: 'a.pdf', mime: 'application/pdf' }]);
     assert.match(refused.error, /image attachments only/);

@@ -1143,6 +1143,7 @@ export async function runTurn({
         finishTurn(hist, thread);
         return { text: '', computerId: id, threadId: thread.id, finished: false, error };
       }
+      thread.brain = 'chatgpt';
       const out = await runCodexTurn({
         cid: id,
         prompt: inputText,
@@ -1156,7 +1157,6 @@ export async function runTurn({
         system: dev.content,
       });
       if (out.thread_id) thread.codex_thread = out.thread_id;
-      thread.brain = 'chatgpt';
       finishTurn(hist, thread);
       emit({ type: 'done', text: out.text, computer_id: id, thread_id: thread.id });
       return { text: out.text, computerId: id, threadId: thread.id, finished: out.finished };

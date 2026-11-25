@@ -23,19 +23,50 @@ export function authPath(home) {
   return path.join(codexHome(home), 'auth.json');
 }
 
+const CACHE_MS = 5000;
+const cache = new Map();
+
+function cached(key, compute) {
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  const value = compute();
+  cache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+export function clearCodexCache() {
+  cache.clear();
+}
+
+const PASS_ENV = ['PATH', 'HOME', 'LANG', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
+
+function codexEnv(home) {
+  const env = { CODEX_HOME: codexHome(home) };
+  for (const k of PASS_ENV) {
+    if (process.env[k]) env[k] = process.env[k];
+  }
+  return env;
+}
+
 export function codexBin() {
   const env = String(process.env.CASE_CODEX_BIN || '').trim();
   if (env) return env;
-  try {
-    return execFileSync('which', ['codex'], { encoding: 'utf8' }).trim();
-  } catch {
-    return '';
-  }
+  return cached('which', () => {
+    try {
+      return execFileSync('which', ['codex'], { encoding: 'utf8' }).trim();
+    } catch {
+      return '';
+    }
+  });
 }
 
-function authMtime(home) {
+function loginAtPath(home) {
+  return path.join(codexHome(home), 'login_at');
+}
+
+function loginAt(home) {
   try {
-    return fs.statSync(authPath(home)).mtime.toISOString();
+    return fs.readFileSync(loginAtPath(home), 'utf8').trim() || null;
   } catch {
     return null;
   }
@@ -43,18 +74,21 @@ function authMtime(home) {
 
 export function codexStatus(home) {
   const bin = codexBin();
-  const updated_at = authMtime(home);
+  const updated_at = loginAt(home);
   if (!bin) return { configured: false, updated_at };
-  try {
-    execFileSync(bin, ['login', 'status'], {
-      env: { ...process.env, CODEX_HOME: codexHome(home) },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 8000,
-    });
-    return { configured: true, updated_at };
-  } catch {
-    return { configured: false, updated_at };
-  }
+  const configured = cached(`status:${bin}:${home}`, () => {
+    try {
+      execFileSync(bin, ['login', 'status'], {
+        env: codexEnv(home),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 8000,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  return { configured, updated_at };
 }
 
 function tomlStr(s) {
@@ -108,7 +142,7 @@ export function codexArgv({ dir, prompt, resume, effort, images } = {}) {
     if (img) argv.push('-i', img);
   }
   if (resume) argv.push('resume', String(resume));
-  if (prompt) argv.push(String(prompt));
+  if (prompt) argv.push('--', String(prompt));
   return argv;
 }
 
@@ -132,7 +166,7 @@ export function startDeviceLogin(home, { onCode, signal } = {}) {
     if (!bin) return reject(new Error('codex not installed'));
     ensureCodexHome(home);
     const child = spawn(bin, ['login', '--device-auth'], {
-      env: { ...process.env, CODEX_HOME: codexHome(home) },
+      env: codexEnv(home),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
@@ -173,7 +207,11 @@ export function startDeviceLogin(home, { onCode, signal } = {}) {
     }
     child.on('error', (err) => done(reject, err));
     child.on('close', (code) => {
-      if (code === 0) done(resolve, { ok: true });
+      if (code === 0) {
+        fs.writeFileSync(loginAtPath(home), new Date().toISOString(), { mode: 0o600 });
+        clearCodexCache();
+        done(resolve, { ok: true });
+      }
       else done(reject, new Error('login failed'));
     });
   });
@@ -185,13 +223,15 @@ export function codexLogout(home) {
   if (bin) {
     try {
       execFileSync(bin, ['logout'], {
-        env: { ...process.env, CODEX_HOME: dir },
+        env: codexEnv(home),
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 8000,
       });
     } catch {}
   }
   try { fs.unlinkSync(path.join(dir, 'auth.json')); } catch {}
+  try { fs.unlinkSync(loginAtPath(home)); } catch {}
+  clearCodexCache();
   return { configured: false, updated_at: null };
 }
 
@@ -207,10 +247,11 @@ export function runCodexTurn({
   const argv = codexArgv({ dir, prompt, resume, effort, images });
   return new Promise((resolve, reject) => {
     const child = spawn(bin, argv, {
-      env: { ...process.env, CODEX_HOME: codexHome(home) },
+      env: codexEnv(home),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
+    let errored = false;
     let lineBuf = '';
     let thread_id = resume ? String(resume) : '';
     let text = '';
@@ -240,6 +281,7 @@ export function runCodexTurn({
         return;
       }
       if (ev.type === 'turn.failed' || ev.type === 'error') {
+        errored = true;
         emit({ type: 'error', error: ev.error?.message || ev.message || 'codex failed' });
         return;
       }
@@ -303,6 +345,7 @@ export function runCodexTurn({
       if (lineBuf.trim()) {
         try { handle(JSON.parse(lineBuf)); } catch {}
       }
+      if (code !== 0 && !text && !finished && !killed && !errored) emit({ type: 'error', error: 'ChatGPT brain failed' });
       resolve({ thread_id, text, finished: finished || code === 0, usage, code });
     });
   });

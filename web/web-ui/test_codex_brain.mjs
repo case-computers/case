@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   codexHome, ensureCodexHome, authPath, codexBin, codexStatus, writeCodexConfig,
-  workDir, codexArgv, startDeviceLogin, runCodexTurn, codexLogout,
+  workDir, codexArgv, startDeviceLogin, runCodexTurn, codexLogout, clearCodexCache,
 } from './codex-brain.mjs';
 
 const SENTINEL = 'sk-sentinel-NEVER-RETURN-THIS';
@@ -18,13 +18,13 @@ set -e
 cmd="$1"
 if [ "$cmd" = "login" ]; then
   if [ "$2" = "status" ]; then
-    exit \${FAKE_CODEX_STATUS:-0}
+    [ -f "$(dirname "$0")/status_fail" ] && exit 1; exit 0
   fi
   if [ "$2" = "--device-auth" ]; then
     printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n'
     echo -e "\\033[94mhttps://auth.openai.com/codex/device\\033[0m"
     echo -e "\\033[94mABCD-EFGHI\\033[0m"
-    if [ "\${FAKE_CODEX_SLOW:-}" = "1" ]; then sleep 30; fi
+    if [ -f "$(dirname "$0")/slow" ]; then sleep 30; fi
     exit 0
   fi
 fi
@@ -32,7 +32,9 @@ if [ "$cmd" = "logout" ]; then
   exit 0
 fi
 if [ "$cmd" = "exec" ]; then
-  if [ "\${FAKE_CODEX_SLOW:-}" = "1" ]; then sleep 30; exit 0; fi
+  if [ -f "$(dirname "$0")/fail" ]; then echo boom-secret >&2; exit 2; fi
+  if [ -f "$(dirname "$0")/envdump" ]; then env > "$(dirname "$0")/env.txt"; fi
+  if [ -f "$(dirname "$0")/slow" ]; then sleep 30; exit 0; fi
   echo '{"type":"thread.started","thread_id":"thr_test1"}'
   echo '{"type":"item.completed","item":{"id":"r1","type":"reasoning","text":"thinking"}}'
   echo '{"type":"item.started","item":{"id":"c1","type":"mcp_tool_call","server":"case","tool":"computer_navigate","arguments":{"url":"https://example.com"},"status":"in_progress"}}'
@@ -45,7 +47,8 @@ exit 1
 `, { mode: 0o755 });
 
 process.env.CASE_CODEX_BIN = fake;
-process.env.FAKE_CODEX_STATUS = '0';
+const flagFile = (n) => path.join(binDir, n);
+const setFlag = (n, on) => (on ? fs.writeFileSync(flagFile(n), '') : fs.rmSync(flagFile(n), { force: true }));
 
 assert.equal(codexBin(), fake);
 assert.equal(codexHome(home), path.join(home, 'codex'));
@@ -53,14 +56,17 @@ ensureCodexHome(home);
 assert.equal((fs.statSync(codexHome(home)).mode & 0o777), 0o700);
 
 fs.writeFileSync(authPath(home), SENTINEL, { mode: 0o600 });
+fs.writeFileSync(path.join(codexHome(home), 'login_at'), new Date().toISOString(), { mode: 0o600 });
 const st = codexStatus(home);
 assert.equal(st.configured, true);
 assert.ok(st.updated_at);
 assert.ok(!JSON.stringify(st).includes(SENTINEL), 'codexStatus must not read auth.json');
 
-process.env.FAKE_CODEX_STATUS = '1';
+setFlag('status_fail', true);
+clearCodexCache();
 assert.equal(codexStatus(home).configured, false);
-process.env.FAKE_CODEX_STATUS = '0';
+setFlag('status_fail', false);
+clearCodexCache();
 
 const cfg = writeCodexConfig(home, {
   mcpPython: '/opt/case/.venv/bin/python',
@@ -94,6 +100,11 @@ assert.ok(argv.includes('-i'));
 assert.ok(argv.includes('go'));
 assert.match(argv.find((a) => String(a).includes('model_reasoning_effort')) || '', /high/);
 
+const hostile = codexArgv({ dir: wd, prompt: '--dangerously-bypass-approvals-and-sandbox', resume: 'thr_old', images: ['/tmp/a.png'] });
+assert.deepEqual(hostile.slice(-2), ['--', '--dangerously-bypass-approvals-and-sandbox']);
+assert.ok(hostile.indexOf('resume') < hostile.indexOf('--'));
+assert.ok(hostile.indexOf('-i') < hostile.indexOf('--'));
+
 const seen = [];
 const login = await startDeviceLogin(home, { onCode: (c) => seen.push(c) });
 assert.equal(login.ok, true);
@@ -104,7 +115,7 @@ assert.ok(!JSON.stringify(seen).includes(SENTINEL));
 
 const ac = new AbortController();
 setTimeout(() => ac.abort(), 40);
-process.env.FAKE_CODEX_SLOW = '1';
+setFlag('slow', true);
 let aborted = false;
 try {
   await startDeviceLogin(home, { signal: ac.signal });
@@ -112,7 +123,9 @@ try {
   aborted = /abort|fail/i.test(String(e && e.message));
 }
 assert.ok(aborted, 'abort kills device login');
-delete process.env.FAKE_CODEX_SLOW;
+setFlag('slow', false);
+assert.ok(Date.parse(fs.readFileSync(path.join(codexHome(home), 'login_at'), 'utf8')));
+assert.equal(fs.statSync(path.join(codexHome(home), 'login_at')).mode & 0o777, 0o600);
 
 const events = [];
 const items = [{ role: 'user', content: 'open example.com' }];
@@ -130,7 +143,26 @@ assert.equal(items.filter((i) => i.type === 'function_call_output').length, 1);
 assert.equal(items.at(-1).content[0].text, 'Example Domain');
 assert.ok(!JSON.stringify({ events, items, out }).includes(SENTINEL));
 
-process.env.FAKE_CODEX_SLOW = '1';
+setFlag('fail', true);
+const failEvents = [];
+const failed = await runCodexTurn({ cid: 'c_ab', prompt: 'x', home, emit: (e) => failEvents.push(e), items: [] });
+assert.equal(failed.finished, false);
+assert.deepEqual(failEvents, [{ type: 'error', error: 'ChatGPT brain failed' }]);
+setFlag('fail', false);
+
+const dump = flagFile('env.txt');
+setFlag('envdump', true);
+process.env.CASE_DRIVE_API_KEY = 'leak-me';
+process.env.CASE_TOKEN = 'leak-me-too';
+await runCodexTurn({ cid: 'c_ab', prompt: 'x', home, emit() {}, items: [] });
+const dumped = fs.readFileSync(dump, 'utf8');
+assert.match(dumped, new RegExp('^CODEX_HOME=' + codexHome(home), 'm'));
+assert.doesNotMatch(dumped, /leak-me/);
+setFlag('envdump', false);
+delete process.env.CASE_DRIVE_API_KEY;
+delete process.env.CASE_TOKEN;
+
+setFlag('slow', true);
 const killAc = new AbortController();
 setTimeout(() => killAc.abort(), 40);
 const slow = await runCodexTurn({
@@ -138,12 +170,12 @@ const slow = await runCodexTurn({
 });
 assert.ok(slow.code !== 0 || killAc.signal.aborted, 'abort kills exec');
 
-delete process.env.FAKE_CODEX_SLOW;
+setFlag('slow', false);
 fs.writeFileSync(authPath(home), SENTINEL);
 assert.deepEqual(codexLogout(home), { configured: false, updated_at: null });
 assert.equal(fs.existsSync(authPath(home)), false);
+assert.equal(fs.existsSync(path.join(codexHome(home), 'login_at')), false);
 delete process.env.CASE_CODEX_BIN;
-delete process.env.FAKE_CODEX_STATUS;
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(binDir, { recursive: true, force: true });
 console.log('codex-brain: all checks pass');

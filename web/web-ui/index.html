@@ -1507,7 +1507,7 @@ async function loadKeys(){
     const r=await fetch('/api/keys');
     const j=await r.json();
     if(r.ok)keyStatus=j;
-  }catch{/* status stays until the next load */}
+  }catch{}
 }
 function closeKey(){
   if(gptPhase==='pending')cancelGpt();
@@ -1582,7 +1582,7 @@ async function watchGptLogin(){
           const r=await fetch('/api/chatgpt/login');
           if(!r.ok)break;
           if(await applyGptStatus(await r.json()))return;
-        }catch{/* keep polling */}
+        }catch{}
         await new Promise(res=>setTimeout(res,1200));
       }
       if(gptPhase==='pending'){gptPhase='error';gptErr='Sign-in timed out.';paintGptPanel();}
@@ -1625,7 +1625,7 @@ async function signOutGpt(){
     const r=await fetch('/api/keys?provider=chatgpt',{method:'DELETE'});
     const j=await r.json().catch(()=>({}));
     if(r.ok)keyStatus=j;
-  }catch{/* status stays */}
+  }catch{}
   paintGptPanel();paint();
 }
 async function resumeGptLogin(){
@@ -1638,7 +1638,7 @@ async function resumeGptLogin(){
     openKey('chatgpt');
     gptCode=j.code||gptCode;gptUrl=j.url||gptUrl;
     watchGptLogin();
-  }catch{/* offline */}
+  }catch{}
 }
 function paintKeyNote(msg){
   const s=keyStatus[provider];
@@ -1715,7 +1715,7 @@ $('keyBoxDel').addEventListener('click',async()=>{
     const r=await fetch('/api/keys?provider='+encodeURIComponent(provider),{method:'DELETE'});
     const j=await r.json().catch(()=>({}));
     if(r.ok)keyStatus=j;
-  }catch{/* keep */}
+  }catch{}
   paintKeyNote();
   paint([comp].filter(Boolean));
 });
