@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
