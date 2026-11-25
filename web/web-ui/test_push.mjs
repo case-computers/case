@@ -17,16 +17,17 @@ const vapidFile = path.join(home, 'drive', 'vapid.json');
 assert.equal(fs.statSync(vapidFile).mode & 0o777, 0o600, 'private key is 0600');
 
 const sub = (endpoint) => ({ endpoint, keys: { p256dh: 'p', auth: 'a' } });
-assert.equal(addPushSub(sub('https://push/1'), 'ios', home), 1);
-assert.equal(addPushSub(sub('https://push/2'), 'android', home), 2);
-assert.equal(addPushSub(sub('https://push/1'), 'ios again', home), 2, 'dedupe by endpoint');
-assert.equal(addPushSub({ endpoint: 'https://push/3' }, '', home), null, 'a subscription without keys is refused');
+assert.equal(addPushSub(sub('https://fcm.googleapis.com/fcm/send/1'), 'ios', home), 1);
+assert.equal(addPushSub(sub('https://fcm.googleapis.com/fcm/send/2'), 'android', home), 2);
+assert.equal(addPushSub(sub('https://fcm.googleapis.com/fcm/send/1'), 'ios again', home), 2, 'dedupe by endpoint');
+assert.equal(addPushSub({ endpoint: 'https://fcm.googleapis.com/fcm/send/3' }, '', home), null, 'a subscription without keys is refused');
 assert.equal(addPushSub(sub('http://push/plain'), '', home), null, 'a plain http endpoint is refused');
-assert.equal(dropPushSub('https://push/1', home), 1);
-assert.equal(pushSubs(home).some((s) => s.endpoint === 'https://push/1'), false);
+assert.equal(addPushSub(sub('https://10.0.0.5/x'), '', home), null, 'a host that is not a push service is refused');
+assert.equal(dropPushSub('https://fcm.googleapis.com/fcm/send/1', home), 1);
+assert.equal(pushSubs(home).some((s) => s.endpoint === 'https://fcm.googleapis.com/fcm/send/1'), false);
 assert.equal(fs.statSync(path.join(home, 'drive', 'push.json')).mode & 0o777, 0o600, 'subscriptions are 0600');
 
-for (let i = 0; i < 25; i++) addPushSub(sub('https://push/n' + i), '', home);
+for (let i = 0; i < 25; i++) addPushSub(sub('https://fcm.googleapis.com/fcm/send/n' + i), '', home);
 assert.equal(pushSubs(home).length, 20, 'only the newest 20 endpoints are kept');
 
 const shots = fs.mkdtempSync(path.join(os.tmpdir(), 'case-push-shots-'));

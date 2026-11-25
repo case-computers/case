@@ -810,12 +810,14 @@ export function stashShot(b64, dir = shotsDir()) {
       fs.writeFileSync(file, Buffer.from(String(b64 || ''), 'base64'));
       gcShots(dir, 500, [file]);
     }
-  } catch { /* best-effort; hydrateShots falls back to a text note */ }
+  } catch {}
   return { role: 'user', shot: file, content: [{ type: 'input_text', text: '[screenshot]' }] };
 }
 
 export function gcShots(dir, cap = 500, keep = []) {
   try {
+    const files = fs.readdirSync(dir).filter((name) => name.endsWith('.png'));
+    if (files.length <= cap) return;
     const root = path.resolve(dir) + path.sep;
     const refs = new Set();
     const addRef = (shot) => {
@@ -828,14 +830,12 @@ export function gcShots(dir, cap = 500, keep = []) {
       for (const thread of Array.isArray(rows) ? rows : []) {
         for (const item of thread?.items || []) addRef(item?.shot);
       }
-    } catch { /* no persisted history yet */ }
+    } catch {}
     for (const thread of THREADS.values()) for (const item of thread.items || []) addRef(item?.shot);
-    const files = fs.readdirSync(dir).filter((name) => name.endsWith('.png'));
-    if (files.length <= cap) return;
     const rows = files.filter((name) => !refs.has(name))
       .map((name) => ({ name, t: fs.statSync(path.join(dir, name)).mtimeMs })).sort((a, b) => a.t - b.t);
     for (const row of rows.slice(0, files.length - cap)) fs.rmSync(path.join(dir, row.name), { force: true });
-  } catch { /* housekeeping only */ }
+  } catch {}
 }
 
 export function shotCard(b64, at, dir = shotsDir()) {
@@ -1582,6 +1582,7 @@ async function chat(req, res) {
     await runTurn({
       thread, inputText, attaches, auth, computerId: picked, model, effort,
       emit, stopped, signal: gone.signal,
+      disconnect: new Promise((r) => gone.signal.addEventListener('abort', r, { once: true })),
     });
   } catch (err) {
     if (!res.headersSent) return json(res, err.status || 500, { error: err.message || 'internal' });
@@ -1629,8 +1630,15 @@ export function pushSubs(home = HOME) {
   const list = readJson(path.join(home, 'drive', 'push.json'), []);
   return Array.isArray(list) ? list : [];
 }
+const PUSH_HOSTS = /(^|\.)(fcm\.googleapis\.com|push\.apple\.com|notify\.windows\.com|push\.services\.mozilla\.com)$/;
+export function isPushService(endpoint) {
+  try {
+    const u = new URL(String(endpoint || ''));
+    return u.protocol === 'https:' && PUSH_HOSTS.test(u.hostname);
+  } catch { return false; }
+}
 export function addPushSub(sub, ua = '', home = HOME) {
-  if (!sub || !/^https:\/\//.test(String(sub.endpoint || '')) || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return null;
+  if (!sub || !isPushService(sub.endpoint) || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return null;
   const list = pushSubs(home).filter((s) => s.endpoint !== sub.endpoint);
   list.push({ endpoint: String(sub.endpoint), keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) }, ua: String(ua || '').slice(0, 120), created: Date.now() });
   const kept = list.slice(-20);
@@ -1654,7 +1662,7 @@ export async function pushAll(payload, home = HOME) {
   const subs = pushSubs(home);
   if (!subs.length) return 0;
   const keys = vapidKeys(home);
-  webpush.setVapidDetails(`mailto:push@${process.env.CASE_PUBLIC_HOST || 'case.computer'}`, keys.publicKey, keys.privateKey);
+  webpush.setVapidDetails(`mailto:push@${process.env.CASE_PUBLIC_HOST || 'localhost'}`, keys.publicKey, keys.privateKey);
   let sent = 0;
   for (const s of subs) {
     try {
