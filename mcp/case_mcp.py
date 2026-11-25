@@ -195,10 +195,11 @@ def computer_navigate(computer_id: str, url: str, timeout_s: int = 30,
                       target_id: str | None = None) -> dict:
     """Point the computer's browser at url and block until the page has loaded.
     One call — do not follow it with readyState polling. Returns
-    {ok, url, title, text, snapshot} (url is the final one, after redirects) or
-    {ok:false, error}. `text` is the first 2000 chars of the page; only eval
-    innerText when you need more. `snapshot` is the arrived page's numbered
-    elements — DO NOT call computer_snapshot after this, you have it.
+    {ok, url, title, text, elements, elements_count, wall} (url is the final one,
+    after redirects) or {ok:false, error}. `text` is the first 2000 chars of the
+    page; only eval innerText when you need more. `elements` is the arrived page's
+    numbered controls — DO NOT call computer_snapshot after this, you have it.
+    `wall` is true when the page is a login or challenge wall.
     The body is ready when this returns; `title` is best-effort and can be "" on
     pages that set it a beat late — that is not a signal to wait or retry.
     Same-page '#anchor' jumps are not navigations; use computer_eval for those.

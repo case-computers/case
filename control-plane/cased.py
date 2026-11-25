@@ -204,7 +204,7 @@ async def audit_mw(request: Request, call_next):
             logged_path = path
         line = {"ts": now(), "session": request.headers.get("x-case-session", "-"),
                 "client": request.client.host if request.client else "-",
-                "method": request.method, "path": logged_path, "query": request.url.query,
+                "method": request.method, "path": logged_path, "query": _scrub("?" + request.url.query)[1:],
                 "status": resp.status_code, "ms": int((time.time() - t0) * 1000),
                 "req": "[large]" if big else req}
         await asyncio.to_thread(_audit_append, line)
