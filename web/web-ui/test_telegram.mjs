@@ -8,6 +8,7 @@ import {
   MAX_TEXT, STALE_S, chunk, handoffMessage, parseUpdate, poll, routeTelegram, telegramConfig, tgApi,
 } from './telegram.mjs';
 
+process.env.CASE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'case-home-'));
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
 const { startPhoneTelegram } = await import('./serve.mjs');
 

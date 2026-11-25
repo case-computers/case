@@ -76,7 +76,8 @@ in Drive. Cursor:
 - **Skills:** the agent saves a completed task as a `SKILL.md` on the computer
   and follows it next time. The file survives restarts.
 - **Schedules:** recurring runs use the computer's saved identity. They use
-  `CASE_DRIVE_API_KEY` from `.env` (the same box key as phone chat). Set
+  `CASE_DRIVE_API_KEY` from `.env` when set, otherwise the newest key saved in
+  Drive or the ChatGPT login (the same brain as phone chat). Set
   `CASE_BRAIN_CMD` if you want a different harness.
 - **Phone chat:** send tasks and answer handoffs through Telegram or ntfy.
   See [phone setup](#phone-chat).
@@ -115,6 +116,28 @@ to the computer you want to use.
 
 </details>
 
+<a id="drive-keys"></a>
+<details>
+<summary>Save a key in Drive, or sign in with ChatGPT</summary>
+
+Schedules and phone chat have no browser tab to supply a key. In Drive, click
+**KEY**, pick OpenAI or Anthropic, paste the key and click **SAVE ON BOX**. The
+box encrypts it (AES-256-GCM) under `CASE_HOME` and never sends it back to the
+browser: Drive only shows the provider, label, last four characters and save
+time. **REMOVE FROM BOX** deletes it. `CASE_DRIVE_API_KEY` in `.env` wins when it
+is set; otherwise the newest saved key or ChatGPT login is used. Chat still uses
+the key in your tab first.
+
+To use your ChatGPT plan instead, install the [Codex CLI](https://github.com/openai/codex)
+where Drive runs (on `PATH`, or point `CASE_CODEX_BIN` at it). The **CHATGPT** tab
+then appears in **KEY**; sign in with the one-time code. The tokens stay in
+`CASE_HOME/codex`. Codex runs read-only with its shell tool off and only the Case
+MCP tools. It starts `mcp/case_mcp.py` with `python3`; set `CASE_MCP_PY` to a
+Python that has `requirements.txt` installed if that is not the default. The stock
+Drive container does not include the Codex CLI.
+
+</details>
+
 <a id="phone-chat"></a>
 <details>
 <summary>Phone chat: Telegram and ntfy</summary>
@@ -125,7 +148,7 @@ port. Your host and Docker must stay running to receive messages and run tasks.
 
 Phone tasks use a shared thread named `Phone`. They need a provider key on the
 server because there is no browser tab to supply one. Schedules use the same
-key. If you do not have a `.env` file yet, copy `.env.example` to `.env` next to
+key. You can [save a key in Drive](#drive-keys) instead of using `.env`. If you do not have a `.env` file yet, copy `.env.example` to `.env` next to
 `compose.yaml`. Add these settings to that file, replacing the placeholder with
 your key:
 

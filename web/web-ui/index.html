@@ -531,6 +531,12 @@ body.acting .deskwrap::before{
 }
 .key-tab + .key-tab{border-left:1px solid var(--ink)}
 .key-tab.on{background:var(--ink);color:#fff}
+#keyTabChatgpt[hidden],#keyNote[hidden],#keyBoxDel[hidden],#keyin[hidden],#keyActions[hidden],#gptPanel[hidden]{display:none}
+#gptPanel{animation:rise var(--t) var(--ease)}
+#gptCode{font-family:var(--mono);font-size:22px;letter-spacing:.18em;background:var(--field);border:1px solid var(--soft);padding:12px;margin:0 0 14px;user-select:text}
+#gptPanel a{text-decoration:none}
+#gptPanel a:hover{text-decoration:underline}
+#gptPanel .warn{color:var(--warn)}
 .key-x{
   border:0;background:transparent;cursor:pointer;flex-shrink:0;
   padding:0 6px;min-width:44px;min-height:44px;font-family:var(--mono);font-size:18px;line-height:1;color:var(--faint);
@@ -772,7 +778,7 @@ figure.shot figcaption{font-family:var(--mono);font-size:9.5px;letter-spacing:.1
       <button type="button" class="more-row" id="moreFiles">Files<small>WHAT IS ON THE COMPUTER</small></button>
       <button type="button" class="more-row" id="moreCreds">Credentials<small>LOGINS IN THIS BOX'S VAULT</small></button>
       <button type="button" class="more-row" id="moreSched">Schedules<small>RUN A PROMPT ON A TIMER</small></button>
-      <button type="button" class="more-row" id="moreKey">Key<small>OPENAI · ANTHROPIC</small></button>
+      <button type="button" class="more-row" id="moreKey">Key<small>OPENAI · ANTHROPIC · CHATGPT</small></button>
       <button type="button" class="more-row" id="moreBuzz" hidden>Turn on buzz<small>BUZZ ME WHEN IT NEEDS ME</small></button>
     </section>
   </div>
@@ -788,18 +794,23 @@ figure.shot figcaption{font-family:var(--mono);font-size:9.5px;letter-spacing:.1
   <form class="modal-card" id="keyForm" autocomplete="off">
     <div class="modal-head">
       <div class="key-tabs" role="tablist" aria-label="Key provider">
+        <button type="button" class="key-tab" id="keyTabChatgpt" data-p="chatgpt" role="tab" aria-selected="false" hidden>CHATGPT</button>
         <button type="button" class="key-tab on" id="keyTabOpenai" data-p="openai" role="tab" aria-selected="true">OPENAI</button>
         <button type="button" class="key-tab" id="keyTabAnthropic" data-p="anthropic" role="tab" aria-selected="false">ANTHROPIC</button>
       </div>
       <button type="button" class="key-x" id="keyClose" aria-label="Close">×</button>
     </div>
     <h3 id="keyTitle" hidden>OPENAI KEY</h3>
-    <p>Held in this tab only. Never sent to logs. Replace anytime.</p>
+    <p id="keyHint">SAVE holds the key in this tab only. SAVE ON BOX encrypts it on the box for schedules and phone chat; the browser never gets it back.</p>
+    <p id="keyNote" hidden></p>
     <input id="keyin" type="password" name="api-key" autocomplete="new-password" spellcheck="false" placeholder="sk-…" aria-label="API key">
-    <div class="modal-actions">
+    <div class="modal-actions" id="keyActions">
       <button type="button" class="btn" id="keyClear">CLEAR</button>
+      <button type="button" class="btn" id="keyBoxDel" hidden>REMOVE FROM BOX</button>
+      <button type="button" class="btn" id="keyBoxSave">SAVE ON BOX</button>
       <button type="submit" class="btn solid">SAVE</button>
     </div>
+    <div id="gptPanel" hidden></div>
   </form>
 </div>
 
@@ -809,9 +820,9 @@ figure.shot figcaption{font-family:var(--mono);font-size:9.5px;letter-spacing:.1
       <h3 id="schedTitle">SCHEDULES</h3>
       <button type="button" class="key-x" id="schedClose" aria-label="Close">×</button>
     </div>
-    <p>A prompt that runs on this computer at a time you pick. Uses CASE_DRIVE_API_KEY from .env, not the tab KEY.</p>
+    <p>A prompt that runs on this computer at a time you pick. Uses CASE_DRIVE_API_KEY from .env if set, otherwise the newest key saved on the box or the ChatGPT login. Never the tab KEY.</p>
     <p>Log in to the sites first. If one asks for a code later, your phone buzzes and you type it in.</p>
-    <p id="schedFuel" hidden>Schedules run on the box key — set CASE_DRIVE_API_KEY in .env (or CASE_BRAIN_CMD for another harness).</p>
+    <p id="schedFuel" hidden>No box brain — set CASE_DRIVE_API_KEY in .env, save a key on the box, or sign in with ChatGPT (or set CASE_BRAIN_CMD for another harness).</p>
     <div class="sched-list" id="schedList"><div class="sched-empty">LOADING</div></div>
     <form id="schedForm" autocomplete="off">
       <label for="schedName">Name</label>
@@ -864,7 +875,9 @@ function md(src){
 const OPENAI_KEY_STORE='drive2_openai_key';
 const ANTHROPIC_KEY_STORE='drive2_anthropic_key';
 const PROVIDER_STORE='drive2_provider';
-let provider=sessionStorage.getItem(PROVIDER_STORE)==='anthropic'?'anthropic':'openai';
+const storedProvider=sessionStorage.getItem(PROVIDER_STORE);
+let provider=storedProvider==='anthropic'||storedProvider==='chatgpt'?storedProvider:'openai';
+let keyStatus={openai:{configured:false},anthropic:{configured:false},chatgpt:{configured:false},chatgpt_available:false};
 let openaiKey=sessionStorage.getItem(OPENAI_KEY_STORE)||'';
 let anthropicKey=sessionStorage.getItem(ANTHROPIC_KEY_STORE)||'';
 let model=sessionStorage.getItem('drive2_model')||'gpt-6-luna';
@@ -879,11 +892,20 @@ const ANTHROPIC_MODELS=[
   {id:'claude-sonnet-5-5',name:'Sonnet 5.5',meta:'Medium',efforts:['low','medium','high','xhigh','max']},
   {id:'claude-haiku-5-5',name:'Haiku 5.5',meta:'Fast',efforts:['low','medium','high','xhigh','max']}
 ];
-function models(){return provider==='anthropic'?ANTHROPIC_MODELS:OPENAI_MODELS;}
-function currentKey(){return provider==='anthropic'?anthropicKey:openaiKey;}
-function defaultModel(){return provider==='anthropic'?'claude-sonnet-5-5':'gpt-6-luna';}
+function models(){
+  if(provider==='chatgpt')return [{id:'codex',name:'Codex default',meta:'YOUR PLAN'}];
+  return provider==='anthropic'?ANTHROPIC_MODELS:OPENAI_MODELS;
+}
+function currentKey(){
+  if(provider==='chatgpt')return keyStatus.chatgpt.configured?'on':'';
+  return (provider==='anthropic'?anthropicKey:openaiKey)||(keyStatus[provider].configured?'on':'');
+}
+function defaultModel(){
+  if(provider==='chatgpt')return 'codex';
+  return provider==='anthropic'?'claude-sonnet-5-5':'gpt-6-luna';
+}
 function setProvider(p){
-  provider=p==='anthropic'?'anthropic':'openai';
+  provider=p==='anthropic'||p==='chatgpt'?p:'openai';
   sessionStorage.setItem(PROVIDER_STORE,provider);
   if(!models().some(m=>m.id===model)){
     model=defaultModel();
@@ -1135,6 +1157,7 @@ async function followRunning(tid){
   }
 }
 async function resumeBackground(){
+  resumeGptLogin();
   if(chatCtl)return;
   let tid='';try{tid=localStorage.getItem(THREAD_KEY)||'';}catch{}
   const mine=myThreads();
@@ -1471,28 +1494,197 @@ document.addEventListener('click',e=>{
 });
 
 /* ---------- key modal ---------- */
-function closeKey(){$('keyModal').classList.remove('on');}
+const GPT_URL='https://auth.openai.com/codex/device';
+let gptPhase='idle';
+let gptCode='';
+let gptUrl=GPT_URL;
+let gptErr='';
+let gptCtl=null;
+let gptWatch=null;
+let gptCloseTimer=null;
+async function loadKeys(){
+  try{
+    const r=await fetch('/api/keys');
+    const j=await r.json();
+    if(r.ok)keyStatus=j;
+  }catch{/* status stays until the next load */}
+}
+function closeKey(){
+  if(gptPhase==='pending')cancelGpt();
+  $('keyModal').classList.remove('on');
+}
+function cancelGpt(){
+  if(gptCtl)gptCtl.abort();
+  gptCtl=null;
+  gptPhase='idle';
+  fetch('/api/chatgpt/login',{method:'DELETE'}).catch(()=>{});
+  paintGptPanel();
+}
+function paintGptPanel(){
+  const el=$('gptPanel');
+  const gpt=provider==='chatgpt';
+  el.hidden=!gpt;
+  if(!gpt)return;
+  if(gptPhase==='pending'){
+    el.innerHTML='<div class="k">ONE-TIME CODE</div><div id="gptCode" aria-live="polite">'+esc(gptCode||'····-·····')+'</div>'
+      +'<p>Open <a href="'+esc(gptUrl)+'" target="_blank" rel="noopener">auth.openai.com/codex/device</a> and enter the code.</p>'
+      +'<div class="k">WAITING<span class="cur"></span></div>'
+      +'<div class="modal-actions">'
+      +(gptCode?'<button type="button" class="btn solid" id="gptCopy">COPY CODE</button>':'')
+      +'<button type="button" class="btn" id="gptCancel">CANCEL</button></div>';
+    const copy=$('gptCopy');
+    if(copy)copy.addEventListener('click',()=>{navigator.clipboard.writeText(gptCode).catch(()=>{});});
+    $('gptCancel').addEventListener('click',cancelGpt);
+    return;
+  }
+  if(gptPhase==='error'){
+    el.innerHTML='<p class="warn">'+esc(gptErr||'Sign-in failed.')+'</p>'
+      +'<div class="modal-actions"><button type="button" class="btn solid" id="gptRetry">TRY AGAIN</button></div>';
+    $('gptRetry').addEventListener('click',startGptLogin);
+    return;
+  }
+  if(keyStatus.chatgpt.configured){
+    const since=keyStatus.chatgpt.updated_at;
+    el.innerHTML='<div class="k">SIGNED IN</div><p>Since '+esc(since?new Date(since).toLocaleString():'now')+'. Used for chat, schedules and phone chat.</p>'
+      +'<div class="modal-actions"><button type="button" class="btn" id="gptOut">SIGN OUT</button></div>';
+    $('gptOut').addEventListener('click',signOutGpt);
+    return;
+  }
+  el.innerHTML='<p>Runs on your ChatGPT plan through the Codex CLI on the box. Case never sees your password.</p>'
+    +'<div class="modal-actions"><button type="button" class="btn solid" id="gptIn">SIGN IN WITH CHATGPT</button></div>';
+  $('gptIn').addEventListener('click',startGptLogin);
+}
+async function gptSignedIn(){
+  gptPhase='idle';
+  await loadKeys();
+  paintGptPanel();paint();
+  clearTimeout(gptCloseTimer);
+  gptCloseTimer=setTimeout(()=>{closeKey();$('q').focus();},900);
+}
+async function applyGptStatus(j){
+  if(j.code){gptCode=j.code;gptUrl=j.url||gptUrl;}
+  if(j.phase==='done'||(j.configured&&!j.busy)){await gptSignedIn();return true;}
+  if(j.phase==='error'){gptPhase='error';gptErr=(j.error||'Sign-in failed.').slice(0,80);paintGptPanel();return true;}
+  if(j.phase==='idle'&&!j.busy){gptPhase='idle';paintGptPanel();return true;}
+  gptPhase='pending';
+  paintGptPanel();
+  return false;
+}
+async function watchGptLogin(){
+  if(gptWatch)return gptWatch;
+  gptPhase='pending';
+  paintGptPanel();
+  gptWatch=(async()=>{
+    try{
+      for(let i=0;i<240;i++){
+        if(gptPhase!=='pending')return;
+        try{
+          const r=await fetch('/api/chatgpt/login');
+          if(!r.ok)break;
+          if(await applyGptStatus(await r.json()))return;
+        }catch{/* keep polling */}
+        await new Promise(res=>setTimeout(res,1200));
+      }
+      if(gptPhase==='pending'){gptPhase='error';gptErr='Sign-in timed out.';paintGptPanel();}
+    }finally{gptWatch=null;}
+  })();
+  return gptWatch;
+}
+async function startGptLogin(){
+  gptPhase='pending';gptCode='';gptErr='';gptUrl=GPT_URL;
+  paintGptPanel();
+  gptCtl=new AbortController();
+  try{
+    const r=await fetch('/api/chatgpt/login',{method:'POST',signal:gptCtl.signal});
+    if(!r.ok){gptPhase='error';gptErr='Sign-in failed.';paintGptPanel();return;}
+    const reader=r.body.getReader();
+    const dec=new TextDecoder();
+    let buf='';
+    while(true){
+      const {value,done}=await reader.read();
+      if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n');
+      buf=lines.pop();
+      for(const line of lines){
+        if(!line.trim())continue;
+        let ev;try{ev=JSON.parse(line);}catch{continue;}
+        if(ev.type==='code'){gptCode=ev.code||gptCode;gptUrl=ev.url||gptUrl;paintGptPanel();}
+        if(ev.type==='error'){gptPhase='error';gptErr=(ev.error||'Sign-in failed.').slice(0,80);paintGptPanel();}
+        if(ev.type==='done')await gptSignedIn();
+      }
+    }
+    if(gptPhase==='pending')await watchGptLogin();
+  }catch{
+    if(gptCtl&&gptCtl.signal.aborted){gptPhase='idle';paintGptPanel();return;}
+    await watchGptLogin();
+  }finally{gptCtl=null;}
+}
+async function signOutGpt(){
+  try{
+    const r=await fetch('/api/keys?provider=chatgpt',{method:'DELETE'});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok)keyStatus=j;
+  }catch{/* status stays */}
+  paintGptPanel();paint();
+}
+async function resumeGptLogin(){
+  try{
+    const r=await fetch('/api/chatgpt/login');
+    if(!r.ok)return;
+    const j=await r.json();
+    if(!j.busy&&j.phase!=='pending')return;
+    setProvider('chatgpt');
+    openKey('chatgpt');
+    gptCode=j.code||gptCode;gptUrl=j.url||gptUrl;
+    watchGptLogin();
+  }catch{/* offline */}
+}
+function paintKeyNote(msg){
+  const s=keyStatus[provider];
+  const text=msg||(s&&s.configured?'On the box: …'+s.last4+(s.label?' ('+s.label+')':'')+', saved '+new Date(s.saved_at).toLocaleString()+'. Used by schedules and phone chat.':'');
+  $('keyNote').textContent=text;
+  $('keyNote').hidden=!text;
+  $('keyBoxDel').hidden=!(s&&s.configured);
+}
 function paintKeyTabs(){
+  const gpt=provider==='chatgpt';
+  $('keyTabChatgpt').hidden=!keyStatus.chatgpt_available;
+  $('keyTabChatgpt').classList.toggle('on',gpt);
   $('keyTabOpenai').classList.toggle('on',provider==='openai');
   $('keyTabAnthropic').classList.toggle('on',provider==='anthropic');
+  $('keyTabChatgpt').setAttribute('aria-selected',String(gpt));
   $('keyTabOpenai').setAttribute('aria-selected',String(provider==='openai'));
   $('keyTabAnthropic').setAttribute('aria-selected',String(provider==='anthropic'));
-  $('keyTitle').textContent=provider==='anthropic'?'ANTHROPIC KEY':'OPENAI KEY';
-  $('keyin').placeholder=currentKey()?'key in tab · paste to replace':(provider==='anthropic'?'sk-ant-…':'sk-…');
-  $('keyin').setAttribute('aria-label',provider==='anthropic'?'Anthropic API key':'OpenAI API key');
+  $('keyTitle').textContent=gpt?'CHATGPT':(provider==='anthropic'?'ANTHROPIC KEY':'OPENAI KEY');
+  $('keyHint').hidden=gpt;
+  $('keyin').hidden=gpt;
+  $('keyActions').hidden=gpt;
+  if(gpt)$('keyNote').hidden=true;
+  else{
+    $('keyin').placeholder=currentKey()?'key set · paste to replace':(provider==='anthropic'?'sk-ant-…':'sk-…');
+    $('keyin').setAttribute('aria-label',provider==='anthropic'?'Anthropic API key':'OpenAI API key');
+    paintKeyNote();
+  }
+  paintGptPanel();
 }
-function openKey(){
+async function openKey(p){
+  if(p)setProvider(p);
   $('keyModal').classList.add('on');
   $('keyin').value='';
   paintKeyTabs();
-  setTimeout(()=>$('keyin').focus(),0);
+  await loadKeys();
+  paintKeyTabs();
+  paint();
+  setTimeout(()=>{if(provider!=='chatgpt')$('keyin').focus();},0);
 }
-$('keyBtn').addEventListener('click',openKey);
-$('keyBtnM').addEventListener('click',openKey);
+$('keyBtn').addEventListener('click',()=>openKey());
+$('keyBtnM').addEventListener('click',()=>openKey());
 const closeNav=()=>{body.classList.remove('nav');$('navOpen').setAttribute('aria-expanded','false');};
 $('navOpen').addEventListener('click',()=>{body.classList.add('nav');$('navOpen').setAttribute('aria-expanded','true');});
 $('scrim').addEventListener('click',closeNav);
 $('side').addEventListener('click',e=>{if(innerWidth<=900&&e.target.closest('a,button'))closeNav();});
+$('keyTabChatgpt').addEventListener('click',()=>{setProvider('chatgpt');paintKeyTabs();paintCfg();});
 $('keyTabOpenai').addEventListener('click',()=>{setProvider('openai');paintKeyTabs();paintCfg();});
 $('keyTabAnthropic').addEventListener('click',()=>{setProvider('anthropic');paintKeyTabs();paintCfg();});
 $('keyForm').addEventListener('submit',e=>{
@@ -1504,6 +1696,28 @@ $('keyForm').addEventListener('submit',e=>{
   $('keyModal').classList.remove('on');
   paint([comp].filter(Boolean));
   $('q').focus();
+});
+$('keyBoxSave').addEventListener('click',async()=>{
+  const v=$('keyin').value.trim();
+  if(!v)return;
+  try{
+    const r=await fetch('/api/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider,key:v})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){paintKeyNote(j.error==='short_key'?'That key is too short.':'Could not save the key on the box.');return;}
+    keyStatus=j;
+  }catch{paintKeyNote('Could not reach Drive.');return;}
+  $('keyin').value='';
+  paintKeyNote();
+  paint([comp].filter(Boolean));
+});
+$('keyBoxDel').addEventListener('click',async()=>{
+  try{
+    const r=await fetch('/api/keys?provider='+encodeURIComponent(provider),{method:'DELETE'});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok)keyStatus=j;
+  }catch{/* keep */}
+  paintKeyNote();
+  paint([comp].filter(Boolean));
 });
 $('keyClose').addEventListener('click',closeKey);
 $('keyClear').addEventListener('click',()=>{
@@ -1935,9 +2149,9 @@ async function sendPrompt(t,files){
       signal:chatCtl.signal,
       headers:{
         'content-type':'application/json',
-        ...(provider==='anthropic'?{'x-anthropic-key':anthropicKey}:{'x-openai-key':openaiKey})
+        ...(provider==='chatgpt'?{}:(provider==='anthropic'?{'x-anthropic-key':anthropicKey}:{'x-openai-key':openaiKey}))
       },
-      body:JSON.stringify({model,effort,input:t,computer_id:comp&&comp.id||'',thread_id:activeTid==='__pending'?'':activeTid,files:uploaded})
+      body:JSON.stringify({model,effort,provider,input:t,computer_id:comp&&comp.id||'',thread_id:activeTid==='__pending'?'':activeTid,files:uploaded})
     });
     const ctype=r.headers.get('content-type')||'';
     if(!ctype.includes('ndjson')){
@@ -2430,6 +2644,7 @@ paintOmni(false);
 syncShell();
 if(location.hash==='#files')setMode('files');
 if(new URLSearchParams(location.search).get('handoff'))goTab('chat');
+loadKeys().then(()=>{paint();paintCfg();});
 refresh().then(resumeBackground);
 setInterval(refresh,8000);
 })();

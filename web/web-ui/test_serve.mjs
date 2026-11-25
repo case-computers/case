@@ -13,14 +13,21 @@ import {
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
   histToAnthropicMessages, anthropicThinkingFor, caseToolPlan, clip,
 } from './case-tools.mjs';
+import { putProviderKey } from './provider-secrets.mjs';
 
 // serve.mjs loads threads.json at import and rewrites it; never the developer's own.
+process.env.CASE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'case-home-'));
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
 process.env.CASE_TURN_TOKENS = '10000';   // small enough for the scripted turns below to cross 80%
-const { runTurn, ALL_TOOLS, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, appFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
+const { runTurn, brainAuth, chatBrainAuth, ALL_TOOLS, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, appFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 assert.match(html, /x-anthropic-key/);
+assert.match(html, /newest key saved on the box or the ChatGPT login/);
+assert.doesNotMatch(html, /Uses CASE_DRIVE_API_KEY from \.env, not the tab KEY/);
+assert.match(html, /id="keyTabChatgpt"/);
+assert.match(html, /fetch\('\/api\/chatgpt\/login'/);
+assert.match(html, /provider==='chatgpt'\?\{\}/, 'the ChatGPT brain sends no tab key');
 assert.match(html, /ANTHROPIC KEY/);
 assert.match(html, /claude-sonnet-5-5/);
 assert.match(html, /\{id:'claude-sonnet-5-5',name:'Sonnet 5\.5'/);
@@ -891,6 +898,89 @@ async function withAnthropic(rounds, fn) {
     assert.ok(!JSON.stringify(thread.items).includes(png));
   } finally {
     cased.close();
+  }
+}
+
+function fakeCodex(dir, { loggedIn = true } = {}) {
+  const bin = path.join(dir, 'codex');
+  const log = path.join(dir, 'argv.log');
+  fs.writeFileSync(bin, `#!/bin/bash
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${loggedIn ? 0 : 1}; fi
+if [ "$1" = "exec" ]; then
+  echo "$@" >> ${log}
+  echo '{"type":"thread.started","thread_id":"thr_1"}'
+  echo '{"type":"item.started","item":{"id":"c1","type":"mcp_tool_call","tool":"computer_navigate","arguments":{"url":"https://example.com"}}}'
+  echo '{"type":"item.completed","item":{"id":"c1","type":"mcp_tool_call","tool":"computer_navigate","status":"completed","result":{"ok":true}}}'
+  echo '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"Example Domain"}}'
+  echo '{"type":"turn.completed","usage":{}}'
+  exit 0
+fi
+exit 1
+`, { mode: 0o755 });
+  return { bin, log };
+}
+
+{
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'case-brain-'));
+  const gone = fakeCodex(fs.mkdtempSync(path.join(os.tmpdir(), 'case-codexbin-')), { loggedIn: false });
+  process.env.CASE_CODEX_BIN = gone.bin;
+  const env = { CASE_DRIVE_API_KEY: 'sk-env-key', CASE_DRIVE_PROVIDER: 'openai' };
+  assert.equal(brainAuth({}, home), null);
+  putProviderKey('openai', 'sk-saved-openai-key', home);
+  assert.deepEqual(brainAuth({}, home), { auth: { provider: 'openai', key: 'sk-saved-openai-key' }, model: 'gpt-6-luna' });
+  await new Promise((r) => setTimeout(r, 5));
+  putProviderKey('anthropic', 'sk-ant-saved-key', home);
+  assert.deepEqual(brainAuth({ CASE_DRIVE_MODEL: 'claude-opus-5-5' }, home),
+    { auth: { provider: 'anthropic', key: 'sk-ant-saved-key' }, model: 'claude-opus-5-5' });
+  assert.deepEqual(brainAuth(env, home), { auth: { provider: 'openai', key: 'sk-env-key' }, model: 'gpt-6-luna' }, 'the .env key stays first');
+
+  assert.deepEqual(chatBrainAuth({ 'x-openai-key': 'sk-tab' }, { model: 'claude-sonnet-5-5' }, home), { provider: 'openai', key: 'sk-tab' }, 'the tab key wins');
+  assert.deepEqual(chatBrainAuth({}, { model: 'claude-sonnet-5-5' }, home), { provider: 'anthropic', key: 'sk-ant-saved-key' });
+  assert.deepEqual(chatBrainAuth({}, { model: 'gpt-6-luna' }, home), { provider: 'openai', key: 'sk-saved-openai-key' });
+  assert.deepEqual(chatBrainAuth({}, { provider: 'chatgpt' }, home), { provider: 'chatgpt', key: '' });
+
+  const on = fakeCodex(fs.mkdtempSync(path.join(os.tmpdir(), 'case-codexbin-')));
+  process.env.CASE_CODEX_BIN = on.bin;
+  assert.deepEqual(chatBrainAuth({}, { provider: 'chatgpt' }, home), { provider: 'chatgpt', key: 'chatgpt' });
+  const authFile = path.join(home, 'codex', 'auth.json');
+  fs.mkdirSync(path.dirname(authFile), { recursive: true });
+  fs.writeFileSync(authFile, '{}');
+  fs.utimesSync(authFile, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+  assert.deepEqual(brainAuth({}, home), { auth: { provider: 'chatgpt', key: 'chatgpt' }, model: 'codex' }, 'the newest login wins');
+  assert.equal(brainAuth(env, home).auth.provider, 'openai');
+  fs.utimesSync(authFile, new Date(0), new Date(0));
+  assert.equal(brainAuth({}, home).auth.provider, 'anthropic');
+  fs.rmSync(home, { recursive: true, force: true });
+
+  const cased = await fakeCased({ '/v1/computers/c_1': { name: 'desk', credentials: [] } });
+  const thread = { id: 't_gpt', title: 't', agent: '', items: [], created: 0, updated: 0 };
+  const events = [];
+  const turn = (inputText, attaches = []) => runTurn({
+    thread, inputText, attaches, auth: { provider: 'chatgpt', key: 'chatgpt' }, computerId: 'c_1',
+    model: 'codex', effort: 'high', emit: (e) => events.push(e),
+  });
+  try {
+    const first = await turn('open example.com');
+    assert.equal(first.text, 'Example Domain');
+    assert.equal(thread.codex_thread, 'thr_1');
+    assert.equal(thread.brain, 'chatgpt');
+    assert.equal(thread.agent, 'c_1', 'the first tool call claims the computer');
+    assert.deepEqual(events.map((e) => e.type), ['start', 'claim', 'tool', 'tool_result', 'text', 'done']);
+    assert.deepEqual(thread.items.map((it) => it.type || it.role), ['user', 'function_call', 'function_call_output', 'message']);
+    await turn('again');
+    const argvLines = fs.readFileSync(on.log, 'utf8').trim().split('\n');
+    assert.ok(!argvLines[0].includes(' resume '));
+    assert.match(argvLines[1], /resume thr_1 again$/);
+    events.length = 0;
+    const refused = await turn('read it', [{ path: '/tmp/a.pdf', name: 'a.pdf', mime: 'application/pdf' }]);
+    assert.match(refused.error, /image attachments only/);
+    assert.equal(events.at(-1).type, 'error');
+    assert.equal(fs.readFileSync(on.log, 'utf8').trim().split('\n').length, 2, 'codex never ran');
+    await turn('look', [{ path: '/tmp/a.png', name: 'a.png', mime: 'image/png' }]);
+    assert.match(fs.readFileSync(on.log, 'utf8'), / -i \/tmp\/a\.png /);
+  } finally {
+    cased.close();
+    delete process.env.CASE_CODEX_BIN;
   }
 }
 

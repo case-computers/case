@@ -24,6 +24,8 @@ import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, t
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
 import * as telegram from './telegram.mjs';
+import { putProviderKey, deleteProviderKey, getProviderKey, newestProviderKey, status as keyStatus } from './provider-secrets.mjs';
+import { codexBin, codexStatus, startDeviceLogin, runCodexTurn, codexLogout, DEVICE_URL } from './codex-brain.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -1061,6 +1063,7 @@ async function steer(req, res) {
   const text = String(body.input || '').slice(0, 32000).trim();
   if (!text) return send(res, 400, 'empty input');
   if (!CHAT_BUSY.has(tid)) return json(res, 409, { error: 'no turn running — send as a normal message' });
+  if (THREADS.get(tid)?.brain === 'chatgpt') return json(res, 409, { error: 'steer not supported with ChatGPT brain' });
   const q = STEER.get(tid) || [];
   q.push(text);
   STEER.set(tid, q);
@@ -1132,6 +1135,32 @@ export async function runTurn({
     } catch { /* a screenshot is never worth failing a turn over */ }
   };
   try {
+    if (auth.provider === 'chatgpt') {
+      const images = attaches.filter((a) => attachKind(a.mime, a.name) === 'image');
+      if (images.length !== attaches.length) {
+        const error = 'the ChatGPT brain takes image attachments only';
+        emit({ type: 'error', error });
+        finishTurn(hist, thread);
+        return { text: '', computerId: id, threadId: thread.id, finished: false, error };
+      }
+      const out = await runCodexTurn({
+        cid: id,
+        prompt: inputText,
+        resume: thread.codex_thread,
+        effort,
+        images: images.map((a) => a.path),
+        home: HOME,
+        emit: (ev) => { if (ev.type === 'tool') claim(); emit(ev); },
+        items: hist.items,
+        signal: gone.signal,
+        system: dev.content,
+      });
+      if (out.thread_id) thread.codex_thread = out.thread_id;
+      thread.brain = 'chatgpt';
+      finishTurn(hist, thread);
+      emit({ type: 'done', text: out.text, computer_id: id, thread_id: thread.id });
+      return { text: out.text, computerId: id, threadId: thread.id, finished: out.finished };
+    }
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
       const shots = new Set();
@@ -1437,6 +1466,34 @@ export async function schedulesRoute(req, res, url) {
   }
 }
 
+const NO_BRAIN = 'no brain configured: set CASE_DRIVE_API_KEY in .env, save a key in Drive, or sign in with ChatGPT';
+
+function newestBrain(home) {
+  const rows = [];
+  const saved = newestProviderKey(home);
+  if (saved) rows.push({ auth: { provider: saved.provider, key: saved.key }, at: saved.saved_at });
+  const gpt = codexStatus(home);
+  if (gpt.configured) rows.push({ auth: { provider: 'chatgpt', key: 'chatgpt' }, at: gpt.updated_at || '' });
+  rows.sort((a, b) => b.at.localeCompare(a.at));
+  return rows[0]?.auth || null;
+}
+
+export function brainAuth(env = process.env, home = HOME) {
+  const envAuth = envDriveAuth(env);
+  const auth = envAuth.key ? envAuth : newestBrain(home);
+  if (!auth) return null;
+  const model = auth.provider === 'chatgpt' ? 'codex' : resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
+  return { auth, model };
+}
+
+export function chatBrainAuth(headers, body, home = HOME) {
+  if (body.provider === 'chatgpt') return { provider: 'chatgpt', key: codexStatus(home).configured ? 'chatgpt' : '' };
+  const tab = chatAuth(headers);
+  if (tab.key) return tab;
+  const provider = /^claude/.test(String(body.model || '')) ? 'anthropic' : 'openai';
+  try { return { provider, key: getProviderKey(provider, home) }; } catch { return { provider, key: '' }; }
+}
+
 async function brainRoute(req, res) {
   const buf = await readBody(req, res);
   if (!buf) return;
@@ -1447,11 +1504,9 @@ async function brainRoute(req, res) {
   const prompt = String(body.prompt || '').slice(0, 32000);
   const name = String(body.name || '').trim();
   if (!computerId || !prompt) return json(res, 400, { error: 'computer_id and prompt required' });
-  const auth = envDriveAuth();
-  if (!auth.key) {
-    return json(res, 503, { error: 'set CASE_DRIVE_API_KEY (and CASE_DRIVE_PROVIDER) in .env' });
-  }
-  const model = resolveChatModel(process.env.CASE_DRIVE_MODEL || '', auth.provider);
+  const brain = brainAuth();
+  if (!brain) return json(res, 503, { error: NO_BRAIN });
+  const { auth, model } = brain;
   const thread = newThread('sched · ' + (name || prompt), computerId);
   CHAT_BUSY.add(thread.id);   // fresh thread, never busy; the set is what steer routes read
   let text = '';
@@ -1493,9 +1548,9 @@ async function chat(req, res) {
   let body;
   try { body = JSON.parse(buf.toString('utf8') || '{}'); }
   catch { return send(res, 400, 'bad json'); }
-  const auth = chatAuth(req.headers);
+  const auth = chatBrainAuth(req.headers, body);
   if (!auth.key) return send(res, 401, 'missing key');
-  const model = resolveChatModel(body.model, auth.provider);
+  const model = auth.provider === 'chatgpt' ? 'codex' : resolveChatModel(body.model, auth.provider);
   const effort = resolveChatEffort(model, body.effort);
   const inputText = String(body.input || '').slice(0, 32000);
   const fileIds = Array.isArray(body.files) ? body.files.slice(0, ATTACH_MAX_N) : [];
@@ -1622,6 +1677,101 @@ async function pendingHandoffIds() {
   return (await pendingHandoffs()).map((r) => r.id).filter(Boolean);
 }
 
+function keysPayload() {
+  return { ...keyStatus(HOME), chatgpt: codexStatus(HOME), chatgpt_available: !!codexBin() };
+}
+
+async function keysRoute(req, res, url) {
+  if (req.method === 'GET') return json(res, 200, keysPayload());
+  if (req.method === 'DELETE') {
+    const provider = url.searchParams.get('provider') || '';
+    try {
+      if (provider === 'chatgpt') codexLogout(HOME);
+      else deleteProviderKey(provider, HOME);
+    } catch (err) { return json(res, 400, { error: err.message }); }
+    return json(res, 200, keysPayload());
+  }
+  if (req.method !== 'POST') return json(res, 405, { error: 'method' });
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return json(res, 400, { error: 'bad json' }); }
+  try { putProviderKey(String(body.provider || ''), String(body.key || ''), HOME, { label: String(body.label || '') }); }
+  catch (err) { return json(res, 400, { error: err.message }); }
+  return json(res, 200, keysPayload());
+}
+
+const IDLE_LOGIN = { phase: 'idle', code: '', url: DEVICE_URL, error: '' };
+let chatgptLoginState = IDLE_LOGIN;
+let chatgptLoginBusy = false;
+let chatgptLoginAbort = null;
+const chatgptLoginWaiters = new Set();
+
+const chatgptLoginSnapshot = () => ({ ...chatgptLoginState, busy: chatgptLoginBusy, configured: !!codexStatus(HOME).configured });
+
+function emitLogin(obj) {
+  if (obj.type === 'code') chatgptLoginState = { phase: 'pending', code: obj.code, url: obj.url, error: '' };
+  else if (obj.type === 'error') chatgptLoginState = { ...chatgptLoginState, phase: 'error', error: String(obj.error || 'login failed') };
+  else if (obj.type === 'done') chatgptLoginState = { ...chatgptLoginState, phase: 'done', error: '' };
+  const line = JSON.stringify(obj) + '\n';
+  for (const w of [...chatgptLoginWaiters]) {
+    try { w.write(line); } catch { chatgptLoginWaiters.delete(w); }
+  }
+}
+
+function attachLoginStream(res) {
+  res.writeHead(200, {
+    'content-type': 'application/x-ndjson; charset=utf-8',
+    'cache-control': 'no-store', 'x-accel-buffering': 'no',
+  });
+  const { phase, code, url, error } = chatgptLoginState;
+  if (code) res.write(JSON.stringify({ type: 'code', url, code }) + '\n');
+  if (phase === 'done' || phase === 'error') {
+    res.write(JSON.stringify(phase === 'done' ? { type: 'done' } : { type: 'error', error }) + '\n');
+    return res.end();
+  }
+  chatgptLoginWaiters.add(res);
+  res.on('close', () => chatgptLoginWaiters.delete(res));
+}
+
+function endLoginWaiters() {
+  for (const w of chatgptLoginWaiters) w.end();
+  chatgptLoginWaiters.clear();
+}
+
+async function chatgptLogin(req, res) {
+  if (req.method === 'GET') return json(res, 200, chatgptLoginSnapshot());
+  if (req.method === 'DELETE') {
+    chatgptLoginAbort?.abort();
+    chatgptLoginAbort = null;
+    chatgptLoginBusy = false;
+    chatgptLoginState = IDLE_LOGIN;
+    endLoginWaiters();
+    return json(res, 200, chatgptLoginSnapshot());
+  }
+  if (req.method !== 'POST') return json(res, 405, { error: 'method' });
+  if (chatgptLoginBusy) return attachLoginStream(res);
+  chatgptLoginBusy = true;
+  chatgptLoginState = { ...IDLE_LOGIN, phase: 'pending' };
+  const ac = new AbortController();
+  chatgptLoginAbort = ac;
+  attachLoginStream(res);
+  try {
+    await startDeviceLogin(HOME, { signal: ac.signal, onCode: ({ url, code }) => emitLogin({ type: 'code', url, code }) });
+    if (!ac.signal.aborted) emitLogin({ type: 'done' });
+  } catch (err) {
+    if (!ac.signal.aborted) emitLogin({ type: 'error', error: err.message || 'login failed' });
+  } finally {
+    if (chatgptLoginAbort === ac) {
+      chatgptLoginAbort = null;
+      chatgptLoginBusy = false;
+      if (chatgptLoginState.phase === 'pending') chatgptLoginState = IDLE_LOGIN;
+      endLoginWaiters();
+    }
+  }
+}
+
 async function answerHandoff(hid, value) {
   const r = await api('POST', `/handoffs/${encodeURIComponent(hid)}/answer`, {
     json: { value }, timeoutMs: 120000,
@@ -1661,6 +1811,7 @@ async function phoneAct(decision, { auth, model, say }) {
     STEER.set(thread.id, q);
     return say('queued', 'Queued on the running turn');
   }
+  if (!auth) return say('error', NO_BRAIN);
   let computerId;
   try { computerId = await cid(); }
   catch (err) { return say('error', err.message || 'cased unreachable'); }
@@ -1696,12 +1847,12 @@ const NTFY_TITLES = {
   working: '[Case] working', done: '[Case] done',
 };
 
-async function onPhoneMessage(cfg, auth, model, text) {
+async function onPhoneMessage(cfg, env, text) {
   const { pendingIds, busy } = await phoneContext();
   const say = (kind, message) => ntfy.publish(cfg, { title: NTFY_TITLES[kind], message }).catch((err) => {
     console.warn('ntfy publish:', err.message || err);
   });
-  return phoneAct(routePhone({ text, pendingIds, busy }), { auth, model, say });
+  return phoneAct(routePhone({ text, pendingIds, busy }), { ...brainAuth(env), say });
 }
 
 export function startPhoneNtfy(env = process.env) {
@@ -1711,13 +1862,11 @@ export function startPhoneNtfy(env = process.env) {
     console.warn('CASE_NTFY_CHAT=1 but CASE_NTFY_TOPIC unset');
     return false;
   }
-  const auth = envDriveAuth(env);
-  if (!auth.key) {
-    console.warn('CASE_NTFY_CHAT=1 but CASE_DRIVE_API_KEY unset');
+  if (!brainAuth(env)) {
+    console.warn(`CASE_NTFY_CHAT=1 but ${NO_BRAIN}`);
     return false;
   }
-  const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
-  ntfy.listen(cfg, (text) => onPhoneMessage(cfg, auth, model, text));
+  ntfy.listen(cfg, (text) => onPhoneMessage(cfg, env, text));
   console.log(`drive ntfy chat on ${cfg.url}`);
   return true;
 }
@@ -1839,7 +1988,7 @@ function telegramSay(cfg) {
   };
 }
 
-async function onTelegramUpdate(cfg, auth, model, update) {
+async function onTelegramUpdate(cfg, env, update) {
   const parsed = telegram.parseUpdate(update);
   if (!parsed) return;
   const { chatId, msg } = parsed;
@@ -1867,7 +2016,7 @@ async function onTelegramUpdate(cfg, auth, model, update) {
     for (const [mid, hid] of CODE_PROMPTS) if (hid === decision.hid) CODE_PROMPTS.delete(mid);
     PUSHED.delete(decision.hid);
   }
-  return phoneAct(decision, { auth, model, say });
+  return phoneAct(decision, { ...brainAuth(env), say });
 }
 
 export function startPhoneTelegram(env = process.env) {
@@ -1876,15 +2025,13 @@ export function startPhoneTelegram(env = process.env) {
     if (env.CASE_TELEGRAM_TOKEN) console.warn('CASE_TELEGRAM_TOKEN is not a BotFather token');
     return false;
   }
-  const auth = envDriveAuth(env);
-  if (!auth.key) {
-    console.warn('CASE_TELEGRAM_TOKEN set but CASE_DRIVE_API_KEY unset');
+  if (!brainAuth(env)) {
+    console.warn(`CASE_TELEGRAM_TOKEN set but ${NO_BRAIN}`);
     return false;
   }
-  const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
   // A webhook left on the bot makes getUpdates 409 forever; clearing it is idempotent.
   telegram.tgApi(cfg.token, 'deleteWebhook', {}).catch(() => { /* poll reports 409 if this failed */ })
-    .then(() => telegram.poll(cfg, (u) => onTelegramUpdate(cfg, auth, model, u)));
+    .then(() => telegram.poll(cfg, (u) => onTelegramUpdate(cfg, env, u)));
   if (cfg.chatId) {
     watchHandoffs((h) => pushHandoff(cfg, h), () => {
       pendingHandoffs().then((rows) => rows.forEach((h) => pushHandoff(cfg, h)))
@@ -1998,10 +2145,10 @@ export const server = http.createServer(async (req, res) => {
         running: Number(h.json?.running) || 0,
         computers: Number(h.json?.computers) || 0,
         docker: !!h.json?.docker,
-        brain_key: !!envDriveAuth().key,
+        brain_key: !!brainAuth(),
       });
     } catch {
-      return json(res, 200, { ok: true, live: CASE.hostname, up: false, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
+      return json(res, 200, { ok: true, live: CASE.hostname, up: false, max_running: 0, running: 0, brain_key: !!brainAuth() });
     }
   }
   try {
@@ -2059,6 +2206,8 @@ export const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && p === '/api/file') return await fsFile(res, url);
     if (req.method === 'POST' && p === '/api/brain') return await brainRoute(req, res);
+    if (p === '/api/keys') return await keysRoute(req, res, url);
+    if (p === '/api/chatgpt/login') return await chatgptLogin(req, res);
     if (p === '/api/schedules' || p === '/api/schedules/run') return await schedulesRoute(req, res, url);
     if (req.method === 'POST' && p === '/api/chat') return await chat(req, res);
     if (req.method === 'POST' && p === '/api/chat/stop') return await chatStop(req, res);
