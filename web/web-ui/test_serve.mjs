@@ -17,7 +17,7 @@ import {
 // serve.mjs loads threads.json at import and rewrites it; never the developer's own.
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
 process.env.CASE_TURN_TOKENS = '10000';   // small enough for the scripted turns below to cross 80%
-const { runTurn, ALL_TOOLS, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
+const { runTurn, ALL_TOOLS, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, appFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 assert.match(html, /x-anthropic-key/);
@@ -40,6 +40,32 @@ assert.match(html, /id="schedModal"/);
 assert.match(html, /id="schedTz"/);
 assert.match(html, /id="schedBtn"/);
 assert.match(html, /id="schedBtnM"/);
+assert.match(html, /rel="manifest"/);
+assert.match(html, /viewport-fit=cover/);
+assert.match(html, /serviceWorker.*register\('\/sw\.js'/s);
+assert.match(html, /id="tabbar"/);
+assert.match(html, /id="tabScreen"/);
+assert.match(html, /id="takeover"/);
+assert.match(html, /id="tray"/);
+assert.match(html, /--motion-travel/);
+assert.match(html, /\/api\/shot\?h=/);
+assert.match(html, /\/api\/handoffs\/answer/);
+assert.match(html, /\/api\/push/);
+assert.match(html, /your phone buzzes and you type it in/);
+assert.match(html, /\/api\/chat\/stop/);
+assert.match(html, /userStopped/);
+assert.match(html, /streamDrop/);
+assert.match(html, /resumeBackground/);
+assert.match(html, /if\(tab==='screen'\)\{hookDesk\(\)/);
+assert.match(html, /h\.kind==='otp'\?'<button type="button" class="btn" id="hoDone">/, 'the code form offers DONE only for otp');
+assert.match(html, /String\(j\.error\|\|'COULD NOT SEND'\)\.toUpperCase\(\)/, 'a failed answer shows the server error');
+const manifest = JSON.parse(fs.readFileSync(fileURLToPath(new URL('./manifest.json', import.meta.url)), 'utf8'));
+assert.equal(manifest.start_url, '/?app=1');
+assert.equal(manifest.display, 'standalone');
+const sw = fs.readFileSync(fileURLToPath(new URL('./sw.js', import.meta.url)), 'utf8');
+assert.match(sw, /addEventListener\('push'/);
+assert.match(sw, /notificationclick/);
+assert.ok(!/addEventListener\('fetch'/.test(sw), 'no offline cache: Drive is a live view');
 assert.match(html, /Intl\.supportedValuesOf/);
 assert.match(html, /brain_key/);
 for (const m of html.matchAll(/innerHTML=[^\n]*apiErr\(j\)[^\n]*/g)) assert.match(m[0], /esc\(apiErr\(j\)/, 'error text is escaped before innerHTML');
@@ -47,6 +73,17 @@ for (const m of html.matchAll(/'\/api\/(fs|file|creds|schedules|teach-tick)[^;]*
   assert.match(m[0], /compQ\(\)/, `${m[1]} names the picked computer: ${m[0]}`);
 }
 assert.match(fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8'), /schedulesRoute/);
+{
+  const src = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /p === '\/api\/shot'/);
+  assert.match(src, /p === '\/api\/push'/);
+  assert.match(src, /p === '\/api\/handoffs'/);
+  assert.match(src, /p === '\/api\/handoffs\/answer'/);
+  assert.match(src, /p === '\/api\/handoffs\/shot'/);
+  assert.match(src, /p === '\/api\/chat\/stop'/);
+  assert.match(src, /schedule\.run/);
+  assert.match(src, /filter\(\(it\) => !it\?\.card\)/, 'card items never reach a model');
+}
 
 // threadTurns: reopening a thread shows text + tool calls; outputs and reasoning stay server-side
 const view = threadTurns([
@@ -78,6 +115,12 @@ assert.deepEqual(threadTurns([{ role: 'user', content: 'look', attaches: [{ name
   [{ who: 'you', text: 'look\ninvoice.pdf' }]);
 assert.deepEqual(threadTurns([{ role: 'user', content: '', attaches: [{ name: 'notes.md' }] }]),
   [{ who: 'you', text: 'notes.md' }]);
+const withCard = threadTurns([
+  { role: 'user', content: 'go' },
+  { role: 'shotcard', card: 1, at: 'turn_end', h: 'b'.repeat(40), shot: '/x/b.png', ts: 5 },
+]);
+assert.deepEqual(withCard.map((t) => t.who), ['you', 'shot']);
+assert.deepEqual(hydrateAttaches([{ role: 'shotcard', card: 1, shot: '/x/b.png' }, { role: 'user', content: 'go' }]), [{ role: 'user', content: 'go' }]);
 
 // normHost: bare lowercase host or nothing — creds domains must never carry paths/creds
 assert.equal(normHost('https://Mail.Google.com/mail/u/0'), 'mail.google.com');
@@ -463,6 +506,11 @@ assert.equal(pageFile('/serve.mjs'), '');
 assert.equal(pageFile('/threads.json'), '');
 assert.equal(pageFile('/../secrets'), '');
 assert.equal(pageFile('/deploy.html'), '/deploy.html');
+assert.equal(appFile('/manifest.json'), '/manifest.json');
+assert.equal(appFile('/sw.js'), '/sw.js');
+assert.equal(appFile('/icons/icon-192.png'), '/icons/icon-192.png');
+assert.equal(appFile('/icons/../serve.mjs'), '');
+assert.equal(appFile('/threads.json'), '');
 
 {
   const msgs = histToAnthropicMessages([
@@ -501,9 +549,10 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'case-dedupe-'));
   pushShot(items, shots, 'AAAA', dir);
   pushShot(items, shots, 'AAAA', dir);
-  assert.equal(items.length, 2);
+  assert.equal(items.length, 3);
   assert.ok(items[0].shot, 'first shot is stashed');
-  assert.match(items[1].content[0].text, /has not changed/);
+  assert.equal(items[1].card, 1, 'the first shot also lands as a card for the human');
+  assert.match(items[2].content[0].text, /has not changed/);
 }
 
 // STOP keeps the turn — rewind only on provider errors, not disconnect.
@@ -513,7 +562,8 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   const runTurnFn = serveSrc.slice(serveSrc.indexOf('export async function runTurn('), serveSrc.indexOf('async function chat('));
   const chatFn = serveSrc.slice(serveSrc.indexOf('async function chat('), serveSrc.indexOf('async function pendingHandoffIds('));
   const loopFn = runTurnFn + chatFn;
-  assert.match(chatFn, /if \(stopped\(\) \|\| res\.destroyed\) return/);
+  assert.match(chatFn, /if \(res\.destroyed\) return/);
+  assert.match(chatFn, /CHAT_STOP\.set\(thread\.id, gone\)/);
   const outOfSteps = [...loopFn.matchAll(/if \(!finished(?: && !stopped\(\))?\)/g)];
   assert.equal(outOfSteps.length, 2, 'Anthropic + OpenAI out-of-steps gates');
   assert.ok(outOfSteps.every((m) => m[0].includes('!stopped()')), 'STOP is not out-of-rounds');
@@ -523,7 +573,9 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(loopFn, /withRateRetry\(round, emit, 5, gone\.signal\)/);
   assert.match(loopFn, /Look before you route/, 'dev prompt says act on the page before trying another url');
   assert.match(loopFn, /handoff_request\(kind=device\)/, 'dev prompt names the human escape hatch');
-  assert.match(chatFn, /res\.on\('close', \(\) => \{ clientGone\(\); gone\.abort\(\); \}\)/);
+  assert.match(chatFn, /async function chatStop/);
+  assert.match(chatFn, /running\.length === 1/);
+  assert.ok(!/res\.on\('close'/.test(chatFn), 'a hangup does not abort the running turn');
   assert.match(loopFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);
   assert.ok(!/responses\.create\(params\)/.test(loopFn), 'every round is abortable');
   assert.match(loopFn, /if \(gone\.signal\.aborted\) throw err;/, 'an abort never retries as a param fallback');

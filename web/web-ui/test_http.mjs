@@ -34,6 +34,13 @@ const post = (p, body, headers = {}) => fetch(base + p, {
 });
 
 assert.equal((await get('/api/threads')).status, 401);
+assert.equal((await get('/manifest.json')).status, 200, 'the install manifest loads before any login');
+assert.equal((await get('/sw.js')).headers.get('cache-control'), 'no-cache');
+assert.equal((await get('/icons/icon-192.png')).headers.get('content-type'), 'image/png');
+assert.equal((await get('/icons/missing.png')).status, 404);
+assert.equal((await get('/api/push')).status, 401, 'push routes keep the token gate');
+assert.equal((await get('/api/push', { authorization: 'Bearer tok' })).status, 200);
+assert.equal((await post('/api/push', { endpoint: 'https://push.example/x', keys: { p256dh: 'p', auth: 'a' } }, { authorization: 'Bearer tok', origin: 'https://evil.example' })).status, 403);
 assert.equal((await get('/api/threads', { authorization: 'Bearer tok' })).status, 200);
 assert.equal((await fetch(base + '/api/threads', { method: 'POST', headers: { authorization: 'Bearer tok', origin: 'https://evil.example' } })).status, 403);
 assert.equal((await get('/?token=tok')).status, 302);

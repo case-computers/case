@@ -52,6 +52,7 @@ fs.writeFileSync(mod, `
   ${grab('holdQueued')}
   // the real openThread, against a fetch that fails
   let threadGen = 0, fetchFails = false, failStatus = 404;
+  const closeNav = () => {}, MOBILE = () => false;
   const inner = { innerHTML: '', appendChild() {} }, log = {}, md = (x) => x, paint = () => {};
   const fetch = async () => {
     if (fetchFails) throw new Error('down');

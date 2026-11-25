@@ -19,6 +19,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
+import webpush from 'web-push';
 import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, resolveChatEffort, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRetryable, clip } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
@@ -601,6 +602,7 @@ try {
   if (err.code !== 'ENOENT') console.warn('threads:', err.message);
 }
 const CHAT_BUSY = new Set();
+const CHAT_STOP = new Map();
 const STEER = new Map(); // thread id -> user texts typed while the turn runs
 function takeSteers(tid) {
   const q = STEER.get(tid) || [];
@@ -648,7 +650,7 @@ function newThread(title, agent) {
   THREADS.set(t.id, t);
   return t;
 }
-const threadSummary = (t) => ({ id: t.id, title: t.title, agent: t.agent, updated: t.updated, created: t.created });
+const threadSummary = (t) => ({ id: t.id, title: t.title, agent: t.agent, updated: t.updated, created: t.created, running: CHAT_BUSY.has(t.id) });
 // Render view for reopening a thread: text + tool calls only, outputs and
 // reasoning stay server-side.
 export function threadTurns(items) {
@@ -657,6 +659,7 @@ export function threadTurns(items) {
   const failed = new Set((items || []).filter((it) => it?.type === 'function_call_output'
     && /^\{"ok":false[,}]/.test(String(it.output || ''))).map((it) => it.call_id));
   for (const it of items || []) {
+    if (it.card) { turns.push({ who: 'shot', h: it.h || path.basename(String(it.shot || ''), '.png'), at: it.at || 'turn_end', ts: it.ts || 0 }); continue; }
     if (it.shot) continue; // screenshot attachments are model-only
     if (it.role === 'user') {
       const names = (it.attaches || []).map((a) => a.name).filter(Boolean);
@@ -801,14 +804,46 @@ export function stashShot(b64, dir = shotsDir()) {
   const file = path.join(dir, h + '.png');
   try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
   try {
-    if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(String(b64 || ''), 'base64'));
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, Buffer.from(String(b64 || ''), 'base64'));
+      gcShots(dir, 500, [file]);
+    }
   } catch { /* best-effort; hydrateShots falls back to a text note */ }
   return { role: 'user', shot: file, content: [{ type: 'input_text', text: '[screenshot]' }] };
 }
 
+export function gcShots(dir, cap = 500, keep = []) {
+  try {
+    const root = path.resolve(dir) + path.sep;
+    const refs = new Set();
+    const addRef = (shot) => {
+      const abs = path.resolve(String(shot || ''));
+      if (abs.startsWith(root) && path.extname(abs) === '.png') refs.add(path.basename(abs));
+    };
+    for (const shot of keep) addRef(shot);
+    try {
+      const rows = JSON.parse(fs.readFileSync(THREADS_FILE, 'utf8'));
+      for (const thread of Array.isArray(rows) ? rows : []) {
+        for (const item of thread?.items || []) addRef(item?.shot);
+      }
+    } catch { /* no persisted history yet */ }
+    for (const thread of THREADS.values()) for (const item of thread.items || []) addRef(item?.shot);
+    const files = fs.readdirSync(dir).filter((name) => name.endsWith('.png'));
+    if (files.length <= cap) return;
+    const rows = files.filter((name) => !refs.has(name))
+      .map((name) => ({ name, t: fs.statSync(path.join(dir, name)).mtimeMs })).sort((a, b) => a.t - b.t);
+    for (const row of rows.slice(0, files.length - cap)) fs.rmSync(path.join(dir, row.name), { force: true });
+  } catch { /* housekeeping only */ }
+}
+
+export function shotCard(b64, at, dir = shotsDir()) {
+  const it = stashShot(b64, dir);
+  return { role: 'shotcard', card: 1, at, shot: it.shot, h: path.basename(it.shot, '.png'), ts: Date.now() };
+}
+
 // A click that changed nothing yields a byte-identical png. Re-sending it buys
 // no information and then rides along in every later round of the turn.
-export function pushShot(items, shots, b64, dir = shotsDir()) {
+export function pushShot(items, shots, b64, dir = shotsDir(), emit = () => {}) {
   const h = crypto.createHash('sha1').update(b64).digest('hex');
   if (shots.has(h)) {
     items.push({ role: 'user', content: [{ type: 'input_text',
@@ -816,7 +851,10 @@ export function pushShot(items, shots, b64, dir = shotsDir()) {
     return;
   }
   shots.add(h);
-  items.push(stashShot(b64, dir));
+  const stashed = stashShot(b64, dir);
+  items.push(stashed);
+  items.push({ role: 'shotcard', card: 1, at: 'model', h, shot: stashed.shot, ts: Date.now() });
+  emit({ type: 'shot', h, at: 'model' });
 }
 
 /** memo (shot path -> item) lets a turn read and encode each file once, not once
@@ -949,7 +987,7 @@ function hydrateOneAttach(a, dir) {
 }
 
 export function hydrateAttaches(items, dir = inboxDir(), memo = new Map()) {
-  return (items || []).map((it) => {
+  return (items || []).filter((it) => !it?.card).map((it) => {
     if (!it?.attaches?.length) return it;
     const parts = [];
     if (typeof it.content === 'string' && it.content) {
@@ -1081,6 +1119,18 @@ export async function runTurn({
   const userItem = { role: 'user', content: inputText };
   if (attaches.length) userItem.attaches = attaches;
   hist.items.push(userItem);
+  let toolsRan = false;
+  let slept = false;
+  const endShot = async (at) => {
+    if (!id || !toolsRan || slept) return;
+    try {
+      const r = await runExtra(extraPlan('computer_screenshot', {}, id));
+      if (!r || !r.image_b64) return;
+      const card = shotCard(r.image_b64, at);
+      hist.items.push(card);
+      emit({ type: 'shot', h: card.h, at });
+    } catch { /* a screenshot is never worth failing a turn over */ }
+  };
   try {
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
@@ -1121,10 +1171,12 @@ export async function runTurn({
           const result = await toolOrStop(
             () => (eplan ? runExtra(eplan) : runCaseTool(name, args, id, null)),
             actFor(name, args || {}, id));
+          toolsRan = true;
+          if (name === 'computer_sleep' && result && result.ok) slept = true;
           const { image_b64, ...persist } = result;
           const rest = snapshotElide(name, persist, snaps);
           hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(rest) });
-          if (image_b64) pushShot(hist.items, shots, image_b64);
+          if (image_b64) pushShot(hist.items, shots, image_b64, shotsDir(), emit);
           return image_b64 ? { ...rest, image_b64 } : rest;
         },
       });
@@ -1138,6 +1190,7 @@ export async function runTurn({
       } else if (text) {
         hist.items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
       }
+      await endShot('turn_end');
       finishTurn(hist, thread);
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
       return { text, computerId: id, threadId: thread.id, finished };
@@ -1279,6 +1332,8 @@ export async function runTurn({
         const eplan = extraPlan(call.name, args, id);
         const result = await toolOrStop(
           () => (eplan ? runExtra(eplan) : runCaseTool(call.name, args, id)), act);
+        toolsRan = true;
+        if (call.name === 'computer_sleep' && result && result.ok) slept = true;
         const { image_b64, ...rest } = result;
         emit({ type: 'tool_result', id: call.id, call_id: callId, act: rest.act || act, ok: !!rest.ok, name: call.name, args_used: call.name === 'computer_exec' ? String(args.command || '').slice(0, 200) : undefined, detail: clip(rest.error || rest.result || rest, 400) });
         hist.items.push({ type: 'function_call_output', call_id: callId, output: clip(snapshotElide(call.name, rest, snaps)) });
@@ -1296,7 +1351,7 @@ export async function runTurn({
         snaps.last = '';
         emit({ type: 'think', text: '[context compacted server-side — carrying the summary forward]' });
       }
-      for (const b64 of images) pushShot(hist.items, shots, b64);
+      for (const b64 of images) pushShot(hist.items, shots, b64, shotsDir(), emit);
     }
     if (!finished && !stopped()) {
       // Out of steps or out of budget mid-task. Say so — silence here reads as
@@ -1307,6 +1362,7 @@ export async function runTurn({
           : `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`);
       emit({ type: 'text', text });
     }
+    await endShot('turn_end');
     // Reasoning items are only valid inside the turn that produced them; carrying
     // them forward bloats the payload and some models reject stale ones.
     finishTurn(hist, thread);
@@ -1323,6 +1379,7 @@ export async function runTurn({
     // real. histCloseOpenCalls synthesizes outputs for any dangling
     // function_call so later requests don't 400. (Rate limits are retried
     // inside the round; landing here means retries ran dry or a real fault.)
+    await endShot('error');
     finishTurn(hist, thread);
     if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
     return { text: '', computerId: id, threadId: thread.id, finished: false, error: err?.message || 'provider error' };
@@ -1453,9 +1510,10 @@ async function chat(req, res) {
   const thread = THREADS.get(String(body.thread_id || '')) || newThread(inputText || attaches[0].name, picked);
   if (CHAT_BUSY.has(thread.id)) return json(res, 409, { error: 'this thread is still running a turn' });
   CHAT_BUSY.add(thread.id);
-  const stopped = () => res.destroyed;
+  const gone = new AbortController();
+  const stopped = () => gone.signal.aborted;
   const emit = (obj) => {
-    if (stopped() || res.destroyed) return;
+    if (res.destroyed) return;
     if (!res.headersSent) {
       res.writeHead(200, {
         'content-type': 'application/x-ndjson; charset=utf-8',
@@ -1464,22 +1522,95 @@ async function chat(req, res) {
     }
     try { res.write(JSON.stringify(obj) + '\n'); } catch { /* client gone */ }
   };
-  let clientGone;
-  const goneP = new Promise((r) => { clientGone = r; });
-  const gone = new AbortController();
-  res.on('close', () => { clientGone(); gone.abort(); });
+  CHAT_STOP.set(thread.id, gone);
   try {
     await runTurn({
       thread, inputText, attaches, auth, computerId: picked, model, effort,
-      emit, stopped, signal: gone.signal, disconnect: goneP,
+      emit, stopped, signal: gone.signal,
     });
   } catch (err) {
     if (!res.headersSent) return json(res, err.status || 500, { error: err.message || 'internal' });
     if (!stopped()) emit({ type: 'error', error: err.message || 'internal' });
   } finally {
+    CHAT_STOP.delete(thread.id);
     CHAT_BUSY.delete(thread.id);
     if (res.headersSent && !res.writableEnded) res.end();
   }
+}
+
+async function chatStop(req, res) {
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return send(res, 400, 'bad json'); }
+  const tid = String(body.thread_id || '');
+  if (tid && !THREADS.has(tid)) return json(res, 404, { error: 'no such thread' });
+  const running = [...CHAT_STOP.keys()];
+  const ac = CHAT_STOP.get(tid || (running.length === 1 ? running[0] : ''));
+  if (ac) ac.abort();
+  return json(res, 200, { ok: true, stopped: !!ac });
+}
+
+function readJson(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+function atomicWrite(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+export function vapidKeys(home = HOME) {
+  const file = path.join(home, 'drive', 'vapid.json');
+  const cur = readJson(file, null);
+  if (cur && cur.publicKey && cur.privateKey) return cur;
+  const keys = webpush.generateVAPIDKeys();
+  atomicWrite(file, keys);
+  return keys;
+}
+export function pushSubs(home = HOME) {
+  const list = readJson(path.join(home, 'drive', 'push.json'), []);
+  return Array.isArray(list) ? list : [];
+}
+export function addPushSub(sub, ua = '', home = HOME) {
+  if (!sub || !/^https:\/\//.test(String(sub.endpoint || '')) || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return null;
+  const list = pushSubs(home).filter((s) => s.endpoint !== sub.endpoint);
+  list.push({ endpoint: String(sub.endpoint), keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) }, ua: String(ua || '').slice(0, 120), created: Date.now() });
+  const kept = list.slice(-20);
+  atomicWrite(path.join(home, 'drive', 'push.json'), kept);
+  return kept.length;
+}
+export function dropPushSub(endpoint, home = HOME) {
+  const list = pushSubs(home).filter((s) => s.endpoint !== endpoint);
+  atomicWrite(path.join(home, 'drive', 'push.json'), list);
+  return list.length;
+}
+export function pushBody(kind, domain) {
+  const d = String(domain || '');
+  const site = /^[a-z0-9][a-z0-9.-]*$/i.test(d) ? d.toLowerCase() : 'your computer';
+  const what = kind === 'approval' ? 'needs a yes or no'
+    : (kind === 'captcha' || kind === 'device' || kind === 'passkey') ? 'needs you on the screen'
+      : 'needs a code';
+  return `${site} ${what}`;
+}
+export async function pushAll(payload, home = HOME) {
+  const subs = pushSubs(home);
+  if (!subs.length) return 0;
+  const keys = vapidKeys(home);
+  webpush.setVapidDetails(`mailto:push@${process.env.CASE_PUBLIC_HOST || 'case.computer'}`, keys.publicKey, keys.privateKey);
+  let sent = 0;
+  for (const s of subs) {
+    try {
+      await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, JSON.stringify(payload), { TTL: 600 });
+      sent++;
+    } catch (err) {
+      if (err && (err.statusCode === 404 || err.statusCode === 410)) dropPushSub(s.endpoint, home);
+      else if (!process.env.CASE_TEST_QUIET) console.warn('push:', err && err.message);
+    }
+  }
+  return sent;
 }
 
 async function pendingHandoffs() {
@@ -1609,7 +1740,7 @@ export function sseEvents(chunk, carry = '') {
 
 /** Follow cased's event stream and call onHandoff for each new handoff.
  *  Reconnects forever; cased restarts must not silence the phone. */
-function watchHandoffs(onHandoff, onConnect) {
+function watchHandoffs(onHandoff, onConnect, onSchedule) {
   let timer = null;
   const retry = () => { clearTimeout(timer); timer = setTimeout(connect, 5000); };
   const connect = () => {
@@ -1626,6 +1757,7 @@ function watchHandoffs(onHandoff, onConnect) {
         carry = parsed.rest;
         for (const { event, data } of parsed.events) {
           if (event === 'handoff_created') onHandoff(data);
+          if (event === 'schedule.run' && onSchedule) onSchedule(data);
         }
       });
       rs.on('error', () => { /* close follows */ });
@@ -1641,6 +1773,33 @@ const CODE_PROMPTS = new Map();
 // Handoff ids already sent to the phone, so a reconnect replay does not repeat
 // them. Ids answered from the Drive UI linger; handoffs are rare, it is bytes.
 const PUSHED = new Set();
+const WEB_PUSHED = new Set();
+
+async function pushWebHandoff(h) {
+  if (!h || !h.id || WEB_PUSHED.has(h.id)) return;
+  WEB_PUSHED.add(h.id);
+  if (WEB_PUSHED.size > 500) WEB_PUSHED.clear();
+  await pushAll({ title: 'Case', body: pushBody(h.kind, h.domain), url: `/?app=1&handoff=${encodeURIComponent(h.id)}`, tag: `h:${h.id}` });
+}
+
+async function pushScheduleRun(s) {
+  if (!s || !s.schedule) return;
+  let name = 'A scheduled task';
+  try {
+    const r = await api('GET', `/computers/${encodeURIComponent(s.computer_id || await cid())}/schedules`, { timeoutMs: 8000 });
+    const rows = r.json?.schedules || r.json || [];
+    const row = Array.isArray(rows) ? rows.find((x) => x.id === s.schedule) : null;
+    if (row && row.name) name = String(row.name).slice(0, 40);
+  } catch {}
+  await pushAll({ title: 'Case', body: `${name} finished: ${String(s.status || 'done').slice(0, 20)}`, url: '/?app=1', tag: `s:${s.run || s.schedule}` });
+}
+
+function startWebPush() {
+  watchHandoffs((h) => pushWebHandoff(h).catch(() => {}), () => {
+    pendingHandoffs().then((rows) => rows.forEach((h) => pushWebHandoff(h).catch(() => {})))
+      .catch((err) => console.warn('web push handoffs:', err.message || err));
+  }, (s) => pushScheduleRun(s).catch(() => {}));
+}
 
 async function pushHandoff(cfg, h) {
   if (PUSHED.has(h.id)) return;
@@ -1800,10 +1959,22 @@ export function pageFile(p) {
   return PAGE_FILES[p] || '';
 }
 
+const APP_FILES = /^\/(manifest\.json|sw\.js|icons\/[a-z0-9-]+\.png)$/;
+export function appFile(p) { return APP_FILES.test(String(p || '')) ? p : ''; }
+
 export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://x');
   const p = url.pathname;
   if (!browserOk(req)) return json(res, 403, { error: 'unexpected Host or Origin' });
+  if (req.method === 'GET' && appFile(p)) {
+    const absApp = path.join(DIR, p);
+    if (!fs.existsSync(absApp)) return send(res, 404, 'not found');
+    res.writeHead(200, {
+      'content-type': mimeFor(absApp),
+      'cache-control': p === '/sw.js' ? 'no-cache' : 'public, max-age=3600',
+    });
+    return res.end(fs.readFileSync(absApp));
+  }
   if (TOKEN && req.method === 'GET' && url.searchParams.has('token') && tokenMatches(req)) {
     res.writeHead(302, {
       Location: p === '/' ? '/' : p,
@@ -1840,10 +2011,57 @@ export const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/fs') return await fsList(res, url);
     if (p === '/api/creds') return await creds(req, res, url);
     if (p === '/api/threads') return threadsRoute(req, res, url);
+    if (p === '/api/push') {
+      if (req.method === 'GET') return json(res, 200, { publicKey: vapidKeys().publicKey });
+      if (req.method === 'POST') {
+        const pb = await readBody(req, res, 8192);
+        if (!pb) return;
+        let sub;
+        try { sub = JSON.parse(pb.toString('utf8') || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
+        return addPushSub(sub, req.headers['user-agent']) == null ? json(res, 400, { error: 'bad subscription' }) : json(res, 200, { ok: true });
+      }
+      if (req.method === 'DELETE') {
+        dropPushSub(String(url.searchParams.get('endpoint') || ''));
+        return json(res, 200, { ok: true });
+      }
+      return json(res, 405, { error: 'method' });
+    }
+    if (req.method === 'GET' && p === '/api/shot') {
+      const h = String(url.searchParams.get('h') || '');
+      if (!/^[0-9a-f]{40}$/.test(h)) return send(res, 400, 'bad hash');
+      const absShot = path.join(shotsDir(), h + '.png');
+      if (!fs.existsSync(absShot)) return send(res, 404, 'not found');
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'private, max-age=31536000, immutable' });
+      return res.end(fs.readFileSync(absShot));
+    }
+    if (req.method === 'GET' && p === '/api/handoffs') {
+      const r = await api('GET', '/handoffs?status=pending', { timeoutMs: 8000 });
+      return json(res, r.status >= 400 ? r.status : 200, r.json || { handoffs: [] });
+    }
+    if (req.method === 'POST' && p === '/api/handoffs/answer') {
+      const hb = await readBody(req, res, 8192);
+      if (!hb) return;
+      let b = {};
+      try { b = JSON.parse(hb.toString('utf8') || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
+      const hid = String(b.id || '');
+      if (!hid) return json(res, 400, { error: 'id required' });
+      const err = await answerHandoff(hid, String(b.value == null ? '' : b.value));
+      return json(res, err ? 502 : 200, err ? { error: err } : { ok: true });
+    }
+    if (req.method === 'GET' && p === '/api/handoffs/shot') {
+      const hid = String(url.searchParams.get('id') || '');
+      if (!hid) return send(res, 400, 'id required');
+      const r = await api('GET', `/handoffs/${encodeURIComponent(hid)}`, { timeoutMs: 8000 });
+      const b64 = r.json && r.json.screenshot_png_b64;
+      if (!b64) return send(res, 404, 'no shot');
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+      return res.end(Buffer.from(String(b64), 'base64'));
+    }
     if (req.method === 'GET' && p === '/api/file') return await fsFile(res, url);
     if (req.method === 'POST' && p === '/api/brain') return await brainRoute(req, res);
     if (p === '/api/schedules' || p === '/api/schedules/run') return await schedulesRoute(req, res, url);
     if (req.method === 'POST' && p === '/api/chat') return await chat(req, res);
+    if (req.method === 'POST' && p === '/api/chat/stop') return await chatStop(req, res);
     if (req.method === 'POST' && p === '/api/chat/steer') return await steer(req, res);
     if (req.method === 'POST' && p === '/api/attach') return await attach(req, res);
     if (req.method === 'POST' && p === '/api/teach-tick') {
@@ -1881,5 +2099,6 @@ if (isMain) {
     process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port})\n`);
     startPhoneNtfy();
     startPhoneTelegram();
+    startWebPush();
   });
 }

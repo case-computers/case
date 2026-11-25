@@ -235,6 +235,29 @@ to enable them; phone chat itself does not require this setup.
 
 </details>
 
+<a id="drive-phone"></a>
+<details>
+<summary>Drive on a phone</summary>
+
+Drive installs as a home-screen app with Chat, Screen, and More tabs. The Screen
+tab is view-only until you tap **TAKE OVER**. Phones only install apps and allow
+push over HTTPS, so reach Drive through an HTTPS proxy first. See
+[server hosting](#server-hosting).
+
+1. Open Drive on the phone. On the first visit add `?token=<your-token>` if you
+   set `CASE_TOKEN`.
+2. On iPhone choose **Share**, then **Add to Home Screen**. On Android choose
+   **Install**.
+3. Open Drive from the home screen, then choose **More**, then **Turn on buzz**.
+
+Your phone buzzes when a handoff needs you or a schedule finishes. The
+notification names only the site and what it needs, never a prompt, code, or
+URL. iOS allows push only from the installed app. Drive keeps its push keys and
+subscriptions in `drive/` under `CASE_HOME`. Deleting `push.json` there turns
+buzz off for every phone.
+
+</details>
+
 <a id="computer-size-and-memory"></a>
 <details>
 <summary>Computer size and memory</summary>
