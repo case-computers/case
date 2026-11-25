@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CASE_TOOLS, chatAuth, resolveChatModel, openaiToolsToAnthropic,
+  CASE_TOOLS, chatAuth, resolveChatModel, resolveChatEffort, effortsForModel, openaiToolsToAnthropic,
   newAnthropicStreamCtx, anthropicEventToNdjson, tracesFromAnthropicMessage,
   histToAnthropicMessages, anthropicThinkingFor, caseToolPlan, clip,
 } from './case-tools.mjs';
@@ -17,12 +17,23 @@ import {
 // serve.mjs loads threads.json at import and rewrites it; never the developer's own.
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
 process.env.CASE_TURN_TOKENS = '10000';   // small enough for the scripted turns below to cross 80%
-const { runTurn, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
+const { runTurn, ALL_TOOLS, shq, pathOk, parseErr, parseFind, mimeFor, histTrim, histApplyCompaction, histCloseOpenCalls, normHost, threadTurns, parseCaseUrl, liveCid, liveDestPath, livePathHasDotDot, tokenMatches, liveHeaders, hostOf, browserOk, extraPlan, pageFile, snapshotElide, stashShot, pushShot, hydrateShots, migrateShots, stashAttach, resolveAttach, hydrateAttaches, attachKind, ATTACH_MAX, sseEvents } = await import('./serve.mjs');
 
 const html = fs.readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 assert.match(html, /x-anthropic-key/);
 assert.match(html, /ANTHROPIC KEY/);
-assert.match(html, /claude-sonnet-4-6/);
+assert.match(html, /claude-sonnet-5-5/);
+assert.match(html, /\{id:'claude-sonnet-5-5',name:'Sonnet 5\.5'/);
+assert.match(html, /\{id:'claude-opus-5-5',name:'Opus 5\.5'/);
+assert.match(html, /\{id:'claude-haiku-5-5',name:'Haiku 5\.5'/);
+assert.match(html, /\{id:'gpt-6-astra',name:'GPT-6 Astra'/);
+assert.match(html, /\{id:'gpt-6\.1-sol',name:'GPT-6\.1 Sol'/);
+assert.match(html, /\{id:'gpt-6-luna',name:'GPT-6 Luna'/);
+assert.match(html, /function nudgeDesk\(/);
+assert.match(html, /if\(wasHidden\)\{\s*wasHidden=false;\s*nudgeDesk\(\)/);
+assert.ok(!/if\(wasHidden\)\{wasHidden=false;reconnectDesk\(\)\}/.test(html), 'brief tab hide must not tear down a live desk');
+assert.match(html, /addEventListener\('paste'/);
+assert.match(html, /addEventListener\('drop'/);
 assert.match(html, /id="attachStart"/);
 assert.match(html, /id="attachPick"/);
 assert.match(html, /id="schedModal"/);
@@ -321,8 +332,20 @@ assert.equal(slp.rel, '/computers/c_ab/sleep');
 const hr = extraPlan('handoff_request', { prompt: 'ok?', kind: 'approval' }, 'c_ab');
 assert.equal(hr.rel, '/computers/c_ab/handoffs');
 assert.deepEqual(hr.body, { kind: 'approval', prompt: 'ok?' });
+const hw = extraPlan('handoff_wait', { handoff_id: 'h_1', max_wait_s: 60 }, 'c_ab');
+assert.equal(hw.method, 'GET');
+assert.equal(hw.rel, '/handoffs/h_1/wait?after_status=pending&timeout_s=60');
+assert.equal(hw.timeoutMs, 70000);
+assert.equal(extraPlan('handoff_wait', { handoff_id: 'h_1', max_wait_s: 1.5 }, 'c_ab').rel,
+  '/handoffs/h_1/wait?after_status=pending&timeout_s=1');
 assert.equal(extraPlan('handoff_list', {}, 'c_ab').rel, '/handoffs?status=pending');
 assert.equal(extraPlan('handoff_get', { handoff_id: 'h_1' }, 'c_ab').rel, '/handoffs/h_1');
+assert.equal(caseToolPlan('computer_navigate', { url: 'https://x', target_id: 'tab1' }, 'c_ab').json.target_id, 'tab1');
+assert.equal(caseToolPlan('computer_eval', { expression: '1', target_id: 'tab1' }, 'c_ab').json.target_id, 'tab1');
+assert.match(extraPlan('computer_snapshot', { target_id: 'tab1' }, 'c_ab').rel, /[?&]target_id=tab1$/);
+assert.equal(extraPlan('computer_click_element', { ref: 1, target_id: 'tab1' }, 'c_ab').body.target_id, 'tab1');
+assert.equal(extraPlan('computer_fill', { fields: [], target_id: 'tab1' }, 'c_ab').body.target_id, 'tab1');
+assert.equal(extraPlan('computer_capture_start', { url_pattern: 'x', target_id: 'tab1' }, 'c_ab').body.target_id, 'tab1');
 assert.equal(extraPlan('computer_list', {}, 'c_ab').rel, '/computers');
 assert.equal(extraPlan('computer_create', { name: 'desk' }, 'c_ab').method, 'POST');
 assert.deepEqual(extraPlan('computer_create', { name: 'desk' }, 'c_ab').body, { name: 'desk' });
@@ -331,10 +354,25 @@ assert.deepEqual(chatAuth({ 'x-openai-key': 'sk-openai' }), { provider: 'openai'
 assert.deepEqual(chatAuth({ 'x-anthropic-key': 'sk-ant-test' }), { provider: 'anthropic', key: 'sk-ant-test' });
 assert.deepEqual(chatAuth({}), { provider: '', key: '' });
 assert.equal(chatAuth({ 'x-anthropic-key': 'sk-ant-test', 'x-openai-key': 'sk-openai' }).provider, 'anthropic');
-assert.equal(resolveChatModel('gpt-5.6-luna', 'openai'), 'gpt-5.6-luna');
-assert.equal(resolveChatModel('nope', 'openai'), 'gpt-5.6-terra');
-assert.equal(resolveChatModel('claude-opus-4-6', 'anthropic'), 'claude-opus-4-6');
-assert.equal(resolveChatModel('gpt-5.6-terra', 'anthropic'), 'claude-sonnet-4-6');
+assert.equal(resolveChatModel('gpt-6-luna', 'openai'), 'gpt-6-luna');
+assert.equal(resolveChatModel('gpt-6-astra', 'openai'), 'gpt-6-astra');
+assert.equal(resolveChatModel('gpt-6.1-sol', 'openai'), 'gpt-6.1-sol');
+assert.equal(resolveChatModel('nope', 'openai'), 'gpt-6-luna');
+assert.equal(resolveChatModel('claude-opus-5-5', 'anthropic'), 'claude-opus-5-5');
+assert.equal(resolveChatModel('claude-sonnet-5-5', 'anthropic'), 'claude-sonnet-5-5');
+assert.equal(resolveChatModel('claude-haiku-5-5', 'anthropic'), 'claude-haiku-5-5');
+assert.equal(resolveChatModel('gpt-6.1-sol', 'anthropic'), 'claude-sonnet-5-5');
+assert.deepEqual(effortsForModel('gpt-6-astra'), ['low', 'medium', 'high', 'xhigh', 'max']);
+assert.deepEqual(effortsForModel('gpt-6.1-sol'), ['low', 'medium', 'high', 'xhigh', 'max']);
+assert.deepEqual(effortsForModel('gpt-6-luna'), ['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+assert.deepEqual(effortsForModel('claude-opus-5-5'), ['low', 'medium', 'high', 'xhigh', 'max']);
+assert.equal(resolveChatEffort('gpt-6-astra', 'none'), 'low');
+assert.equal(resolveChatEffort('gpt-6.1-sol', 'none'), 'low');
+assert.equal(resolveChatEffort('gpt-6-luna', 'none'), 'none');
+assert.equal(resolveChatEffort('claude-sonnet-5-5', 'xhigh'), 'xhigh');
+assert.equal(resolveChatEffort('gpt-6-astra', 'bogus'), 'high');
+assert.match(html, /effort==='none'&&allowed\.includes\('low'\)\?'low'/,
+  'switching off Luna none clamps to low like the server, not high');
 {
   const tools = openaiToolsToAnthropic(CASE_TOOLS);
   assert.equal(tools[0].name, 'computer_navigate');
@@ -483,6 +521,8 @@ assert.equal(pageFile('/deploy.html'), '/deploy.html');
   assert.match(loopFn, /finishTurn\(hist, thread\)/);
   assert.match(serveSrc, /function finishTurn[\s\S]*?histCloseOpenCalls\(hist\.items\)/);
   assert.match(loopFn, /withRateRetry\(round, emit, 5, gone\.signal\)/);
+  assert.match(loopFn, /Look before you route/, 'dev prompt says act on the page before trying another url');
+  assert.match(loopFn, /handoff_request\(kind=device\)/, 'dev prompt names the human escape hatch');
   assert.match(chatFn, /res\.on\('close', \(\) => \{ clientGone\(\); gone\.abort\(\); \}\)/);
   assert.match(loopFn, /responses\.create\(params, \{ signal: rc\.signal \}\)/);
   assert.ok(!/responses\.create\(params\)/.test(loopFn), 'every round is abortable');
@@ -800,6 +840,22 @@ async function withAnthropic(rounds, fn) {
   } finally {
     cased.close();
   }
+}
+
+{
+  const serveSrc = fs.readFileSync(fileURLToPath(new URL('./serve.mjs', import.meta.url)), 'utf8');
+  const tool = (n) => ALL_TOOLS.find((t) => t.name === n);
+  const hw = tool('handoff_wait');
+  assert.ok(hw, 'handoff_wait is offered to the model');
+  assert.equal(hw.parameters.properties.max_wait_s.type, 'integer');
+  assert.ok(!/Re-snapshot after any click/.test(tool('computer_snapshot').description),
+    'snapshot text no longer tells the model to re-snapshot every click');
+  assert.ok(tool('computer_tabs').parameters.properties.action.enum.includes('close_others'));
+  assert.match(tool('computer_wait_for').description, /On timeout the result carries/);
+  assert.match(serveSrc, /query in the URL when the site supports it/, 'search-via-URL rule in the developer prompt');
+  assert.match(serveSrc, /computer_exec first, verify once/, 'shell-before-GUI rule in the developer prompt');
+  assert.match(serveSrc, /close_others also closes tabs the user keeps open/, 'own tabs by id; close_others only on request');
+  console.log('agent efficiency text ok');
 }
 
 console.log('web-ui serve: all checks pass');

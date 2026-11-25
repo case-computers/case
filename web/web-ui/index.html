@@ -306,6 +306,7 @@ body.teaching .deskwrap::before{
 .qchip .qtxt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:38ch}
 .qchip .qx{border:0;background:transparent;cursor:pointer;color:var(--faint);font-size:12px;padding:0 2px}
 .qchip .qx:hover{color:var(--ink)}
+.work.drop .compose-inner{outline:1px dashed var(--ink);outline-offset:4px}
 .ask{min-width:0}
 .ask textarea{min-width:0}
 .ask .btn{flex-shrink:0}
@@ -547,7 +548,7 @@ body.acting .deskwrap::before{
 <div class="main">
   <div class="mbar"><button type="button" class="btn" id="schedBtnM">SCHEDULES</button><button type="button" class="btn" id="keyBtnM">KEY</button></div>
   <div class="stage">
-    <section class="work">
+    <section class="work" id="work">
       <div class="log" id="log">
         <div class="log-inner" id="loginner">
           <div class="empty" id="emptyState">
@@ -730,22 +731,21 @@ const PROVIDER_STORE='drive2_provider';
 let provider=sessionStorage.getItem(PROVIDER_STORE)==='anthropic'?'anthropic':'openai';
 let openaiKey=sessionStorage.getItem(OPENAI_KEY_STORE)||'';
 let anthropicKey=sessionStorage.getItem(ANTHROPIC_KEY_STORE)||'';
-let model=sessionStorage.getItem('drive2_model')||'gpt-5.6-terra';
+let model=sessionStorage.getItem('drive2_model')||'gpt-6-luna';
 let effort=sessionStorage.getItem('drive2_effort')||'medium';
 const OPENAI_MODELS=[
-  {id:'gpt-5.6',name:'GPT-5.6',meta:'High'},
-  {id:'gpt-5.6-sol',name:'GPT-5.6 Sol',meta:'High'},
-  {id:'gpt-5.6-terra',name:'GPT-5.6 Terra',meta:'Medium'},
-  {id:'gpt-5.6-luna',name:'GPT-5.6 Luna',meta:'Max'}
+  {id:'gpt-6-astra',name:'GPT-6 Astra',meta:'Max',efforts:['low','medium','high','xhigh','max']},
+  {id:'gpt-6.1-sol',name:'GPT-6.1 Sol',meta:'High',efforts:['low','medium','high','xhigh','max']},
+  {id:'gpt-6-luna',name:'GPT-6 Luna',meta:'Fast',efforts:['none','low','medium','high','xhigh','max']}
 ];
 const ANTHROPIC_MODELS=[
-  {id:'claude-opus-4-6',name:'Opus 4.6',meta:'High'},
-  {id:'claude-sonnet-4-6',name:'Sonnet 4.6',meta:'Medium'},
-  {id:'claude-haiku-4-5',name:'Haiku 4.5',meta:'Fast'}
+  {id:'claude-opus-5-5',name:'Opus 5.5',meta:'High',efforts:['low','medium','high','xhigh','max']},
+  {id:'claude-sonnet-5-5',name:'Sonnet 5.5',meta:'Medium',efforts:['low','medium','high','xhigh','max']},
+  {id:'claude-haiku-5-5',name:'Haiku 5.5',meta:'Fast',efforts:['low','medium','high','xhigh','max']}
 ];
 function models(){return provider==='anthropic'?ANTHROPIC_MODELS:OPENAI_MODELS;}
 function currentKey(){return provider==='anthropic'?anthropicKey:openaiKey;}
-function defaultModel(){return provider==='anthropic'?'claude-sonnet-4-6':'gpt-5.6-terra';}
+function defaultModel(){return provider==='anthropic'?'claude-sonnet-5-5':'gpt-6-luna';}
 function setProvider(p){
   provider=p==='anthropic'?'anthropic':'openai';
   sessionStorage.setItem(PROVIDER_STORE,provider);
@@ -753,9 +753,21 @@ function setProvider(p){
     model=defaultModel();
     sessionStorage.setItem('drive2_model',model);
   }
+  clampEffort();
 }
 if(!models().some(m=>m.id===model)) model=defaultModel();
-const EFFORTS=['low','medium','high','xhigh','max'];
+const DEFAULT_EFFORTS=['low','medium','high','xhigh','max'];
+function effortsFor(){
+  const m=models().find(x=>x.id===model);
+  return (m&&m.efforts)||DEFAULT_EFFORTS;
+}
+function clampEffort(){
+  const allowed=effortsFor();
+  if(allowed.includes(effort)) return;
+  effort=effort==='none'&&allowed.includes('low')?'low':(allowed.includes('high')?'high':(allowed.includes('medium')?'medium':allowed[0]));
+  sessionStorage.setItem('drive2_effort',effort);
+}
+clampEffort();
 let boxHost='';
 let comp=null;          // {id,name,state,...}
 let apiUp=false; // cased reachable
@@ -966,6 +978,28 @@ function hookDesk(){
     deskFor=comp.id;
     $('deskframe').src='/live/'+encodeURIComponent(comp.id)+'/vnc.html?autoconnect=1&resize=scale&path=live/'+encodeURIComponent(comp.id)+'/websockify';
   }
+}
+function reconnectDesk(){
+  deskLoaded=false;
+  deskFor='';
+  const frame=$('deskframe');
+  if(frame)frame.removeAttribute('src');
+  hookDesk();
+}
+function deskRfbState(){
+  try{
+    return String($('deskframe').contentWindow?.UI?.rfb?._rfbConnectionState||'');
+  }catch{return '';}
+}
+function nudgeDesk(){
+  const state=deskRfbState();
+  if(state==='connected'||state==='connecting')return state;
+  try{
+    const ui=$('deskframe').contentWindow?.UI;
+    if(ui&&typeof ui.connect==='function'){ui.connect();return state||'nudge';}
+  }catch{}
+  reconnectDesk();
+  return state||'rebuild';
 }
 $('deskframe').addEventListener('load',()=>{
   try{
@@ -1214,9 +1248,10 @@ function pulseFiles(){
 function paintCfg(){
   const list=models();
   const m=list.find(x=>x.id===model)||list[0];
-  $('cfgLabel').textContent=m.name.replace(/^GPT-5\.6\s*/,'').toUpperCase()+(m.id==='gpt-5.6'?'5.6':'')+' · '+effort.toUpperCase();
+  $('cfgLabel').textContent=m.name.replace(/^GPT-6(?:\.\d+)?\s*/,'').toUpperCase()+' · '+effort.toUpperCase();
+  const efforts=effortsFor();
   $('cfgPop').innerHTML='<div class="cfg-sec">EFFORT</div>'
-    +EFFORTS.map(e=>'<button type="button" class="cfg-row'+(e===effort?' on':'')+'" data-e="'+e+'">'+e[0].toUpperCase()+e.slice(1)+'<span></span><span class="mark">'+(e===effort?'✓':'')+'</span></button>').join('')
+    +efforts.map(e=>'<button type="button" class="cfg-row'+(e===effort?' on':'')+'" data-e="'+e+'">'+e[0].toUpperCase()+e.slice(1)+'<span></span><span class="mark">'+(e===effort?'✓':'')+'</span></button>').join('')
     +'<div class="cfg-sec">MODEL</div>'
     +list.map(x=>'<button type="button" class="cfg-row'+(x.id===model?' on':'')+'" data-m="'+x.id+'">'+esc(x.name)+'<span class="meta">'+esc(x.meta)+'</span><span class="mark">'+(x.id===model?'✓':'')+'</span></button>').join('');
 }
@@ -1230,7 +1265,7 @@ $('cfgPop').addEventListener('click',e=>{
   const er=e.target.closest('[data-e]');
   const mr=e.target.closest('[data-m]');
   if(er){effort=er.dataset.e;sessionStorage.setItem('drive2_effort',effort);}
-  if(mr){model=mr.dataset.m;sessionStorage.setItem('drive2_model',model);}
+  if(mr){model=mr.dataset.m;sessionStorage.setItem('drive2_model',model);clampEffort();}
   if(er||mr)paintCfg();
 });
 document.addEventListener('click',e=>{
@@ -1440,6 +1475,90 @@ const paintQ=()=>{
 };
 const pending=[];
 const ATTACH_EXTS='png,jpg,jpeg,gif,webp,txt,md,csv,json,html,htm,js,mjs,css,py,sh,yml,yaml,toml,log,xml,pdf'.split(',');
+const ATTACH_MIME={
+  'image/png':'png','image/jpeg':'jpg','image/jpg':'jpg','image/gif':'gif','image/webp':'webp',
+  'application/pdf':'pdf','text/plain':'txt','text/markdown':'md','text/csv':'csv',
+  'application/json':'json','text/html':'html','text/css':'css','text/javascript':'js',
+  'application/javascript':'js'
+};
+function attachExt(file){
+  const fromName=(String(file&&file.name||'').split('.').pop()||'').toLowerCase();
+  if(fromName&&fromName!==String(file&&file.name||'').toLowerCase()&&ATTACH_EXTS.includes(fromName))return fromName;
+  return ATTACH_MIME[String(file&&file.type||'').toLowerCase()]||'';
+}
+function namedAttach(file){
+  const ext=attachExt(file);
+  if(!ext)return null;
+  const have=String(file.name||'');
+  if(have&&ATTACH_EXTS.includes((have.split('.').pop()||'').toLowerCase()))return file;
+  const mime=file.type||(ext==='jpg'?'image/jpeg':ext==='pdf'?'application/pdf':'image/'+ext);
+  return new File([file], (ext==='pdf'?'file.pdf':('image.'+ext)), {type:mime});
+}
+function filesFromData(dt){
+  if(!dt)return [];
+  const out=[];
+  if(dt.files&&dt.files.length)out.push(...dt.files);
+  if(!out.length&&dt.items){
+    for(const it of dt.items){
+      if(it.kind==='file'){const f=it.getAsFile();if(f)out.push(f);}
+    }
+  }
+  return out;
+}
+function isImageLike(file){
+  return /^image\//.test(String(file&&file.type||''))
+    ||/\.(heic|heif|tiff?|bmp|avif|png|jpe?g|gif|webp)$/i.test(String(file&&file.name||''));
+}
+async function toJpeg(file){
+  try{
+    const bmp=await createImageBitmap(file);
+    const s=Math.min(1,2560/Math.max(bmp.width,bmp.height));
+    const c=document.createElement('canvas');
+    c.width=Math.round(bmp.width*s);c.height=Math.round(bmp.height*s);
+    const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);g.drawImage(bmp,0,0,c.width,c.height);
+    const base=String(file.name||'image').replace(/\.[^.]*$/,'')||'image';
+    for(const qual of [0.85,0.7,0.5]){
+      const b=await new Promise(r=>c.toBlob(r,'image/jpeg',qual));
+      if(b&&b.size<=5*1024*1024)return new File([b],base+'.jpg',{type:'image/jpeg'});
+    }
+  }catch(_){}
+  return null;
+}
+let attaching=0;
+function queueIncoming(list){
+  let converting=0;
+  const added=[];
+  const rejected=[];
+  for(const raw of list||[]){
+    if(pending.length+attaching>=4){rejected.push({name:raw&&raw.name||'',reason:'cap'});break;}
+    const f=namedAttach(raw);
+    if(isImageLike(raw)&&(!f||(f.size>5*1024*1024&&/^image\//.test(f.type)))){
+      converting++;attaching++;
+      toJpeg(raw).then(j=>{
+        attaching--;
+        if(j&&pending.length<4){pending.push(j);paintAline();}
+        else{q.placeholder=(raw.name||'image')+' could not be read';setTimeout(()=>paint([comp].filter(Boolean)),2500);}
+      });
+      continue;
+    }
+    if(!f){rejected.push({name:raw&&raw.name||'',type:raw&&raw.type||'',reason:'type'});continue;}
+    if(f.size>5*1024*1024){
+      rejected.push({name:f.name,reason:'size'});
+      q.placeholder=f.name+' is over 5 MB';
+      setTimeout(()=>paint([comp].filter(Boolean)),2500);
+      continue;
+    }
+    pending.push(f);
+    added.push({name:f.name,type:f.type||'',size:f.size});
+  }
+  if(added.length){paintAline();}
+  else if(rejected.some(r=>r.reason==='type')){
+    const bad=rejected.find(r=>r.reason==='type');
+    q.placeholder=(bad&&bad.name?bad.name+' is not an allowed type':'that file type is not allowed');
+    setTimeout(()=>paint([comp].filter(Boolean)),2500);
+  }
+  return added.length+converting;
+}
 const paintAline=()=>{
   const al=$('aline');
   al.hidden=!pending.length;
@@ -1708,15 +1827,56 @@ $('attachStart').addEventListener('click',()=>{
 });
 $('attachPick').addEventListener('change',()=>{
   const pick=$('attachPick');
-  for(const f of pick.files||[]){
-    if(pending.length>=4)break;
-    const ext=(f.name.split('.').pop()||'').toLowerCase();
-    if(!ATTACH_EXTS.includes(ext)){q.placeholder=f.name+' is not an allowed type';setTimeout(()=>paint([comp].filter(Boolean)),2500);continue;}
-    if(f.size>5*1024*1024){q.placeholder=f.name+' is over 5 MB';setTimeout(()=>paint([comp].filter(Boolean)),2500);continue;}
-    pending.push(f);
-  }
+  queueIncoming(pick.files||[]);
   pick.value='';
-  paintAline();
+});
+$('work').addEventListener('paste',e=>{
+  const files=filesFromData(e.clipboardData);
+  const types=[...(e.clipboardData&&e.clipboardData.types||[])];
+  if(!files.length)return;
+  const hasText=types.includes('text/plain')&&!!String(e.clipboardData.getData('text/plain')||'').trim();
+  if(queueIncoming(files)&&!hasText)e.preventDefault();
+});
+const dragTypes=e=>[...(e.dataTransfer&&e.dataTransfer.types||[])];
+function droppedImageUrl(dt){
+  const html=dt.getData('text/html')||'';
+  const m=html.match(/<img[^>]+src=["']([^"']+)/i);
+  if(m&&/^(data:image\/|blob:|https?:)/i.test(m[1]))return m[1];
+  const u=((dt.getData('text/uri-list')||'').split('\n').find(l=>l&&!l.startsWith('#'))||'').trim();
+  return /^data:image\//i.test(u)||/^https?:[^?#]*\.(png|jpe?g|gif|webp|bmp|avif|tiff?|heic|heif)([?#]|$)/i.test(u)?u:'';
+}
+$('work').addEventListener('dragover',e=>{
+  const t=dragTypes(e);
+  if(!t.includes('Files')&&!(t.includes('text/uri-list')&&e.target!==q))return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect='copy';
+  $('work').classList.add('drop');
+});
+$('work').addEventListener('dragleave',e=>{
+  if(!$('work').contains(e.relatedTarget))$('work').classList.remove('drop');
+});
+$('work').addEventListener('drop',e=>{
+  $('work').classList.remove('drop');
+  if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files'))e.preventDefault();
+  const files=filesFromData(e.dataTransfer);
+  if(files.length){queueIncoming(files);return;}
+  const url=e.dataTransfer&&droppedImageUrl(e.dataTransfer);
+  if(!url)return;
+  e.preventDefault();
+  if(pending.length+attaching>=4)return;
+  attaching++;
+  fetch(url,{signal:AbortSignal.timeout(15000)}).then(r=>r.ok?r.blob():Promise.reject()).then(b=>{
+    attaching--;
+    const name=(url.split(/[?#]/)[0].split('/').pop()||'image').slice(0,80);
+    queueIncoming([new File([b],name,{type:b.type})]);
+  }).catch(()=>{attaching--;q.placeholder='that image only pastes: copy it and press ⌘V';setTimeout(()=>paint([comp].filter(Boolean)),3000);});
+});
+document.addEventListener('dragover',e=>{
+  if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files'))e.preventDefault();
+});
+document.addEventListener('drop',e=>{
+  if(e.target&&e.target.closest&&e.target.closest('#rail'))return;
+  if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files'))e.preventDefault();
 });
 $('teachStart').addEventListener('click',()=>{
   $('plusPop').hidden=true;
@@ -1807,6 +1967,15 @@ if(rw>=280){$('rail').style.flexBasis=rw+'px';$('rail').style.width=rw+'px';}
 $('railSplit').addEventListener('dblclick',()=>{const r=$('rail');r.style.flexBasis='';r.style.width='';sessionStorage.removeItem('drive2_rail');placeTabLine();});
 
 /* ---------- boot ---------- */
+let wasHidden=false;
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){wasHidden=true;return;}
+  if(wasHidden){
+    wasHidden=false;
+    nudgeDesk();
+  }
+  refresh();
+});
 paintCfg();
 placeTabLine();
 paintOmni(false);

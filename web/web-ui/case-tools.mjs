@@ -12,8 +12,8 @@ import https from 'node:https';
 import Anthropic from '@anthropic-ai/sdk';
 
 export const CASE_TOOLS = [
-  { type: 'function', name: 'computer_navigate', description: 'Point the computer browser at url and block until the page has loaded. Returns {ok, url, title, text, snapshot} — text is the first 2000 chars of the page; snapshot holds the numbered elements, so do NOT call computer_snapshot after this. Same-page #anchor jumps are not navigations.', parameters: { type: 'object', properties: { url: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['url'], additionalProperties: false } },
-  { type: 'function', name: 'computer_eval', description: 'Evaluate JS in the active tab (CDP, promises awaited). Prefer this over screenshots for page content. Return plain values — DOM nodes are not serialisable. To read a page as prose, document.body.innerText. Do not drive location.assign from here; use computer_navigate.', parameters: { type: 'object', properties: { expression: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['expression'], additionalProperties: false } },
+  { type: 'function', name: 'computer_navigate', description: 'Point the computer browser at url and block until the page has loaded. Returns {ok, url, title, text, snapshot} — text is the first 2000 chars of the page; snapshot holds the numbered elements, so do NOT call computer_snapshot after this. Same-page #anchor jumps are not navigations.', parameters: { type: 'object', properties: { url: { type: 'string' }, timeout_s: { type: 'number' }, target_id: { type: 'string' } }, required: ['url'], additionalProperties: false } },
+  { type: 'function', name: 'computer_eval', description: 'Evaluate JS in the active tab (CDP, promises awaited). Prefer this over screenshots for page content. Return plain values — DOM nodes are not serialisable. To read a page as prose, document.body.innerText. Do not drive location.assign from here; use computer_navigate.', parameters: { type: 'object', properties: { expression: { type: 'string' }, timeout_s: { type: 'number' }, target_id: { type: 'string' } }, required: ['expression'], additionalProperties: false } },
   { type: 'function', name: 'computer_action', description: 'UI action on the desktop (1280x800 by default): click|double_click|move|drag|scroll|type|key|wait. Coordinates are pixels, origin top-left. keys uses xdotool syntax (ctrl+l, Return). For elements INSIDE a web page prefer computer_snapshot + computer_click_element; use this for the desktop itself, canvas, shortcuts, and scrolling.', parameters: { type: 'object', properties: { type: { type: 'string', enum: ['click', 'double_click', 'move', 'drag', 'scroll', 'type', 'key', 'wait'] }, x: { type: 'number' }, y: { type: 'number' }, button: { type: 'string', enum: ['left', 'middle', 'right'] }, text: { type: 'string' }, keys: { type: 'string' }, dy: { type: 'number' }, ms: { type: 'number' }, from_x: { type: 'number' }, from_y: { type: 'number' }, to_x: { type: 'number' }, to_y: { type: 'number' } }, required: ['type'], additionalProperties: false } },
   { type: 'function', name: 'computer_exec', description: 'Run a shell command on the computer (bash, as user agent).', parameters: { type: 'object', properties: { command: { type: 'string' }, timeout_s: { type: 'number' } }, required: ['command'], additionalProperties: false } },
 ];
@@ -28,11 +28,15 @@ export function caseToolPlan(name, args, cid) {
   const id = encodeURIComponent(cid);
   if (name === 'computer_navigate') {
     const t = Math.min(Math.max(Number(a.timeout_s) || 30, 1), 120);
-    return { method: 'POST', path: `/computers/${id}/navigate?wake=true`, json: { url: a.url, timeout_s: t }, timeoutMs: (t + 20) * 1000, act: `navigate ${a.url || ''}` };
+    const json = { url: a.url, timeout_s: t };
+    if (a.target_id) json.target_id = a.target_id;
+    return { method: 'POST', path: `/computers/${id}/navigate?wake=true`, json, timeoutMs: (t + 20) * 1000, act: `navigate ${a.url || ''}` };
   }
   if (name === 'computer_eval') {
     const t = Math.min(Math.max(Number(a.timeout_s) || 20, 1), 120);
-    return { method: 'POST', path: `/computers/${id}/eval?wake=true`, json: { expression: a.expression, timeout_s: t }, timeoutMs: (t + 20) * 1000, act: 'eval' };
+    const json = { expression: a.expression, timeout_s: t };
+    if (a.target_id) json.target_id = a.target_id;
+    return { method: 'POST', path: `/computers/${id}/eval?wake=true`, json, timeoutMs: (t + 20) * 1000, act: 'eval' };
   }
   if (name === 'computer_action') {
     const json = { type: a.type, screenshot: false };
@@ -182,15 +186,24 @@ export function streamEventToNdjson(ev) {
 }
 
 const MODELS = {
-  'gpt-5.6': 'gpt-5.6',
-  'gpt-5.6-sol': 'gpt-5.6-sol',
-  'gpt-5.6-terra': 'gpt-5.6-terra',
-  'gpt-5.6-luna': 'gpt-5.6-luna',
+  'gpt-6-astra': 'gpt-6-astra',
+  'gpt-6.1-sol': 'gpt-6.1-sol',
+  'gpt-6-luna': 'gpt-6-luna',
 };
 export const ANTHROPIC_MODELS = {
-  'claude-opus-4-6': 'claude-opus-4-6',
-  'claude-sonnet-4-6': 'claude-sonnet-4-6',
-  'claude-haiku-4-5': 'claude-haiku-4-5',
+  'claude-opus-5-5': 'claude-opus-5-5',
+  'claude-sonnet-5-5': 'claude-sonnet-5-5',
+  'claude-haiku-5-5': 'claude-haiku-5-5',
+};
+
+export const MODEL_EFFORTS = {
+  'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-6.1-sol': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-opus-5-5': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-sonnet-5-5': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-haiku-5-5': ['low', 'medium', 'high', 'xhigh', 'max'],
+  codex: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 export function chatAuth(headers = {}) {
@@ -209,8 +222,20 @@ export function envDriveAuth(env = process.env) {
 }
 
 export function resolveChatModel(requested, provider) {
-  if (provider === 'anthropic') return ANTHROPIC_MODELS[requested] || 'claude-sonnet-4-6';
-  return MODELS[requested] || 'gpt-5.6-terra';
+  if (provider === 'anthropic') return ANTHROPIC_MODELS[requested] || 'claude-sonnet-5-5';
+  return MODELS[requested] || 'gpt-6-luna';
+}
+
+export function effortsForModel(model) {
+  return MODEL_EFFORTS[model] || MODEL_EFFORTS.codex;
+}
+
+export function resolveChatEffort(model, requested, fallback = 'high') {
+  const allowed = effortsForModel(model);
+  if (allowed.includes(requested)) return requested;
+  if (requested === 'none' && allowed.includes('low')) return 'low';
+  if (allowed.includes(fallback)) return fallback;
+  return allowed.includes('medium') ? 'medium' : allowed[0];
 }
 
 export function openaiToolsToAnthropic(tools) {
@@ -471,7 +496,7 @@ export async function anthropicToolLoop({
 }) {
   const client = new Anthropic({ apiKey: key, maxRetries: 0 });
   const antTools = openaiToolsToAnthropic(tools);
-  const antEffort = effort === 'none' ? 'low' : (effort || 'medium');
+  const antEffort = resolveChatEffort(model, effort === 'none' ? 'low' : (effort || 'medium'), 'medium');
   const params = {
     model,
     max_tokens: 16384,
