@@ -31,6 +31,7 @@ TOKEN = os.environ["DESK_TOKEN"]
 CDP = "http://127.0.0.1:9222"
 CAP = 64 * 1024
 CAPTURE_CAP = 256 * 1024   # per captured response body; GraphQL timelines run 100–500 KB
+TARGET_RE = re.compile(r"^[A-Za-z0-9-]{4,64}$")
 
 app = FastAPI()
 
@@ -147,7 +148,7 @@ def health():
         chrome = requests.get(f"{CDP}/json/version", timeout=2).ok
     except Exception:
         chrome = False
-    return {"ok": True, "chrome": chrome}
+    return {"ok": True, "chrome": chrome, "targeted_tabs": True}
 
 
 @app.get("/screenshot")
@@ -346,27 +347,63 @@ def file_get(path: str):
 
 # ---------- CDP ----------
 
-def page_ws():
-    """A websocket to the most-recently-active Chromium page."""
-    pages = [t for t in requests.get(f"{CDP}/json/list", timeout=5).json() if t["type"] == "page"]
+def check_target_id(tid):
+    """None/empty → active tab. Invalid → ValueError. Else the CDP target id."""
+    if tid is None or tid == "":
+        return None
+    if not TARGET_RE.fullmatch(str(tid)):
+        raise ValueError("invalid target_id")
+    return str(tid)
+
+
+def page_ws_url(pages, target_id=None):
+    """Pick a page target's websocket URL from CDP /json/list entries."""
+    pages = [t for t in (pages or []) if t.get("type") == "page"]
     if not pages:
         raise RuntimeError("no chromium page target")
-    # suppress_origin: chromium 136+ rejects CDP websockets with an Origin header
-    return websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=30,
+    if not target_id:
+        return pages[0]["webSocketDebuggerUrl"]
+    for t in pages:
+        if t.get("id") == target_id and t.get("webSocketDebuggerUrl"):
+            return t["webSocketDebuggerUrl"]
+    raise RuntimeError(f"no chromium page target {target_id}")
+
+
+def page_ws(target_id=None):
+    """A websocket to a Chromium page."""
+    pages = requests.get(f"{CDP}/json/list", timeout=5).json()
+    return websocket.create_connection(page_ws_url(pages, target_id), timeout=30,
                                        suppress_origin=True)
 
 
 class Tab:
-    """One websocket to the most-recently-active Chromium page."""
+    """One websocket to a Chromium page. Default: most-recently-active (`pages[0]`)."""
 
-    def __init__(self):
-        self.ws = page_ws()
+    def __init__(self, target_id=None):
+        self.ws = page_ws(target_id)
         self._id = 0
 
-    def cmd(self, method, **params):
+    CMD_DEADLINE_S = 60
+
+    def _budget(self, deadline_s=None):
+        if deadline_s:
+            return float(deadline_s)
+        try:
+            sock = self.ws.gettimeout()
+        except Exception:
+            sock = None
+        return max(float(self.CMD_DEADLINE_S), float(sock or 0))
+
+    def cmd(self, method, deadline_s=None, **params):
         self._id += 1
         self.ws.send(json.dumps({"id": self._id, "method": method, "params": params}))
+        budget = self._budget(deadline_s)
+        deadline = time.time() + budget
         while True:
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"CDP {method}: no reply in {budget:.0f}s "
+                    "(browser unresponsive or websocket silently dead)")
             m = json.loads(self.ws.recv())
             if m.get("id") == self._id:
                 if "error" in m:
@@ -453,6 +490,24 @@ def press_enter(tab):
         tab.cmd("Input.dispatchKeyEvent", **kw)
 
 
+ILLEGAL_RETURN = "Illegal return statement"
+
+
+def prepare_expression(tab, expr):
+    """A top-level `return x`, the way agents write it, is a parse error: run it as an
+    async function body. Checked with compileScript so nothing ever executes twice."""
+    if "return" not in expr:
+        return expr
+    tab.cmd("Runtime.enable")
+    c = tab.cmd("Runtime.compileScript", expression=expr, sourceURL="", persistScript=False)
+    exc = c.get("exceptionDetails")
+    if exc:
+        desc = str(exc.get("exception", {}).get("description") or exc.get("text") or "")
+        if ILLEGAL_RETURN in desc:
+            return f"(async()=>{{{expr}\n}})()"
+    return expr
+
+
 @app.post("/eval")
 def eval_(b: dict = Body(...)):
     gen = state["inject_gen"]
@@ -461,14 +516,18 @@ def eval_(b: dict = Body(...)):
     if "expression" not in b:
         return err(400, "bad_request", "body needs 'expression'")
     try:
+        tid = check_target_id(b.get("target_id"))
+    except ValueError:
+        return err(400, "bad_request", "need a valid target_id from tabs list")
+    try:
         timeout = min(int(b.get("timeout_s", 20)), 120)
     except (TypeError, ValueError):
         return err(400, "bad_request", "timeout_s must be an integer")
     try:
-        tab = Tab()
+        tab = Tab(tid)
         try:
             tab.ws.settimeout(timeout + 5)
-            r = tab.cmd("Runtime.evaluate", expression=b["expression"],
+            r = tab.cmd("Runtime.evaluate", expression=prepare_expression(tab, b["expression"]),
                         returnByValue=True, awaitPromise=True, timeout=timeout * 1000)
         finally:
             tab.close()
@@ -1034,6 +1093,16 @@ def capture_step(msg, pattern_re, want, pending, buf):
     return []
 
 
+def open_capture_ws(target_id=None):
+    """Connect to a page target and enable Network events before capture starts."""
+    pages = requests.get(f"{CDP}/json/list", timeout=5).json()
+    ws = websocket.create_connection(page_ws_url(pages, target_id), timeout=30,
+                                     suppress_origin=True)
+    ws.settimeout(2)
+    ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
+    return ws
+
+
 def capture_worker(cap):
     """Own a persistent ws to the page target and pump Network events into cap['buf'].
 
@@ -1045,9 +1114,7 @@ def capture_worker(cap):
     pending = {}          # our command id -> {url,status}, awaiting body reply
     next_id = [10000]     # keep clear of any low ids; events have no id anyway
     try:
-        ws = page_ws()
-        ws.settimeout(2)
-        ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
+        ws = cap["ws"]
         while not cap["stop"].is_set():
             try:
                 msg = json.loads(ws.recv())
@@ -1098,10 +1165,18 @@ def capture_start(b: dict = Body(...)):
         re.compile(pattern)
     except re.error as e:
         return err(400, "bad_request", f"invalid regex: {e}")
+    try:
+        tid = check_target_id(b.get("target_id"))
+    except ValueError:
+        return err(400, "bad_request", "need a valid target_id from tabs list")
+    try:
+        ws = open_capture_ws(tid)
+    except Exception as e:
+        return err(502, "capture_error", f"{type(e).__name__}: {e}")
     _stop_capture()
     # maxlen 100 x CAPTURE_CAP (256 KB) = ~25 MB worst-case buffer; oldest drop on overflow
     cap = {"stop": threading.Event(), "buf": deque(maxlen=100),
-           "pattern": pattern, "error": None}
+           "pattern": pattern, "error": None, "target_id": tid, "ws": ws}
     cap["thread"] = threading.Thread(target=capture_worker, args=(cap,), daemon=True)
     state["capture"] = cap
     cap["thread"].start()

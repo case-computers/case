@@ -6,10 +6,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Drive · case</title>
 <meta name="robots" content="noindex">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 340 260'%3E%3Cg fill='none' stroke='%230a0a0a' stroke-width='22' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M 140 62 L 140 40 Q 140 30 150 30 L 190 30 Q 200 30 200 40 L 200 62'/%3E%3Crect x='30' y='62' width='280' height='168' rx='24'/%3E%3C/g%3E%3Crect x='150' y='116' width='40' height='60' fill='%232563eb'/%3E%3C/svg%3E">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#ffffff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Drive">
 <style>
 :root{
   --ink:#0a0a0a; --accent:#2563eb; --paper:#ffffff;
@@ -19,6 +25,11 @@
   --sans:'Inter',-apple-system,'Helvetica Neue',Arial,sans-serif;
   --ease:cubic-bezier(.22,1,.36,1);
   --t:220ms; --t-slow:300ms;
+  --motion-press:120ms; --motion-ui:200ms; --motion-travel:340ms; --motion-settle:520ms;
+  --ease-contact:cubic-bezier(.2,0,.2,1);
+  --ease-travel:cubic-bezier(.16,1,.3,1);
+  --ease-settle:cubic-bezier(.2,.8,.2,1.04);
+  --press-scale:.985;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden}
@@ -33,7 +44,7 @@ a{color:inherit}
 ::selection{background:var(--accent);color:#fff}
 button,textarea,input{font:inherit;color:inherit}
 @keyframes blink{50%{opacity:0}}
-@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+@keyframes rise{from{transform:translateY(8px)}}
 @keyframes pop-in{from{opacity:0;transform:translateY(4px) scale(.98)}}
 @keyframes slidein{from{opacity:0;transform:translateX(6px)}}
 @keyframes sweep{from{transform:translateX(-100%)}to{transform:translateX(400%)}}
@@ -103,8 +114,15 @@ button,textarea,input{font:inherit;color:inherit}
   font-family:var(--mono);font-size:14px;line-height:1;color:var(--faint);
   transition:opacity 120ms var(--ease),color var(--t) var(--ease);
 }
-.thread:hover .tx,.thread:focus-within .tx{opacity:1;pointer-events:auto}
-.thread:hover .age,.thread:focus-within .age{visibility:hidden}
+@media(hover:hover) and (pointer:fine){
+  .thread:hover .tx,.thread:focus-within .tx{opacity:1;pointer-events:auto}
+  .thread:hover .age,.thread:focus-within .age{visibility:hidden}
+}
+@media(hover:none), (pointer:coarse){
+  .thread .tx{position:static;opacity:1;pointer-events:auto;min-width:44px;min-height:44px;padding:8px}
+  .thread .age{display:none}
+}
+.thread-hit{min-height:44px;touch-action:manipulation}
 .thread .tx:hover,.thread .tx:focus-visible{color:var(--warn)}
 .thread-slot{display:grid;grid-template-rows:1fr;transition:grid-template-rows var(--t-slow) var(--ease)}
 .thread-slot.out{grid-template-rows:0fr}
@@ -142,9 +160,10 @@ body.split-drag iframe{pointer-events:none}
 .main{grid-column:3;display:flex;flex-direction:column;min-width:0;min-height:0}
 .stage{flex:1;display:flex;min-height:0}
 .work{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
-.log{flex:1;overflow:auto;padding:30px clamp(18px,3.5vw,44px) 10px;scroll-behavior:smooth}
+.log{flex:1 1 0;min-height:0;overflow:auto;padding:30px clamp(18px,3.5vw,44px) 10px;overscroll-behavior:contain;touch-action:pan-y}
 .log-inner{max-width:42rem;margin:0 auto;width:100%}
 .turn{margin:0 0 24px;animation:rise var(--t-slow) var(--ease) backwards}
+.turn.history{animation:none}
 .k{font-family:var(--mono);font-size:10px;letter-spacing:.2em;color:var(--faint);margin-bottom:8px}
 .k.sys{color:var(--accent)}
 .turn.you{text-align:right}
@@ -306,6 +325,7 @@ body.teaching .deskwrap::before{
 .qchip .qtxt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:38ch}
 .qchip .qx{border:0;background:transparent;cursor:pointer;color:var(--faint);font-size:12px;padding:0 2px}
 .qchip .qx:hover{color:var(--ink)}
+.work.drop .compose-inner{outline:1px dashed var(--ink);outline-offset:4px}
 .ask{min-width:0}
 .ask textarea{min-width:0}
 .ask .btn{flex-shrink:0}
@@ -460,26 +480,29 @@ body.acting .deskwrap::before{
 .modal{display:none;position:fixed;inset:0;z-index:40;background:rgba(10,10,10,.35);align-items:center;justify-content:center;padding:24px}
 .modal.on{display:flex}
 .modal-card{
+  min-width:0;max-height:100%;overflow:auto;overscroll-behavior:contain;
   width:min(420px,100%);background:var(--paper);border:1px solid var(--soft);
   box-shadow:0 4px 12px rgba(10,10,10,.08),0 24px 64px -16px rgba(10,10,10,.22);
   padding:22px 22px 18px;animation:rise var(--t) var(--ease);
 }
 .modal-card h3{font-family:var(--mono);font-size:12px;letter-spacing:.18em;margin-bottom:8px}
 .modal-card p{font-size:13px;line-height:1.55;color:var(--mut);margin-bottom:14px}
-.modal-card input{
+.modal-card input:where(:not([type=radio]):not([type=checkbox])){
   width:100%;border:1px solid var(--ink);padding:9px 11px;font-family:var(--mono);font-size:12px;outline:none;
 }
 .modal-card input:focus{border-color:var(--accent)}
 .modal-actions{display:flex;gap:8px;margin-top:12px;justify-content:flex-end}
-.modal-head{display:flex;align-items:stretch;gap:8px;margin-bottom:14px}
+.modal-head{display:flex;align-items:center;gap:8px;margin-bottom:14px;position:sticky;top:-22px;background:var(--paper);z-index:1}
 .mbar{display:none;align-items:center;gap:10px;padding:9px 12px;background:var(--field);border-bottom:1px solid var(--soft)}
+.mbar .burger{border:0;background:transparent;font-size:18px;line-height:1;padding:2px 8px;cursor:pointer;color:var(--ink)}
+.scrim{display:none;position:fixed;inset:0;z-index:44;background:rgba(10,10,10,.35);border:0;padding:0;cursor:pointer}
 .mbar #schedBtnM{margin-left:auto}
 .mbar #keyBtnM{margin-left:6px}
 .sched-card{width:min(520px,100%)}
 .sched-card h3{margin:0}
 .sched-list{margin:0 0 16px;max-height:40vh;overflow:auto}
 .sched-row{
-  display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:start;
+  display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:start;overflow-wrap:anywhere;
   padding:10px 0;border-bottom:1px solid var(--soft);
 }
 .sched-row .sn{font-size:13px;font-weight:600}
@@ -493,7 +516,7 @@ body.acting .deskwrap::before{
 }
 .sched-card textarea:focus,.sched-card input:focus{border-color:var(--accent);background:var(--paper)}
 .sched-when{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px;font-size:13px}
-.sched-when label{margin:0;color:var(--ink);font-size:13px}
+.sched-when label{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;margin:0;color:var(--ink);font-size:13px}
 .sched-when input[type=time],.sched-when input[type=number]{width:auto;max-width:8rem}
 .sched-when select{border:1px solid var(--soft);background:var(--field);padding:7px 8px;font-size:12px;max-width:16rem}
 .sched-when.interval #schedTz,.sched-when.interval #schedDaily{opacity:.4;pointer-events:none}
@@ -508,23 +531,119 @@ body.acting .deskwrap::before{
 }
 .key-tab + .key-tab{border-left:1px solid var(--ink)}
 .key-tab.on{background:var(--ink);color:#fff}
+#keyTabChatgpt[hidden],#keyNote[hidden],#keyBoxDel[hidden],#keyin[hidden],#keyActions[hidden],#gptPanel[hidden]{display:none}
+#gptPanel{animation:rise var(--t) var(--ease)}
+#gptCode{font-family:var(--mono);font-size:22px;letter-spacing:.18em;background:var(--field);border:1px solid var(--soft);padding:12px;margin:0 0 14px;user-select:text}
+#gptPanel a{text-decoration:none}
+#gptPanel a:hover{text-decoration:underline}
+#gptPanel .warn{color:var(--warn)}
 .key-x{
   border:0;background:transparent;cursor:pointer;flex-shrink:0;
-  padding:0 6px;font-family:var(--mono);font-size:18px;line-height:1;color:var(--faint);
+  padding:0 6px;min-width:44px;min-height:44px;font-family:var(--mono);font-size:18px;line-height:1;color:var(--faint);
   transition:color var(--t) var(--ease);
 }
 .key-x:hover{color:var(--ink)}
 
-@media(max-width:900px){
-  body{grid-template-columns:1fr}
-  .side,#sideSplit{display:none}
-  .mbar{display:flex}
-  .stage{flex-direction:column}
-  #railSplit{flex-basis:8px;cursor:row-resize}
-  #railSplit::before{inset:3px 0}
-  .rail{width:100%;min-width:0;flex-basis:46vh}
+.tabbar,.dock,.more{display:none}
+.tray{display:grid;grid-template-rows:0fr;transition:grid-template-rows var(--motion-travel) var(--ease-travel)}
+.tray.on{grid-template-rows:1fr}
+.tray>*{overflow:hidden;min-height:0}
+.tray-card{
+  border-bottom:1px solid var(--soft);background:var(--field);
+  padding:12px clamp(18px,3.5vw,44px);
+  transform:translateY(-100%);opacity:0;
+  transition:transform var(--motion-travel) var(--ease-travel),opacity var(--motion-ui) linear;
 }
+.tray.on .tray-card{transform:none;opacity:1}
+.tray-card p{font-size:13px;line-height:1.5;color:var(--mut);margin:6px 0 10px}
+.tray-act{display:flex;gap:8px;align-items:center}
+.tray-act input{flex:1;min-width:0;border:1px solid var(--ink);padding:9px 11px;font-family:var(--mono);font-size:16px;outline:none}
+.tray-msg{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;color:var(--faint);min-height:14px;margin-top:8px}
+figure.shot{display:none;margin:12px 0}
+figure.shot img{
+  display:block;width:100%;aspect-ratio:1280/800;object-fit:cover;object-position:top;
+  border:1px solid var(--soft);background:var(--field);cursor:zoom-in;
+  transition:transform var(--motion-press) var(--ease-contact);
+}
+figure.shot img:active{transform:scale(var(--press-scale))}
+figure.shot img:not([src]){display:none}
+figure.shot figcaption{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;color:var(--faint);margin-top:5px}
+
+@media(max-width:900px){
+  figure.shot{display:block}
+  body{grid-template-columns:1fr}
+  #sideSplit{display:none}
+  .main{grid-column:1}
+  .side{
+    position:fixed;inset:0 auto 0 0;width:min(78vw,300px);z-index:45;
+    transform:translateX(-100%);transition:transform var(--motion-travel) var(--ease-travel);
+    box-shadow:8px 0 30px rgba(0,0,0,.18);
+    padding-top:calc(18px + env(safe-area-inset-top));
+  }
+  body.nav .side{transform:none}
+  body.nav .scrim{display:block}
+  .mbar{
+    display:flex;
+    padding-left:calc(12px + env(safe-area-inset-left));
+    padding-right:calc(12px + env(safe-area-inset-right));
+  }
+  .empty{padding-top:16px}
+
+  .stage{position:relative;display:block;flex:1;min-height:0}
+  .main{overflow:hidden}
+  .mbar,.tabbar,.compose,.dock{flex-shrink:0}
+  .modal{padding: max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));height:100dvh}
+  #railSplit{display:none}
+  .work,.rail,.more{
+    position:absolute;inset:0;width:auto!important;min-width:0;flex-basis:auto!important;
+    transition:transform var(--motion-travel) var(--ease-travel),opacity var(--motion-travel) var(--ease-travel);
+  }
+  .work,.rail{display:flex;flex-direction:column;min-height:0}
+  .more{display:block;overflow:auto;background:var(--paper);padding:14px 16px 28px}
+  body[data-tab=chat] .rail,body[data-tab=chat] .more,
+  body[data-tab=screen] .work,body[data-tab=screen] .more,
+  body[data-tab=more] .work,body[data-tab=more] .rail{
+    visibility:hidden;opacity:0;pointer-events:none;transform:translateX(var(--pane-out,12px));
+  }
+  body[data-tab=screen] .work,body[data-tab=more] .work,body[data-tab=more] .rail{--pane-out:-12px}
+
+  .tabbar{
+    display:flex;background:var(--paper);border-top:1px solid var(--soft);
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  .tabbtn{
+    flex:1;border:0;background:transparent;padding:15px 0;cursor:pointer;touch-action:manipulation;
+    font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--faint);
+    transition:color var(--motion-ui) var(--ease-contact),transform var(--motion-press) var(--ease-contact);
+  }
+  .tabbtn.on{color:var(--ink);font-weight:700;box-shadow:inset 0 2px 0 var(--accent)}
+  .tabbtn:active{transform:scale(var(--press-scale))}
+  body.kbd .tabbar{display:none}
+
+  .dock{
+    display:flex;gap:8px;align-items:center;
+    padding:8px 12px calc(8px + env(safe-area-inset-bottom));
+    background:var(--field);border-top:1px solid var(--soft);
+  }
+  .dock .btn{flex:1}
+  .kbdsink{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+  .more-h{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;color:var(--faint);margin:2px 0 10px}
+  .more-row{
+    display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--soft);
+    background:transparent;padding:14px 2px;font-size:15px;cursor:pointer;touch-action:manipulation;
+    transition:transform var(--motion-press) var(--ease-contact);
+  }
+  .more-row[hidden]{display:none}
+  .more-row:active{transform:scale(var(--press-scale))}
+  .more-row small{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:var(--faint);margin-top:3px}
+
+  #q,.modal-card input,.cred-form input,.sched-card input,.sched-card textarea,.tray-act input{font-size:16px}
+  .log,.flist,.fbody,.cred-list,.sched-list,.more{overscroll-behavior:contain}
+  .btn,.tab,.tabbtn,.plus,.burger,.more-row{touch-action:manipulation}
+}
+
 @media(prefers-reduced-motion:reduce){
+  :root{--motion-press:0ms;--motion-travel:0ms;--motion-settle:0ms}
   *,*::before,*::after{animation:none!important;transition:none!important}
   .log{scroll-behavior:auto}
 }
@@ -543,12 +662,14 @@ body.acting .deskwrap::before{
   </div>
 </aside>
 <div class="split" id="sideSplit" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
+<button type="button" class="scrim" id="scrim" aria-label="Close menu" tabindex="-1"></button>
 
 <div class="main">
-  <div class="mbar"><button type="button" class="btn" id="schedBtnM">SCHEDULES</button><button type="button" class="btn" id="keyBtnM">KEY</button></div>
+  <div class="mbar"><button type="button" class="burger" id="navOpen" aria-label="Menu" aria-expanded="false">&#9776;</button><a class="brand" href="#">case</a><button type="button" class="btn" id="schedBtnM">SCHEDULES</button><button type="button" class="btn" id="keyBtnM">KEY</button></div>
   <div class="stage">
-    <section class="work">
-      <div class="log" id="log">
+    <section class="work" id="work">
+      <div class="tray" id="tray" aria-live="polite"></div>
+      <div class="log" id="log" tabindex="0" role="region" aria-label="Conversation">
         <div class="log-inner" id="loginner">
           <div class="empty" id="emptyState">
             <div class="h">DRIVE</div>
@@ -645,26 +766,51 @@ body.acting .deskwrap::before{
           </div>
         </div>
       </div>
+      <div class="dock" id="dock">
+        <button type="button" class="btn" id="takeover" aria-pressed="false">TAKE OVER</button>
+        <button type="button" class="btn" id="kbdBtn">KEYBOARD</button>
+        <input id="kbdSink" class="kbdsink" aria-hidden="true" tabindex="-1" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
     </aside>
+
+    <section class="more" id="more" aria-label="More">
+      <div class="more-h">MORE</div>
+      <button type="button" class="more-row" id="moreFiles">Files<small>WHAT IS ON THE COMPUTER</small></button>
+      <button type="button" class="more-row" id="moreCreds">Credentials<small>LOGINS IN THIS BOX'S VAULT</small></button>
+      <button type="button" class="more-row" id="moreSched">Schedules<small>RUN A PROMPT ON A TIMER</small></button>
+      <button type="button" class="more-row" id="moreKey">Key<small>OPENAI · ANTHROPIC · CHATGPT</small></button>
+      <button type="button" class="more-row" id="moreBuzz" hidden>Turn on buzz<small>BUZZ ME WHEN IT NEEDS ME</small></button>
+    </section>
   </div>
+
+  <nav class="tabbar" id="tabbar" aria-label="Sections">
+    <button type="button" class="tabbtn on" id="tabChat" aria-selected="true">CHAT</button>
+    <button type="button" class="tabbtn" id="tabScreen" aria-selected="false">SCREEN</button>
+    <button type="button" class="tabbtn" id="tabMore" aria-selected="false">MORE</button>
+  </nav>
 </div>
 
 <div class="modal" id="keyModal" role="dialog" aria-modal="true" aria-labelledby="keyTitle">
   <form class="modal-card" id="keyForm" autocomplete="off">
     <div class="modal-head">
       <div class="key-tabs" role="tablist" aria-label="Key provider">
+        <button type="button" class="key-tab" id="keyTabChatgpt" data-p="chatgpt" role="tab" aria-selected="false" hidden>CHATGPT</button>
         <button type="button" class="key-tab on" id="keyTabOpenai" data-p="openai" role="tab" aria-selected="true">OPENAI</button>
         <button type="button" class="key-tab" id="keyTabAnthropic" data-p="anthropic" role="tab" aria-selected="false">ANTHROPIC</button>
       </div>
       <button type="button" class="key-x" id="keyClose" aria-label="Close">×</button>
     </div>
     <h3 id="keyTitle" hidden>OPENAI KEY</h3>
-    <p>Held in this tab only. Never sent to logs. Replace anytime.</p>
+    <p id="keyHint">SAVE holds the key in this tab only. SAVE ON BOX encrypts it on the box for schedules and phone chat; the browser never gets it back.</p>
+    <p id="keyNote" hidden></p>
     <input id="keyin" type="password" name="api-key" autocomplete="new-password" spellcheck="false" placeholder="sk-…" aria-label="API key">
-    <div class="modal-actions">
+    <div class="modal-actions" id="keyActions">
       <button type="button" class="btn" id="keyClear">CLEAR</button>
+      <button type="button" class="btn" id="keyBoxDel" hidden>REMOVE FROM BOX</button>
+      <button type="button" class="btn" id="keyBoxSave">SAVE ON BOX</button>
       <button type="submit" class="btn solid">SAVE</button>
     </div>
+    <div id="gptPanel" hidden></div>
   </form>
 </div>
 
@@ -674,8 +820,9 @@ body.acting .deskwrap::before{
       <h3 id="schedTitle">SCHEDULES</h3>
       <button type="button" class="key-x" id="schedClose" aria-label="Close">×</button>
     </div>
-    <p>A prompt that runs on this computer at a time you pick. Uses CASE_DRIVE_API_KEY from .env, not the tab KEY.</p>
-    <p id="schedFuel" hidden>Schedules run on the box key — set CASE_DRIVE_API_KEY in .env (or CASE_BRAIN_CMD for another harness).</p>
+    <p>A prompt that runs on this computer at a time you pick. Uses CASE_DRIVE_API_KEY from .env if set, otherwise the newest key saved on the box or the ChatGPT login. Never the tab KEY.</p>
+    <p>Log in to the sites first. If one asks for a code later, your phone buzzes and you type it in.</p>
+    <p id="schedFuel" hidden>No box brain — set CASE_DRIVE_API_KEY in .env, save a key on the box, or sign in with ChatGPT (or set CASE_BRAIN_CMD for another harness).</p>
     <div class="sched-list" id="schedList"><div class="sched-empty">LOADING</div></div>
     <form id="schedForm" autocomplete="off">
       <label for="schedName">Name</label>
@@ -704,6 +851,7 @@ const $=id=>document.getElementById(id);
 const body=document.body;
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const REDUCED=matchMedia('(prefers-reduced-motion:reduce)').matches;
+const MOBILE=()=>matchMedia('(max-width:900px)').matches;
 
 /* tiny markdown: escape first, then fences, inline code, bold, headings,
    lists, links, paragraphs. No library, no raw HTML pass-through. */
@@ -727,35 +875,57 @@ function md(src){
 const OPENAI_KEY_STORE='drive2_openai_key';
 const ANTHROPIC_KEY_STORE='drive2_anthropic_key';
 const PROVIDER_STORE='drive2_provider';
-let provider=sessionStorage.getItem(PROVIDER_STORE)==='anthropic'?'anthropic':'openai';
+const storedProvider=sessionStorage.getItem(PROVIDER_STORE);
+let provider=storedProvider==='anthropic'||storedProvider==='chatgpt'?storedProvider:'openai';
+let keyStatus={openai:{configured:false},anthropic:{configured:false},chatgpt:{configured:false},chatgpt_available:false};
 let openaiKey=sessionStorage.getItem(OPENAI_KEY_STORE)||'';
 let anthropicKey=sessionStorage.getItem(ANTHROPIC_KEY_STORE)||'';
-let model=sessionStorage.getItem('drive2_model')||'gpt-5.6-terra';
+let model=sessionStorage.getItem('drive2_model')||'gpt-6-luna';
 let effort=sessionStorage.getItem('drive2_effort')||'medium';
 const OPENAI_MODELS=[
-  {id:'gpt-5.6',name:'GPT-5.6',meta:'High'},
-  {id:'gpt-5.6-sol',name:'GPT-5.6 Sol',meta:'High'},
-  {id:'gpt-5.6-terra',name:'GPT-5.6 Terra',meta:'Medium'},
-  {id:'gpt-5.6-luna',name:'GPT-5.6 Luna',meta:'Max'}
+  {id:'gpt-6-astra',name:'GPT-6 Astra',meta:'Max',efforts:['low','medium','high','xhigh','max']},
+  {id:'gpt-6.1-sol',name:'GPT-6.1 Sol',meta:'High',efforts:['low','medium','high','xhigh','max']},
+  {id:'gpt-6-luna',name:'GPT-6 Luna',meta:'Fast',efforts:['none','low','medium','high','xhigh','max']}
 ];
 const ANTHROPIC_MODELS=[
-  {id:'claude-opus-4-6',name:'Opus 4.6',meta:'High'},
-  {id:'claude-sonnet-4-6',name:'Sonnet 4.6',meta:'Medium'},
-  {id:'claude-haiku-4-5',name:'Haiku 4.5',meta:'Fast'}
+  {id:'claude-opus-5-5',name:'Opus 5.5',meta:'High',efforts:['low','medium','high','xhigh','max']},
+  {id:'claude-sonnet-5-5',name:'Sonnet 5.5',meta:'Medium',efforts:['low','medium','high','xhigh','max']},
+  {id:'claude-haiku-5-5',name:'Haiku 5.5',meta:'Fast',efforts:['low','medium','high','xhigh','max']}
 ];
-function models(){return provider==='anthropic'?ANTHROPIC_MODELS:OPENAI_MODELS;}
-function currentKey(){return provider==='anthropic'?anthropicKey:openaiKey;}
-function defaultModel(){return provider==='anthropic'?'claude-sonnet-4-6':'gpt-5.6-terra';}
+function models(){
+  if(provider==='chatgpt')return [{id:'codex',name:'Codex default',meta:'YOUR PLAN'}];
+  return provider==='anthropic'?ANTHROPIC_MODELS:OPENAI_MODELS;
+}
+function currentKey(){
+  if(provider==='chatgpt')return keyStatus.chatgpt.configured?'on':'';
+  return (provider==='anthropic'?anthropicKey:openaiKey)||(keyStatus[provider].configured?'on':'');
+}
+function defaultModel(){
+  if(provider==='chatgpt')return 'codex';
+  return provider==='anthropic'?'claude-sonnet-5-5':'gpt-6-luna';
+}
 function setProvider(p){
-  provider=p==='anthropic'?'anthropic':'openai';
+  provider=p==='anthropic'||p==='chatgpt'?p:'openai';
   sessionStorage.setItem(PROVIDER_STORE,provider);
   if(!models().some(m=>m.id===model)){
     model=defaultModel();
     sessionStorage.setItem('drive2_model',model);
   }
+  clampEffort();
 }
 if(!models().some(m=>m.id===model)) model=defaultModel();
-const EFFORTS=['low','medium','high','xhigh','max'];
+const DEFAULT_EFFORTS=['low','medium','high','xhigh','max'];
+function effortsFor(){
+  const m=models().find(x=>x.id===model);
+  return (m&&m.efforts)||DEFAULT_EFFORTS;
+}
+function clampEffort(){
+  const allowed=effortsFor();
+  if(allowed.includes(effort)) return;
+  effort=effort==='none'&&allowed.includes('low')?'low':(allowed.includes('high')?'high':(allowed.includes('medium')?'medium':allowed[0]));
+  sessionStorage.setItem('drive2_effort',effort);
+}
+clampEffort();
 let boxHost='';
 let comp=null;          // {id,name,state,...}
 let apiUp=false; // cased reachable
@@ -777,7 +947,9 @@ const writePick=id=>{try{localStorage.setItem(PICK_KEY,id);}catch{/* private mod
 let pickLost=false;   // picked a computer, it is not on the box any more
 let comps=[];
 let threads=[];
+const THREAD_KEY='case.drive.thread';
 let activeTid='';
+try{activeTid=localStorage.getItem(THREAD_KEY)||'';}catch{}
 let loadingTid='';  // activeTid while openThread is still fetching it
 let runTid='';     // thread of the turn in flight; activeTid is only the one on screen
 let threadGen=0;
@@ -807,6 +979,7 @@ async function refresh(){
       const jt=await rt.json();
       if(rt.ok)threads=jt.threads||[];
     }catch{/* threads are cosmetic if the fetch hiccups */}
+    loadHandoffs();
     paint();
   }catch{
     apiUp=false;
@@ -821,7 +994,7 @@ function threadRowHtml(t){
     +'<span class="elbow" aria-hidden="true"></span>'
     +'<span class="tn">'+esc(t.title||'untitled')+'</span>'
     +'</button>'
-    +'<span class="age" aria-hidden="true">'+(t.pending?'…':esc(fmtAge(t.updated/1000)))+'</span>'
+    +'<span class="age" aria-hidden="true">'+(t.pending||t.running?'…':esc(fmtAge(t.updated/1000)))+'</span>'
     +'<button type="button" class="tx" aria-label="Delete thread" tabindex="-1">×</button>'
     +'</div></div></div>';
 }
@@ -867,6 +1040,7 @@ function claimThread(tid,agentId){
 function newTask(){
   threadGen++;
   activeTid=loadingTid='';
+  try{localStorage.removeItem(THREAD_KEY);}catch{}
   showEmpty();
   paint();
   $('q').focus();
@@ -899,10 +1073,13 @@ async function deleteThread(tid){
   });
 }
 $('newAgent').addEventListener('click',()=>newTask());
-async function openThread(tid){
-  if(tid===activeTid)return;
+async function openThread(tid,opts){
+  closeNav();
+  if(MOBILE()&&!(opts&&opts.stay))goTab('chat');
+  if(tid===activeTid&&!(opts&&opts.reload))return;
   const gen=++threadGen;
   activeTid=loadingTid=tid;
+  try{if(tid&&tid!=='__pending')localStorage.setItem(THREAD_KEY,tid);}catch{}
   paint();
   try{
     const r=await fetch('/api/threads?id='+encodeURIComponent(tid));
@@ -920,6 +1097,7 @@ async function openThread(tid){
     // behind a click means another set of logins. Deploy owns the seat.
     inner.innerHTML='';
     for(const turn of j.turns||[]){
+      if(turn.who==='shot'){inner.appendChild(shotFig(turn.h,turn.at,turn.ts));continue;}
       const art=document.createElement('article');
       if(turn.who==='you'){
         art.className='turn you';
@@ -935,6 +1113,7 @@ async function openThread(tid){
         art.innerHTML='<div class="k sys">'+esc(String(comp&&comp.name||'AGENT').toUpperCase())+'</div><div class="pmsg"></div>';
         art.querySelector('.pmsg').innerHTML=md(turn.text||'');
       }
+      art.classList.add('history');
       inner.appendChild(art);
     }
     log.scrollTop=log.scrollHeight;
@@ -946,6 +1125,52 @@ async function openThread(tid){
       holdQueued(tid,true);drainQ('');
     }
   }
+}
+let followTid='';
+async function followRunning(tid){
+  if(!tid||tid==='__pending'||followTid===tid)return;
+  followTid=tid;
+  body.classList.add('acting');
+  try{
+    let painted=false;
+    for(let i=0;i<600;i++){
+      if(i)await new Promise(r=>setTimeout(r,2000));
+      try{
+        const r=await fetch('/api/threads?id='+encodeURIComponent(tid));
+        const j=await r.json();
+        if(!r.ok||!j.running){
+          if(activeTid===tid){
+            await openThread(tid,{stay:true,reload:true});
+            if(!userStopped)drainQ(tid);
+          }
+          return;
+        }
+        if(!painted&&activeTid===tid){
+          painted=true;
+          await openThread(tid,{stay:true,reload:true});
+        }
+      }catch{}
+    }
+  }finally{
+    if(followTid===tid)followTid='';
+    if(!chatCtl)body.classList.remove('acting');
+  }
+}
+async function resumeBackground(){
+  resumeGptLogin();
+  if(chatCtl)return;
+  let tid='';try{tid=localStorage.getItem(THREAD_KEY)||'';}catch{}
+  const mine=myThreads();
+  const running=mine.find(t=>t.running);
+  if(running)tid=running.id;
+  else if(!tid||!mine.some(t=>t.id===tid)){
+    const latest=mine[0];
+    if(latest&&(Date.now()-latest.updated)<30*60*1000)tid=latest.id;
+  }
+  if(!tid)return;
+  try{localStorage.setItem(THREAD_KEY,tid);}catch{}
+  await openThread(tid,{stay:true,reload:tid===activeTid});
+  if(threads.some(t=>t.id===tid&&t.running))followRunning(tid);
 }
 
 /* ---------- desk (browser mode) ---------- */
@@ -964,14 +1189,44 @@ function hookDesk(){
   if(!deskLoaded||deskFor!==comp.id){
     deskLoaded=true;
     deskFor=comp.id;
-    $('deskframe').src='/live/'+encodeURIComponent(comp.id)+'/vnc.html?autoconnect=1&resize=scale&path=live/'+encodeURIComponent(comp.id)+'/websockify';
+    applyViewOnly();
+    $('deskframe').src='/live/'+encodeURIComponent(comp.id)+'/vnc.html?autoconnect=1&resize=scale&view_only='+(MOBILE()&&!takeover?'1':'0')+'&path=live/'+encodeURIComponent(comp.id)+'/websockify';
   }
+}
+function reconnectDesk(){
+  deskLoaded=false;
+  deskFor='';
+  const frame=$('deskframe');
+  if(frame)frame.removeAttribute('src');
+  hookDesk();
+}
+function deskRfbState(){
+  try{
+    return String($('deskframe').contentWindow?.UI?.rfb?._rfbConnectionState||'');
+  }catch{return '';}
+}
+function nudgeDesk(){
+  const state=deskRfbState();
+  if(state==='connected'||state==='connecting')return state;
+  try{
+    const ui=$('deskframe').contentWindow?.UI;
+    if(ui&&typeof ui.connect==='function'){ui.connect();return state||'nudge';}
+  }catch{}
+  reconnectDesk();
+  return state||'rebuild';
 }
 $('deskframe').addEventListener('load',()=>{
   try{
     const w=$('deskframe').contentWindow;
+    if(!w.UI&&w.location.pathname.endsWith('/vnc.html')){
+      const bridge=w.document.createElement('script');
+      bridge.type='module';
+      bridge.textContent="import UI from './app/ui.js'; window.UI=UI; parent.dispatchEvent(new Event('case-desk-ready'));";
+      w.document.head.appendChild(bridge);
+    }
     w.dispatchEvent(new Event('resize'));
     if(w.UI){if(typeof w.UI.applyResizeMode==='function')w.UI.applyResizeMode();if(w.UI.rfb)w.UI.rfb.scaleViewport=true;}
+    applyViewOnly();
   }catch{}
 });
 
@@ -1214,9 +1469,10 @@ function pulseFiles(){
 function paintCfg(){
   const list=models();
   const m=list.find(x=>x.id===model)||list[0];
-  $('cfgLabel').textContent=m.name.replace(/^GPT-5\.6\s*/,'').toUpperCase()+(m.id==='gpt-5.6'?'5.6':'')+' · '+effort.toUpperCase();
+  $('cfgLabel').textContent=m.name.replace(/^GPT-6(?:\.\d+)?\s*/,'').toUpperCase()+' · '+effort.toUpperCase();
+  const efforts=effortsFor();
   $('cfgPop').innerHTML='<div class="cfg-sec">EFFORT</div>'
-    +EFFORTS.map(e=>'<button type="button" class="cfg-row'+(e===effort?' on':'')+'" data-e="'+e+'">'+e[0].toUpperCase()+e.slice(1)+'<span></span><span class="mark">'+(e===effort?'✓':'')+'</span></button>').join('')
+    +efforts.map(e=>'<button type="button" class="cfg-row'+(e===effort?' on':'')+'" data-e="'+e+'">'+e[0].toUpperCase()+e.slice(1)+'<span></span><span class="mark">'+(e===effort?'✓':'')+'</span></button>').join('')
     +'<div class="cfg-sec">MODEL</div>'
     +list.map(x=>'<button type="button" class="cfg-row'+(x.id===model?' on':'')+'" data-m="'+x.id+'">'+esc(x.name)+'<span class="meta">'+esc(x.meta)+'</span><span class="mark">'+(x.id===model?'✓':'')+'</span></button>').join('');
 }
@@ -1230,7 +1486,7 @@ $('cfgPop').addEventListener('click',e=>{
   const er=e.target.closest('[data-e]');
   const mr=e.target.closest('[data-m]');
   if(er){effort=er.dataset.e;sessionStorage.setItem('drive2_effort',effort);}
-  if(mr){model=mr.dataset.m;sessionStorage.setItem('drive2_model',model);}
+  if(mr){model=mr.dataset.m;sessionStorage.setItem('drive2_model',model);clampEffort();}
   if(er||mr)paintCfg();
 });
 document.addEventListener('click',e=>{
@@ -1238,24 +1494,197 @@ document.addEventListener('click',e=>{
 });
 
 /* ---------- key modal ---------- */
-function closeKey(){$('keyModal').classList.remove('on');}
+const GPT_URL='https://auth.openai.com/codex/device';
+let gptPhase='idle';
+let gptCode='';
+let gptUrl=GPT_URL;
+let gptErr='';
+let gptCtl=null;
+let gptWatch=null;
+let gptCloseTimer=null;
+async function loadKeys(){
+  try{
+    const r=await fetch('/api/keys');
+    const j=await r.json();
+    if(r.ok)keyStatus=j;
+  }catch{}
+}
+function closeKey(){
+  if(gptPhase==='pending')cancelGpt();
+  $('keyModal').classList.remove('on');
+}
+function cancelGpt(){
+  if(gptCtl)gptCtl.abort();
+  gptCtl=null;
+  gptPhase='idle';
+  fetch('/api/chatgpt/login',{method:'DELETE'}).catch(()=>{});
+  paintGptPanel();
+}
+function paintGptPanel(){
+  const el=$('gptPanel');
+  const gpt=provider==='chatgpt';
+  el.hidden=!gpt;
+  if(!gpt)return;
+  if(gptPhase==='pending'){
+    el.innerHTML='<div class="k">ONE-TIME CODE</div><div id="gptCode" aria-live="polite">'+esc(gptCode||'····-·····')+'</div>'
+      +'<p>Open <a href="'+esc(gptUrl)+'" target="_blank" rel="noopener">auth.openai.com/codex/device</a> and enter the code.</p>'
+      +'<div class="k">WAITING<span class="cur"></span></div>'
+      +'<div class="modal-actions">'
+      +(gptCode?'<button type="button" class="btn solid" id="gptCopy">COPY CODE</button>':'')
+      +'<button type="button" class="btn" id="gptCancel">CANCEL</button></div>';
+    const copy=$('gptCopy');
+    if(copy)copy.addEventListener('click',()=>{navigator.clipboard.writeText(gptCode).catch(()=>{});});
+    $('gptCancel').addEventListener('click',cancelGpt);
+    return;
+  }
+  if(gptPhase==='error'){
+    el.innerHTML='<p class="warn">'+esc(gptErr||'Sign-in failed.')+'</p>'
+      +'<div class="modal-actions"><button type="button" class="btn solid" id="gptRetry">TRY AGAIN</button></div>';
+    $('gptRetry').addEventListener('click',startGptLogin);
+    return;
+  }
+  if(keyStatus.chatgpt.configured){
+    const since=keyStatus.chatgpt.updated_at;
+    el.innerHTML='<div class="k">SIGNED IN</div><p>Since '+esc(since?new Date(since).toLocaleString():'now')+'. Used for chat, schedules and phone chat.</p>'
+      +'<div class="modal-actions"><button type="button" class="btn" id="gptOut">SIGN OUT</button></div>';
+    $('gptOut').addEventListener('click',signOutGpt);
+    return;
+  }
+  el.innerHTML='<p>Runs on your ChatGPT plan through the Codex CLI on the box. Case never sees your password.</p>'
+    +'<div class="modal-actions"><button type="button" class="btn solid" id="gptIn">SIGN IN WITH CHATGPT</button></div>';
+  $('gptIn').addEventListener('click',startGptLogin);
+}
+async function gptSignedIn(){
+  gptPhase='idle';
+  await loadKeys();
+  paintGptPanel();paint();
+  clearTimeout(gptCloseTimer);
+  gptCloseTimer=setTimeout(()=>{closeKey();$('q').focus();},900);
+}
+async function applyGptStatus(j){
+  if(j.code){gptCode=j.code;gptUrl=j.url||gptUrl;}
+  if(j.phase==='done'||(j.configured&&!j.busy)){await gptSignedIn();return true;}
+  if(j.phase==='error'){gptPhase='error';gptErr=(j.error||'Sign-in failed.').slice(0,80);paintGptPanel();return true;}
+  if(j.phase==='idle'&&!j.busy){gptPhase='idle';paintGptPanel();return true;}
+  gptPhase='pending';
+  paintGptPanel();
+  return false;
+}
+async function watchGptLogin(){
+  if(gptWatch)return gptWatch;
+  gptPhase='pending';
+  paintGptPanel();
+  gptWatch=(async()=>{
+    try{
+      for(let i=0;i<240;i++){
+        if(gptPhase!=='pending')return;
+        try{
+          const r=await fetch('/api/chatgpt/login');
+          if(!r.ok)break;
+          if(await applyGptStatus(await r.json()))return;
+        }catch{}
+        await new Promise(res=>setTimeout(res,1200));
+      }
+      if(gptPhase==='pending'){gptPhase='error';gptErr='Sign-in timed out.';paintGptPanel();}
+    }finally{gptWatch=null;}
+  })();
+  return gptWatch;
+}
+async function startGptLogin(){
+  gptPhase='pending';gptCode='';gptErr='';gptUrl=GPT_URL;
+  paintGptPanel();
+  gptCtl=new AbortController();
+  try{
+    const r=await fetch('/api/chatgpt/login',{method:'POST',signal:gptCtl.signal});
+    if(!r.ok){gptPhase='error';gptErr='Sign-in failed.';paintGptPanel();return;}
+    const reader=r.body.getReader();
+    const dec=new TextDecoder();
+    let buf='';
+    while(true){
+      const {value,done}=await reader.read();
+      if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n');
+      buf=lines.pop();
+      for(const line of lines){
+        if(!line.trim())continue;
+        let ev;try{ev=JSON.parse(line);}catch{continue;}
+        if(ev.type==='code'){gptCode=ev.code||gptCode;gptUrl=ev.url||gptUrl;paintGptPanel();}
+        if(ev.type==='error'){gptPhase='error';gptErr=(ev.error||'Sign-in failed.').slice(0,80);paintGptPanel();}
+        if(ev.type==='done')await gptSignedIn();
+      }
+    }
+    if(gptPhase==='pending')await watchGptLogin();
+  }catch{
+    if(gptCtl&&gptCtl.signal.aborted){gptPhase='idle';paintGptPanel();return;}
+    await watchGptLogin();
+  }finally{gptCtl=null;}
+}
+async function signOutGpt(){
+  try{
+    const r=await fetch('/api/keys?provider=chatgpt',{method:'DELETE'});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok)keyStatus=j;
+  }catch{}
+  paintGptPanel();paint();
+}
+async function resumeGptLogin(){
+  try{
+    const r=await fetch('/api/chatgpt/login');
+    if(!r.ok)return;
+    const j=await r.json();
+    if(!j.busy&&j.phase!=='pending')return;
+    setProvider('chatgpt');
+    openKey('chatgpt');
+    gptCode=j.code||gptCode;gptUrl=j.url||gptUrl;
+    watchGptLogin();
+  }catch{}
+}
+function paintKeyNote(msg){
+  const s=keyStatus[provider];
+  const text=msg||(s&&s.configured?'On the box: …'+s.last4+(s.label?' ('+s.label+')':'')+', saved '+new Date(s.saved_at).toLocaleString()+'. Used by schedules and phone chat.':'');
+  $('keyNote').textContent=text;
+  $('keyNote').hidden=!text;
+  $('keyBoxDel').hidden=!(s&&s.configured);
+}
 function paintKeyTabs(){
+  const gpt=provider==='chatgpt';
+  $('keyTabChatgpt').hidden=!keyStatus.chatgpt_available;
+  $('keyTabChatgpt').classList.toggle('on',gpt);
   $('keyTabOpenai').classList.toggle('on',provider==='openai');
   $('keyTabAnthropic').classList.toggle('on',provider==='anthropic');
+  $('keyTabChatgpt').setAttribute('aria-selected',String(gpt));
   $('keyTabOpenai').setAttribute('aria-selected',String(provider==='openai'));
   $('keyTabAnthropic').setAttribute('aria-selected',String(provider==='anthropic'));
-  $('keyTitle').textContent=provider==='anthropic'?'ANTHROPIC KEY':'OPENAI KEY';
-  $('keyin').placeholder=currentKey()?'key in tab · paste to replace':(provider==='anthropic'?'sk-ant-…':'sk-…');
-  $('keyin').setAttribute('aria-label',provider==='anthropic'?'Anthropic API key':'OpenAI API key');
+  $('keyTitle').textContent=gpt?'CHATGPT':(provider==='anthropic'?'ANTHROPIC KEY':'OPENAI KEY');
+  $('keyHint').hidden=gpt;
+  $('keyin').hidden=gpt;
+  $('keyActions').hidden=gpt;
+  if(gpt)$('keyNote').hidden=true;
+  else{
+    $('keyin').placeholder=currentKey()?'key set · paste to replace':(provider==='anthropic'?'sk-ant-…':'sk-…');
+    $('keyin').setAttribute('aria-label',provider==='anthropic'?'Anthropic API key':'OpenAI API key');
+    paintKeyNote();
+  }
+  paintGptPanel();
 }
-function openKey(){
+async function openKey(p){
+  if(p)setProvider(p);
   $('keyModal').classList.add('on');
   $('keyin').value='';
   paintKeyTabs();
-  setTimeout(()=>$('keyin').focus(),0);
+  await loadKeys();
+  paintKeyTabs();
+  paint();
+  setTimeout(()=>{if(provider!=='chatgpt')$('keyin').focus();},0);
 }
-$('keyBtn').addEventListener('click',openKey);
-$('keyBtnM').addEventListener('click',openKey);
+$('keyBtn').addEventListener('click',()=>openKey());
+$('keyBtnM').addEventListener('click',()=>openKey());
+const closeNav=()=>{body.classList.remove('nav');$('navOpen').setAttribute('aria-expanded','false');};
+$('navOpen').addEventListener('click',()=>{body.classList.add('nav');$('navOpen').setAttribute('aria-expanded','true');});
+$('scrim').addEventListener('click',closeNav);
+$('side').addEventListener('click',e=>{if(innerWidth<=900&&e.target.closest('a,button'))closeNav();});
+$('keyTabChatgpt').addEventListener('click',()=>{setProvider('chatgpt');paintKeyTabs();paintCfg();});
 $('keyTabOpenai').addEventListener('click',()=>{setProvider('openai');paintKeyTabs();paintCfg();});
 $('keyTabAnthropic').addEventListener('click',()=>{setProvider('anthropic');paintKeyTabs();paintCfg();});
 $('keyForm').addEventListener('submit',e=>{
@@ -1267,6 +1696,28 @@ $('keyForm').addEventListener('submit',e=>{
   $('keyModal').classList.remove('on');
   paint([comp].filter(Boolean));
   $('q').focus();
+});
+$('keyBoxSave').addEventListener('click',async()=>{
+  const v=$('keyin').value.trim();
+  if(!v)return;
+  try{
+    const r=await fetch('/api/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider,key:v})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){paintKeyNote(j.error==='short_key'?'That key is too short.':'Could not save the key on the box.');return;}
+    keyStatus=j;
+  }catch{paintKeyNote('Could not reach Drive.');return;}
+  $('keyin').value='';
+  paintKeyNote();
+  paint([comp].filter(Boolean));
+});
+$('keyBoxDel').addEventListener('click',async()=>{
+  try{
+    const r=await fetch('/api/keys?provider='+encodeURIComponent(provider),{method:'DELETE'});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok)keyStatus=j;
+  }catch{}
+  paintKeyNote();
+  paint([comp].filter(Boolean));
 });
 $('keyClose').addEventListener('click',closeKey);
 $('keyClear').addEventListener('click',()=>{
@@ -1416,7 +1867,13 @@ const glow=on=>{inflight=Math.max(0,inflight+(on?1:-1));body.classList.toggle('a
 const glowOff=()=>{inflight=0;body.classList.remove('acting');};
 
 let chatCtl=null;
-$('stopBtn').addEventListener('click',()=>{if(chatCtl)chatCtl.abort();});
+let userStopped=false;
+$('stopBtn').addEventListener('click',()=>{
+  userStopped=true;
+  const tid=runTid&&runTid!=='__pending'?runTid:'';
+  fetch('/api/chat/stop',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread_id:tid})}).catch(()=>{});
+  if(chatCtl)chatCtl.abort();
+});
 
 /* Prompts typed mid-turn queue up; the next fires when the turn ends. Without
    this a second submit 409s server-side and its cleanup hides the STOP button
@@ -1440,6 +1897,88 @@ const paintQ=()=>{
 };
 const pending=[];
 const ATTACH_EXTS='png,jpg,jpeg,gif,webp,txt,md,csv,json,html,htm,js,mjs,css,py,sh,yml,yaml,toml,log,xml,pdf'.split(',');
+const ATTACH_MIME={
+  'image/png':'png','image/jpeg':'jpg','image/jpg':'jpg','image/gif':'gif','image/webp':'webp',
+  'application/pdf':'pdf','text/plain':'txt','text/markdown':'md','text/csv':'csv',
+  'application/json':'json','text/html':'html','text/css':'css','text/javascript':'js',
+  'application/javascript':'js'
+};
+function attachExt(file){
+  const fromName=(String(file&&file.name||'').split('.').pop()||'').toLowerCase();
+  if(fromName&&fromName!==String(file&&file.name||'').toLowerCase()&&ATTACH_EXTS.includes(fromName))return fromName;
+  return ATTACH_MIME[String(file&&file.type||'').toLowerCase()]||'';
+}
+function namedAttach(file){
+  const ext=attachExt(file);
+  if(!ext)return null;
+  const have=String(file.name||'');
+  if(have&&ATTACH_EXTS.includes((have.split('.').pop()||'').toLowerCase()))return file;
+  const mime=file.type||(ext==='jpg'?'image/jpeg':ext==='pdf'?'application/pdf':'image/'+ext);
+  return new File([file], (ext==='pdf'?'file.pdf':('image.'+ext)), {type:mime});
+}
+function filesFromData(dt){
+  if(!dt)return [];
+  const out=[];
+  if(dt.files&&dt.files.length)out.push(...dt.files);
+  if(!out.length&&dt.items){
+    for(const it of dt.items){
+      if(it.kind==='file'){const f=it.getAsFile();if(f)out.push(f);}
+    }
+  }
+  return out;
+}
+function isImageLike(file){
+  return /^image\//.test(String(file&&file.type||''))
+    ||/\.(heic|heif|tiff?|bmp|avif|png|jpe?g|gif|webp)$/i.test(String(file&&file.name||''));
+}
+async function toJpeg(file){
+  try{
+    const bmp=await createImageBitmap(file);
+    const s=Math.min(1,2560/Math.max(bmp.width,bmp.height));
+    const c=document.createElement('canvas');
+    c.width=Math.round(bmp.width*s);c.height=Math.round(bmp.height*s);
+    const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);g.drawImage(bmp,0,0,c.width,c.height);
+    const base=String(file.name||'image').replace(/\.[^.]*$/,'')||'image';
+    for(const qual of [0.85,0.7,0.5]){
+      const b=await new Promise(r=>c.toBlob(r,'image/jpeg',qual));
+      if(b&&b.size<=5*1024*1024)return new File([b],base+'.jpg',{type:'image/jpeg'});
+    }
+  }catch(_){}
+  return null;
+}
+let attaching=0;
+function queueIncoming(list){
+  let converting=0;
+  let added=0;
+  let badType=null;
+  for(const raw of list||[]){
+    if(pending.length+attaching>=4)break;
+    const f=namedAttach(raw);
+    if(isImageLike(raw)&&(!f||(f.size>5*1024*1024&&/^image\//.test(f.type)))){
+      converting++;attaching++;
+      toJpeg(raw).then(j=>{
+        attaching--;
+        if(j&&pending.length<4){pending.push(j);paintAline();}
+        else{q.placeholder=(raw.name||'image')+' could not be read';setTimeout(()=>paint([comp].filter(Boolean)),2500);}
+      });
+      continue;
+    }
+    if(!f){if(badType===null)badType=raw&&raw.name||'';continue;}
+    if(f.size>5*1024*1024){
+      q.placeholder=f.name+' is over 5 MB';
+      setTimeout(()=>paint([comp].filter(Boolean)),2500);
+      continue;
+    }
+    pending.push(f);
+    added++;
+  }
+  if(added){paintAline();}
+  else if(badType!==null){
+    q.placeholder=(badType?badType+' is not an allowed type':'that file type is not allowed');
+    setTimeout(()=>paint([comp].filter(Boolean)),2500);
+  }
+  return added+converting;
+}
 const paintAline=()=>{
   const al=$('aline');
   al.hidden=!pending.length;
@@ -1590,7 +2129,9 @@ async function sendPrompt(t,files){
     if(ev.args&&Object.keys(ev.args).length)row.querySelector('.tool-args').textContent=pretty(ev.args);
   };
   chatCtl=new AbortController();
+  userStopped=false;
   $('stopBtn').hidden=false;
+  let streamDrop=false;
   try{
     const uploaded=[];
     for(const f of files){
@@ -1608,13 +2149,19 @@ async function sendPrompt(t,files){
       signal:chatCtl.signal,
       headers:{
         'content-type':'application/json',
-        ...(provider==='anthropic'?{'x-anthropic-key':anthropicKey}:{'x-openai-key':openaiKey})
+        ...(provider==='chatgpt'?{}:(provider==='anthropic'?{'x-anthropic-key':anthropicKey}:{'x-openai-key':openaiKey}))
       },
-      body:JSON.stringify({model,effort,input:t,computer_id:comp&&comp.id||'',thread_id:activeTid==='__pending'?'':activeTid,files:uploaded})
+      body:JSON.stringify({model,effort,provider,input:t,computer_id:comp&&comp.id||'',thread_id:activeTid==='__pending'?'':activeTid,files:uploaded})
     });
     const ctype=r.headers.get('content-type')||'';
     if(!ctype.includes('ndjson')){
       const j=await r.json().catch(()=>({}));
+      if(r.status===409){
+        const tid=activeTid&&activeTid!=='__pending'?activeTid:'';
+        if(tid)followRunning(tid);
+        caret.remove();glowOff();
+        return;
+      }
       setText(j.text||j.error||('http '+r.status));
       caret.remove();glowOff();
       return;
@@ -1642,6 +2189,7 @@ async function sendPrompt(t,files){
           if(activeTid==='__pending')activeTid=ev.thread_id;
           if(runTid==='__pending')runTid=ev.thread_id;
           for(const p of promptQ)if(p&&p.tid==='__pending')p.tid=ev.thread_id;
+          try{if(activeTid&&activeTid!=='__pending')localStorage.setItem(THREAD_KEY,activeTid);}catch{}
         }
         else if(ev.type==='claim'&&ev.thread_id){claimThread(ev.thread_id,ev.agent);}
         else if(ev.type==='round'){mark={raw,think:thinkEl.textContent,tools:toolsEl.children.length};}
@@ -1663,6 +2211,7 @@ async function sendPrompt(t,files){
           glow(false);
           if(ev.ok&&(row.dataset.name==='computer_exec'||ev.name==='computer_exec'))pulseFiles();
         }
+        else if(ev.type==='shot'&&ev.h){reply.appendChild(shotFig(ev.h,ev.at,Date.now()));}
         else if(ev.type==='steer'){/* injected mid-turn; bubble already rendered locally */}
         else if(ev.type==='text_delta'&&ev.text){thinkBlock.open=false;addText(ev.text);}
         else if(ev.type==='text'||(ev.type==='done'&&ev.text)){thinkBlock.open=false;setText(ev.text);if(ev.type==='done')glowOff();}
@@ -1675,8 +2224,12 @@ async function sendPrompt(t,files){
     if(!raw)setText(r.ok?'':'http '+r.status);
   }catch(err){
     glowOff();
-    if(err&&err.name==='AbortError')setText(raw?raw+'\n\n■ STOPPED':'■ STOPPED');
-    else setText('Cannot reach the drive server. '+(err.message||''));
+    if(err&&err.name==='AbortError'&&userStopped)setText(raw?raw+'\n\n■ STOPPED':'■ STOPPED');
+    else{
+      const tid=activeTid&&activeTid!=='__pending'?activeTid:'';
+      if(tid&&err&&err.name==='TypeError'){streamDrop=true;followRunning(tid);}
+      else setText('Cannot reach the drive server. '+(err.message||''));
+    }
   }finally{
     chatCtl=null;
     $('stopBtn').hidden=true;
@@ -1686,7 +2239,7 @@ async function sendPrompt(t,files){
     const ran=runTid!=='__pending'?runTid:'';
     runTid='';
     refresh(); // state may have changed (wake on first tool); threads re-sync too
-    drainQ(ran);
+    if(!streamDrop)drainQ(ran);
   }
 }
 
@@ -1708,15 +2261,56 @@ $('attachStart').addEventListener('click',()=>{
 });
 $('attachPick').addEventListener('change',()=>{
   const pick=$('attachPick');
-  for(const f of pick.files||[]){
-    if(pending.length>=4)break;
-    const ext=(f.name.split('.').pop()||'').toLowerCase();
-    if(!ATTACH_EXTS.includes(ext)){q.placeholder=f.name+' is not an allowed type';setTimeout(()=>paint([comp].filter(Boolean)),2500);continue;}
-    if(f.size>5*1024*1024){q.placeholder=f.name+' is over 5 MB';setTimeout(()=>paint([comp].filter(Boolean)),2500);continue;}
-    pending.push(f);
-  }
+  queueIncoming(pick.files||[]);
   pick.value='';
-  paintAline();
+});
+$('work').addEventListener('paste',e=>{
+  const files=filesFromData(e.clipboardData);
+  const types=[...(e.clipboardData&&e.clipboardData.types||[])];
+  if(!files.length)return;
+  const hasText=types.includes('text/plain')&&!!String(e.clipboardData.getData('text/plain')||'').trim();
+  if(queueIncoming(files)&&!hasText)e.preventDefault();
+});
+const dragTypes=e=>[...(e.dataTransfer&&e.dataTransfer.types||[])];
+function droppedImageUrl(dt){
+  const html=dt.getData('text/html')||'';
+  const m=html.match(/<img[^>]+src=["']([^"']+)/i);
+  if(m&&/^(data:image\/|blob:|https?:)/i.test(m[1]))return m[1];
+  const u=((dt.getData('text/uri-list')||'').split('\n').find(l=>l&&!l.startsWith('#'))||'').trim();
+  return /^data:image\//i.test(u)||/^https?:[^?#]*\.(png|jpe?g|gif|webp|bmp|avif|tiff?|heic|heif)([?#]|$)/i.test(u)?u:'';
+}
+$('work').addEventListener('dragover',e=>{
+  const t=dragTypes(e);
+  if(!t.includes('Files')&&!(t.includes('text/uri-list')&&e.target!==q))return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect='copy';
+  $('work').classList.add('drop');
+});
+$('work').addEventListener('dragleave',e=>{
+  if(!$('work').contains(e.relatedTarget))$('work').classList.remove('drop');
+});
+$('work').addEventListener('drop',e=>{
+  $('work').classList.remove('drop');
+  if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files'))e.preventDefault();
+  const files=filesFromData(e.dataTransfer);
+  if(files.length){queueIncoming(files);return;}
+  const url=e.dataTransfer&&droppedImageUrl(e.dataTransfer);
+  if(!url)return;
+  e.preventDefault();
+  if(pending.length+attaching>=4)return;
+  attaching++;
+  fetch(url,{signal:AbortSignal.timeout(15000)}).then(r=>r.ok?r.blob():Promise.reject()).then(b=>{
+    attaching--;
+    const name=(url.split(/[?#]/)[0].split('/').pop()||'image').slice(0,80);
+    queueIncoming([new File([b],name,{type:b.type})]);
+  }).catch(()=>{attaching--;q.placeholder='that image only pastes: copy it and press ⌘V';setTimeout(()=>paint([comp].filter(Boolean)),3000);});
+});
+document.addEventListener('dragover',e=>{
+  if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files'))e.preventDefault();
+});
+document.addEventListener('drop',e=>{
+  if(e.target&&e.target.closest&&e.target.closest('#rail'))return;
+  if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files'))e.preventDefault();
 });
 $('teachStart').addEventListener('click',()=>{
   $('plusPop').hidden=true;
@@ -1806,12 +2400,252 @@ const rw=Number(sessionStorage.getItem('drive2_rail')||0);
 if(rw>=280){$('rail').style.flexBasis=rw+'px';$('rail').style.width=rw+'px';}
 $('railSplit').addEventListener('dblclick',()=>{const r=$('rail');r.style.flexBasis='';r.style.width='';sessionStorage.removeItem('drive2_rail');placeTabLine();});
 
+let handoffs=[];
+async function loadHandoffs(){
+  if(!apiUp)return;
+  try{
+    const r=await fetch('/api/handoffs');
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)return;
+    handoffs=(j.handoffs||[]).filter(h=>h.status==='pending');
+  }catch{return;}
+  paintHandoff();
+}
+function paintHandoff(){
+  const tray=$('tray');
+  const h=handoffs[0];
+  if(!h){tray.classList.remove('on');tray.dataset.h='';setTimeout(()=>{if(!tray.classList.contains('on'))tray.innerHTML='';},400);return;}
+  if(tray.dataset.h===h.id)return;
+  tray.dataset.h=h.id;
+  const onScreen=h.kind==='captcha'||h.kind==='device'||h.kind==='passkey';
+  tray.innerHTML='<div class="tray-card">'
+    +'<div class="k">'+esc(String(h.domain||'your computer').toUpperCase())+' NEEDS YOU</div>'
+    +'<p>'+esc(String(h.prompt||'').slice(0,300))+'</p>'
+    +(onScreen
+      ?'<div class="tray-act"><button type="button" class="btn solid" id="hoOpen">OPEN SCREEN</button><button type="button" class="btn" id="hoDone">I’M DONE</button></div>'
+      :h.kind==='approval'
+      ?'<div class="tray-act"><button type="button" class="btn solid" id="hoYes">YES</button><button type="button" class="btn" id="hoNo">NO</button></div>'
+      :'<form class="tray-act" id="hoForm"><input id="hoVal" inputmode="numeric" autocomplete="one-time-code" placeholder="code" aria-label="Code"><button type="submit" class="btn solid">SEND</button>'+(h.kind==='otp'?'<button type="button" class="btn" id="hoDone">I’M DONE</button>':'')+'</form>')
+    +'<div class="tray-msg" id="hoMsg"></div></div>';
+  requestAnimationFrame(()=>tray.classList.add('on'));
+  const send=async v=>{
+    $('hoMsg').textContent='SENDING';
+    try{
+      const r=await fetch('/api/handoffs/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:h.id,value:v})});
+      if(!r.ok){const j=await r.json().catch(()=>({}));$('hoMsg').textContent=String(j.error||'COULD NOT SEND').toUpperCase();return;}
+      $('hoMsg').textContent='SENT — WAITING';
+      handoffs=handoffs.filter(x=>x.id!==h.id);
+      setTimeout(()=>{tray.dataset.h='';paintHandoff();},900);
+    }catch{$('hoMsg').textContent='COULD NOT SEND';}
+  };
+  const on=(id,fn)=>{const el=$(id);if(el)el.addEventListener('click',fn);};
+  if($('hoForm'))$('hoForm').addEventListener('submit',e=>{e.preventDefault();const v=$('hoVal').value.trim();if(v)send(v);});
+  on('hoYes',()=>send('approve'));
+  on('hoNo',()=>send('deny'));
+  on('hoDone',()=>send('done'));
+  on('hoOpen',()=>{
+    if(MOBILE()){goTab('screen');if(!takeover)$('takeover').click();}
+    else{setMode('browser');}
+  });
+  if(STANDALONE()&&'Notification' in window&&Notification.permission==='default')paintBuzz();
+}
+
+function shotFig(h,at,ts){
+  const f=document.createElement('figure');
+  f.className='shot';
+  f.dataset.h=h;
+  f.innerHTML='<img loading="lazy" decoding="async" alt="the screen"><figcaption></figcaption>';
+  const when=new Date(Number(ts)||Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  f.querySelector('figcaption').textContent=(at==='error'?'screen when it stopped · ':'screen at ')+when;
+  f.querySelector('img').addEventListener('click',e=>flyToDesk(e.currentTarget));
+  mountShot(f);
+  return f;
+}
+function mountShot(f){
+  const img=f.querySelector('img');
+  if(!MOBILE())img.removeAttribute('src');
+  else if(!img.getAttribute('src'))img.src='/api/shot?h='+encodeURIComponent(f.dataset.h||'');
+}
+matchMedia('(max-width:900px)').addEventListener('change',()=>{
+  for(const f of document.querySelectorAll('figure.shot'))mountShot(f);
+});
+let flying=null;
+function flyToDesk(img){
+  const land=()=>{if(MOBILE())goTab('screen');else setMode('browser');};
+  if(REDUCED||!img.naturalWidth){land();return;}
+  if(flying){flying.remove();flying=null;}
+  const from=img.getBoundingClientRect();
+  land();
+  requestAnimationFrame(()=>{
+    const to=$('deskwrap').getBoundingClientRect();
+    if(!to.width||!from.width)return;
+    const g=img.cloneNode();
+    g.className='';
+    g.style.cssText='position:fixed;margin:0;z-index:60;pointer-events:none;object-fit:cover;object-position:top;'
+      +'transform-origin:top left;transition:transform var(--motion-travel) var(--ease-travel),opacity var(--motion-ui) linear;'
+      +'left:'+from.left+'px;top:'+from.top+'px;width:'+from.width+'px;height:'+from.height+'px';
+    document.body.appendChild(g);
+    flying=g;
+    requestAnimationFrame(()=>{
+      g.style.transform='translate('+(to.left-from.left)+'px,'+(to.top-from.top)+'px) scale('+(to.width/from.width)+','+(to.height/from.height)+')';
+      setTimeout(()=>{g.style.opacity='0';},340);
+      setTimeout(()=>{g.remove();if(flying===g)flying=null;},560);
+    });
+  });
+}
+
+const TAB_KEY='case.drive.tab';
+let tab='chat';
+const paneFor=n=>n==='screen'?$('rail'):n==='more'?$('more'):$('work');
+const tabBtn=n=>$(n==='screen'?'tabScreen':n==='more'?'tabMore':'tabChat');
+function goTab(name){
+  if(!MOBILE())return;
+  tab=['chat','screen','more'].includes(name)?name:'chat';
+  body.dataset.tab=tab;
+  try{localStorage.setItem(TAB_KEY,tab);sessionStorage.setItem(TAB_KEY,tab);}catch{}
+  for(const n of ['chat','screen','more']){
+    const el=paneFor(n);
+    if(n===tab)el.removeAttribute('inert');else el.setAttribute('inert','');
+    tabBtn(n).classList.toggle('on',n===tab);
+    tabBtn(n).setAttribute('aria-selected',String(n===tab));
+  }
+  if(tab==='screen'){hookDesk();placeTabLine();}
+}
+$('tabChat').addEventListener('click',()=>goTab('chat'));
+$('tabScreen').addEventListener('click',()=>goTab('screen'));
+$('tabMore').addEventListener('click',()=>{goTab('more');paintBuzz();});
+function syncShell(){
+  if(MOBILE()){let t='';try{t=localStorage.getItem(TAB_KEY)||sessionStorage.getItem(TAB_KEY)||'';}catch{}goTab(t||tab);}
+  else{delete body.dataset.tab;for(const n of ['chat','screen','more'])paneFor(n).removeAttribute('inert');}
+  applyViewOnly();
+}
+addEventListener('resize',syncShell);
+if(window.visualViewport){
+  const vv=window.visualViewport;
+  const onVV=()=>body.classList.toggle('kbd',innerHeight-vv.height>120);
+  vv.addEventListener('resize',onVV);
+}
+
+let takeover=false;
+function applyViewOnly(){
+  const readonly=MOBILE()&&!takeover;
+  const frame=$('deskframe');
+  frame.inert=readonly;
+  frame.style.pointerEvents=readonly?'none':'';
+  frame.tabIndex=readonly?-1:0;
+  try{const w=frame.contentWindow;if(w&&w.UI){w.UI.updateSetting('view_only',readonly);if(w.UI.rfb)w.UI.rfb.viewOnly=readonly;}}catch{}
+}
+addEventListener('case-desk-ready',applyViewOnly);
+$('takeover').addEventListener('click',()=>{
+  takeover=!takeover;
+  const b=$('takeover');
+  b.classList.toggle('solid',takeover);
+  b.setAttribute('aria-pressed',String(takeover));
+  b.textContent=takeover?'VIEW ONLY':'TAKE OVER';
+  applyViewOnly();
+});
+$('kbdBtn').addEventListener('click',()=>{
+  if(!takeover)$('takeover').click();
+  const s=$('kbdSink');s.value='';s.focus();
+});
+const sendVnc=k=>{if(MOBILE()&&!takeover)return;try{const w=$('deskframe').contentWindow;if(w&&w.UI&&w.UI.rfb)w.UI.rfb.sendKey(k,null);}catch{}};
+$('kbdSink').addEventListener('input',e=>{
+  for(const ch of String(e.target.value))sendVnc(ch.codePointAt(0));
+  e.target.value='';
+});
+$('kbdSink').addEventListener('keydown',e=>{
+  const k=e.key==='Enter'?0xff0d:e.key==='Backspace'?0xff08:e.key==='Tab'?0xff09:0;
+  if(!k)return;
+  e.preventDefault();sendVnc(k);
+});
+
+$('moreFiles').addEventListener('click',()=>{setMode('files');goTab('screen');});
+$('moreCreds').addEventListener('click',()=>{setMode('creds');goTab('screen');});
+$('moreSched').addEventListener('click',()=>openSched());
+$('moreKey').addEventListener('click',()=>openKey());
+$('moreBuzz').addEventListener('click',turnOnBuzz);
+
+const INSTALL_KEY='case.drive.install';
+let bip=null;
+addEventListener('beforeinstallprompt',e=>{e.preventDefault();bip=e;showInstall();});
+function showInstall(){
+  let dis='';try{dis=localStorage.getItem(INSTALL_KEY)||'';}catch{}
+  if(dis==='no'||STANDALONE()||!MOBILE())return;
+  if(document.getElementById('instBar'))return;
+  const ios=/iphone|ipad|ipod/i.test(navigator.userAgent);
+  if(!bip&&!ios)return;
+  const bar=document.createElement('div');
+  bar.id='instBar';
+  bar.className='mbar';
+  bar.style.cssText='gap:8px;font-size:12.5px';
+  bar.innerHTML='<span style="flex:1">'+(bip?'Install Drive on this phone.':'Share &rarr; Add to Home Screen to install Drive.')+'</span>'
+    +(bip?'<button type="button" class="btn solid" id="instYes">INSTALL</button>':'')
+    +'<button type="button" class="btn" id="instNo">DISMISS</button>';
+  $('work').insertBefore(bar,$('tray'));
+  const gone=()=>{try{localStorage.setItem(INSTALL_KEY,'no');}catch{}bar.remove();};
+  bar.querySelector('#instNo').addEventListener('click',gone);
+  if(bip)bar.querySelector('#instYes').addEventListener('click',()=>{const p=bip;bip=null;bar.remove();p.prompt();});
+}
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js',{updateViaCache:'none'}).catch(()=>{});
+  navigator.serviceWorker.addEventListener('message',e=>{
+    const u=e.data&&e.data.type==='case-open'&&e.data.url;
+    if(!u)return;
+    const qp=new URLSearchParams(String(u).split('?')[1]||'');
+    if(qp.get('thread'))openThread(qp.get('thread'));
+    if(qp.get('handoff')){if(MOBILE())goTab('chat');loadHandoffs();}
+  });
+}
+const STANDALONE=()=>matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
+let pushKey='';
+const urlB64=s=>{const p='='.repeat((4-s.length%4)%4);const b=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from(b,c=>c.charCodeAt(0));};
+async function paintBuzz(){
+  if(!('serviceWorker' in navigator))return;
+  try{const r=await fetch('/api/push');const j=await r.json();pushKey=j.publicKey||'';}catch{}
+  const granted=('Notification' in window)&&Notification.permission==='granted';
+  $('moreBuzz').hidden=!(STANDALONE()&&('Notification' in window)&&!granted);
+  if(granted)reconcilePush();
+}
+async function reconcilePush(){
+  try{
+    const reg=await navigator.serviceWorker.ready;
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub){
+      if(!pushKey)return;
+      sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlB64(pushKey)});
+    }
+    await fetch('/api/push',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(sub.toJSON?sub.toJSON():sub)});
+  }catch{}
+}
+function turnOnBuzz(){
+  if(!('Notification' in window))return;
+  Notification.requestPermission().then(p=>{if(p==='granted')return reconcilePush();}).then(paintBuzz);
+}
+
 /* ---------- boot ---------- */
+addEventListener('pagehide',()=>{
+  try{if(activeTid&&activeTid!=='__pending')localStorage.setItem(THREAD_KEY,activeTid);}catch{}
+  try{if(tab)localStorage.setItem(TAB_KEY,tab);}catch{}
+});
+let wasHidden=false;
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){wasHidden=true;return;}
+  if(wasHidden){
+    wasHidden=false;
+    nudgeDesk();
+  }
+  refresh().then(resumeBackground);
+});
+addEventListener('pageshow',e=>{if(e.persisted){reconnectDesk();refresh().then(resumeBackground);}});
 paintCfg();
 placeTabLine();
 paintOmni(false);
+syncShell();
 if(location.hash==='#files')setMode('files');
-refresh();
+if(new URLSearchParams(location.search).get('handoff'))goTab('chat');
+loadKeys().then(()=>{paint();paintCfg();});
+refresh().then(resumeBackground);
 setInterval(refresh,8000);
 })();
 </script>

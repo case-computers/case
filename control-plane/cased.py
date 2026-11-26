@@ -14,6 +14,7 @@ import hmac
 import html
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,7 @@ from config import (API_BASE, AUDIT_DIR, BIND_HOST, BIND_PORT, IMAGE, MAX_COMPUT
                     MAX_CPUS, MAX_RAM_MB, MAX_RUNNING, MIN_CPUS, MIN_RAM_MB, RUNS_DIR,
                     VNC_PORT, log)
 import browse
-from deskclient import desk_bytes, desk_json, navigate
+from deskclient import desk_bytes, desk_json, eval_js, navigate
 from errors import ApiError
 from events import sse_gen
 from notify import notifier
@@ -166,6 +167,18 @@ def _redacted(path):
             or path.startswith("/assist/"))
 
 
+_URL_SECRET = re.compile(
+    r"((?:[?&#]|%3[fF]|%26|%23)"
+    r"(?:code|token|access_token|id_token|refresh_token|assertion|client_secret"
+    r"|session_state|api_?key|sig|signature|auth|authorization|password|secret)"
+    r"(?:=|%3[dD]))(?:(?!%26|%23)[^&#\s\"'])+",
+    re.IGNORECASE)
+
+
+def _scrub(text):
+    return _URL_SECRET.sub(r"\1[redacted]", text)
+
+
 @app.middleware("http")
 async def audit_mw(request: Request, call_next):
     path = request.url.path
@@ -176,7 +189,7 @@ async def audit_mw(request: Request, call_next):
     resp = await call_next(request)
     # skip noise + SSE streams; a desk open is ~25 asset GETs through the live relay
     if path != "/health" and not path.endswith("/events") and "/live/" not in path:
-        req = "[redacted]" if _redacted(path) else body[:2000].decode("utf-8", "replace")
+        req = "[redacted]" if _redacted(path) else _scrub(body[:2000].decode("utf-8", "replace"))
         # a fill/assist/answer token is a live capability, the log records that the
         # door was used, never the key itself
         if path.startswith("/fill/"):
@@ -191,7 +204,7 @@ async def audit_mw(request: Request, call_next):
             logged_path = path
         line = {"ts": now(), "session": request.headers.get("x-case-session", "-"),
                 "client": request.client.host if request.client else "-",
-                "method": request.method, "path": logged_path, "query": request.url.query,
+                "method": request.method, "path": logged_path, "query": _scrub("?" + request.url.query)[1:],
                 "status": resp.status_code, "ms": int((time.time() - t0) * 1000),
                 "req": "[large]" if big else req}
         await asyncio.to_thread(_audit_append, line)
@@ -423,7 +436,8 @@ def eval_(cid: str, body: dict = Body(...), wake: bool = False):
         if "expression" not in body:
             raise ApiError(400, "bad_request", "body needs 'expression'")
         timeout = _timeout(body, 20, 120)
-        return desk_json(row, "POST", "/eval", json=body, timeout=timeout + 15)
+        tid = browse.prepare_target(row, body.get("target_id"))
+        return eval_js(row, body["expression"], timeout, target_id=tid)
 
 
 @app.post("/v1/computers/{cid}/navigate")
@@ -432,20 +446,29 @@ def navigate_(cid: str, body: dict = Body(...), wake: bool = False):
         if "url" not in body:
             raise ApiError(400, "bad_request", "body needs 'url'")
         timeout = _timeout(body, 30, 120)                              # never navigate then
-        out = navigate(row, body["url"], timeout)                      # report failure at t=0
-        if out.get("ok") and body.get("snapshot", True):
-            fresh = browse.snapshot(row)      # navigate already waited for readyState
-            if fresh.get("ok"):
-                out["snapshot"] = fresh
+        tid = browse.prepare_target(row, body.get("target_id"))
+        out = navigate(row, body["url"], timeout, target_id=tid)       # report failure at t=0
+        out = browse.with_elements(row, out, creds=_cred_domains(cid), target_id=tid)
         return out
 
 
 # ---------- element-level browsing (browse.py; control-plane composition) ----------
 
+def _cred_domains(cid):
+    """[{name, domains}] for wall hints. Names and domains only — never material."""
+    out = []
+    for r in store.list_credentials(cid):
+        try:
+            out.append({"name": r["name"], "domains": json.loads(r["domains"] or "[]")})
+        except (ValueError, TypeError):
+            out.append({"name": r["name"], "domains": []})
+    return out
+
+
 @app.get("/v1/computers/{cid}/page")
-def page_(cid: str, wake: bool = False):
+def page_(cid: str, wake: bool = False, target_id: str = None):
     with awake(cid, wake) as row:
-        return browse.snapshot(row)
+        return browse.snapshot(row, target_id=target_id)
 
 
 @app.post("/v1/computers/{cid}/click")
@@ -456,7 +479,8 @@ def click_(cid: str, body: dict = Body(...), wake: bool = False):
         return browse.click_element(row, _int(body["ref"], None, "ref"), name=body.get("name"),
                                     text=body.get("text"),
                                     screenshot=bool(body.get("screenshot")),
-                                    snapshot_after=bool(body.get("snapshot", True)))
+                                    snapshot_after=bool(body.get("snapshot", True)),
+                                    target_id=body.get("target_id"))
 
 
 @app.post("/v1/computers/{cid}/hover")
@@ -464,7 +488,8 @@ def hover_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         if body.get("ref") in (None, ""):
             raise ApiError(400, "bad_request", "body needs 'ref' (from GET /page)")
-        return browse.hover(row, _int(body["ref"], None, "ref"), name=body.get("name"))
+        return browse.hover(row, _int(body["ref"], None, "ref"), name=body.get("name"),
+                            target_id=body.get("target_id"))
 
 
 @app.post("/v1/computers/{cid}/upload")
@@ -473,14 +498,15 @@ def upload_(cid: str, body: dict = Body(...), wake: bool = False):
         if body.get("ref") in (None, "") or "path" not in body:
             raise ApiError(400, "bad_request", "body needs 'ref' and 'path'")
         return browse.upload(row, _int(body["ref"], None, "ref"), body["path"],
-                             name=body.get("name"))
+                             name=body.get("name"), target_id=body.get("target_id"))
 
 
 @app.post("/v1/computers/{cid}/fill")
 def fill_(cid: str, body: dict = Body(...), wake: bool = False):
     with awake(cid, wake) as row:
         return browse.fill(row, body.get("fields"), submit=bool(body.get("submit")),
-                           snapshot_after=bool(body.get("snapshot", True)))
+                           snapshot_after=bool(body.get("snapshot", True)),
+                           target_id=body.get("target_id"))
 
 
 @app.post("/v1/computers/{cid}/wait")
@@ -490,7 +516,7 @@ def wait_(cid: str, body: dict = Body(...), wake: bool = False):
         return browse.wait_for(row, selector=body.get("selector"), text=body.get("text"),
                                gone=bool(body.get("gone")),
                                network_idle=bool(body.get("network_idle")),
-                               timeout_s=timeout)
+                               timeout_s=timeout, target_id=body.get("target_id"))
 
 
 @app.post("/v1/computers/{cid}/teach-tick")
@@ -542,7 +568,11 @@ def capture_start(cid: str, body: dict = Body(...), wake: bool = False):
             raise ApiError(400, "bad_request", "body needs 'pattern'")
         if len(body["pattern"]) > 200:
             raise ApiError(400, "bad_request", "pattern too long")
-        return desk_json(row, "POST", "/capture/start", json=body, timeout=20)
+        payload = {"pattern": body["pattern"]}
+        tid = browse.prepare_target(row, body.get("target_id"))
+        if tid:
+            payload["target_id"] = tid
+        return desk_json(row, "POST", "/capture/start", json=payload, timeout=20)
 
 
 @app.get("/v1/computers/{cid}/capture")
@@ -1017,6 +1047,14 @@ def login(cid: str, body: dict = Body(...), wake: bool = False):
 @app.get("/v1/handoffs")
 def list_handoffs(status: str = None):
     return {"handoffs": handoffs.list_handoffs(status)}
+
+
+@app.get("/v1/handoffs/{hid}/wait")
+async def wait_handoff(hid: str,
+                       after_status: str = None,
+                       timeout_s: int = Query(handoffs.WAIT_TIMEOUT_DEFAULT_S)):
+    """Long-poll until a human answers the handoff, it ends, or the wait times out."""
+    return await handoffs.wait_handoff(hid, after_status=after_status, timeout_s=timeout_s)
 
 
 @app.get("/v1/handoffs/{hid}")

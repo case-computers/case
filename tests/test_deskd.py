@@ -561,6 +561,55 @@ def test_capture_step_getResponseBody_error_is_visible():
     assert buf[0]["error"] == "No data found for resource" and "body" not in buf[0]
 
 
+# ---- eval: top-level return and CDP deadlines ----
+
+class _FakeTab:
+    def __init__(self, target_id=None, results=()):
+        self.target_id = target_id or "T1"
+        self.ws = mock.Mock()
+        self.calls = []
+        self._results = list(results)
+
+    def cmd(self, method, **params):
+        self.calls.append((method, params.get("expression")))
+        return self._results.pop(0)
+
+    def close(self):
+        pass
+
+
+def _with_tab(tab):
+    return mock.patch.object(deskd, "Tab", lambda tid=None: tab)
+
+
+def test_eval_runs_top_level_return_as_async_body_after_a_parse_check():
+    illegal = {"exceptionDetails": {"exception": {"description": "SyntaxError: Illegal return statement"}}}
+    tab = _FakeTab(results=[{}, illegal, {"result": {"value": 7}}])
+    with _with_tab(tab):
+        r = deskd.eval_({"expression": "return await Promise.resolve(7)"})
+    assert r == {"ok": True, "value": 7, "truncated": False}
+    assert tab.calls == [("Runtime.enable", None),
+                         ("Runtime.compileScript", "return await Promise.resolve(7)"),
+                         ("Runtime.evaluate", "(async()=>{return await Promise.resolve(7)\n})()")]
+
+
+def test_eval_never_runs_an_expression_twice():
+    runtime_throw = {"exceptionDetails": {"exception": {"description": "Error: Illegal return statement"},
+                                          "lineNumber": 0, "columnNumber": 6}}
+    tab = _FakeTab(results=[{}, {}, runtime_throw])
+    with _with_tab(tab):
+        r = deskd.eval_({"expression": "fire(); throw new Error('Illegal return statement')"})
+    assert r["ok"] is False
+    assert [m for m, _ in tab.calls] == ["Runtime.enable", "Runtime.compileScript", "Runtime.evaluate"]
+
+
+def test_eval_skips_the_parse_check_when_nothing_can_be_a_return():
+    tab = _FakeTab(results=[{"result": {"value": 2}}])
+    with _with_tab(tab):
+        assert deskd.eval_({"expression": "1+1"})["value"] == 2
+    assert [m for m, _ in tab.calls] == ["Runtime.evaluate"]
+
+
 # ---- the injection gate and /file scoping, over the real ASGI app ----
 
 import tempfile  # noqa: E402
@@ -646,7 +695,7 @@ def test_navigate_surfaces_the_navigation_error():
     # a foreign origin instead of the DNS failure it was
     tab = RecordingTab()
     tab.cmd = lambda method, **p: {"frameId": "f", "errorText": "net::ERR_NAME_NOT_RESOLVED"}
-    with mock.patch.object(deskd, "Tab", lambda: tab):
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab):
         out = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
                            "url": "https://site.com/login"})
     assert out == {"status": "failed", "reason": "login error: RuntimeError: "
@@ -733,7 +782,7 @@ def test_login_clears_password_field_while_still_gated():
     # A failed submit leaves the secret in the DOM; clearing it after injecting
     # goes False would expose it to /screenshot and /eval in between.
     tab = RecordingTab()
-    with mock.patch.object(deskd, "Tab", lambda: tab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
          mock.patch.object(deskd, "navigate"), \
          mock.patch.object(deskd, "domain_ok", return_value=True), \
          mock.patch.object(deskd, "fill_login_form", return_value=None), \
@@ -757,7 +806,7 @@ def test_overlapping_injections_keep_the_gate_closed():
             release.wait(5)
 
     deskd.state["login"] = {"kind": "approval", "cred_name": "x", "domains": ["site.com"], "at": 0}
-    with mock.patch.object(deskd, "Tab", RecordingTab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: RecordingTab()), \
          mock.patch.object(deskd, "apply_challenge_action", apply):
         resume = threading.Thread(target=deskd.login_resume, args=({"value": "approve"},))
         resume.start()
@@ -807,10 +856,10 @@ def test_eval_started_before_an_injection_is_refused():
     def inject():
         deskd.inject_begin()
         deskd.inject_end()
-    with mock.patch.object(deskd, "Tab", lambda: SlowEvalTab(inject)):
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: SlowEvalTab(inject)):
         r = _client().post("/eval", headers=H, json={"expression": "pw.value"})
     assert r.status_code == 423 and "hunter2" not in r.text, r.text
-    with mock.patch.object(deskd, "Tab", lambda: SlowEvalTab(lambda: None)):
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: SlowEvalTab(lambda: None)):
         r = _client().post("/eval", headers=H, json={"expression": "1"})
     assert r.json() == {"ok": True, "value": "hunter2", "truncated": False}, r.text
 
@@ -818,7 +867,7 @@ def test_eval_started_before_an_injection_is_refused():
 def test_login_rejects_http_redirect_before_form_fill():
     tab = RecordingTab()
     tab.js = lambda expr: "http://site.com/login" if expr == "location.href" else None
-    with mock.patch.object(deskd, "Tab", lambda: tab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
          mock.patch.object(deskd, "navigate"), \
          mock.patch.object(deskd, "fill_login_form") as fill_form:
         out = deskd.login({"credential": {"name": "x", "domains": ["site.com"]},
@@ -832,7 +881,7 @@ def test_login_resume_rechecks_origin_before_otp_fill():
     tab = RecordingTab()
     tab.js = lambda expr: "http://site.com/login" if expr == "location.href" else None
     deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
-    with mock.patch.object(deskd, "Tab", lambda: tab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
          mock.patch.object(deskd, "apply_challenge_action") as apply:
         out = deskd.login_resume({"value": "123456"})
     assert out == {"status": "failed",
@@ -844,7 +893,7 @@ def test_login_resume_rechecks_nonapproval_code_path_origin():
     tab = RecordingTab()
     tab.js = lambda expr: "https://evil.example/login?token=topsecret" if expr == "location.href" else None
     deskd.state["login"] = {"kind": "captcha", "cred_name": "x", "domains": ["site.com"], "at": 0}
-    with mock.patch.object(deskd, "Tab", lambda: tab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
          mock.patch.object(deskd, "apply_challenge_action") as apply:
         out = deskd.login_resume({"value": "123456"})
     assert out == {"status": "failed", "reason": "page origin 'evil.example' not in credential domains"}
@@ -857,13 +906,13 @@ def test_login_resume_post_check_reads_the_page_not_the_url():
         tab = FakeTab(text="Welcome back", href=href)
         tab.close = lambda: None
         deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
-        with mock.patch.object(deskd, "Tab", lambda: tab), \
+        with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
              mock.patch.object(deskd, "apply_challenge_action", return_value=None):
             assert deskd.login_resume({"value": "123456"}) == {"status": "success"}, href
     tab = FakeTab(text="That code is invalid", href="https://site.com/otp")
     tab.close = lambda: None
     deskd.state["login"] = {"kind": "otp", "cred_name": "x", "domains": ["site.com"], "at": 0}
-    with mock.patch.object(deskd, "Tab", lambda: tab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
          mock.patch.object(deskd, "apply_challenge_action", return_value=None):
         out = deskd.login_resume({"value": "123456"})
     assert out["status"] == "failed" and "invalid" in out["reason"], out
@@ -913,7 +962,7 @@ def test_auth_submit_challenge_allows_https_and_loopback_code_origins():
                          ("http://localhost/challenge", "localhost"),
                          ("http://127.0.0.1/challenge", "127.0.0.1"),
                          ("http://[::1]/challenge", "::1")):
-        with mock.patch.object(deskd, "Tab", lambda: ChallengeTab(href)), \
+        with mock.patch.object(deskd, "Tab", lambda *a, **k: ChallengeTab(href)), \
              mock.patch.object(deskd, "apply_challenge_action", return_value=None) as apply:
             out = deskd.auth_submit_challenge(
                 {"kind": "otp", "value": "123456", "domains": [domain]})
@@ -922,7 +971,7 @@ def test_auth_submit_challenge_allows_https_and_loopback_code_origins():
 
 
 def test_auth_submit_challenge_rejects_foreign_https_without_query_secret():
-    with mock.patch.object(deskd, "Tab", lambda: ChallengeTab("https://evil.example/code?token=topsecret")), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: ChallengeTab("https://evil.example/code?token=topsecret")), \
          mock.patch.object(deskd, "apply_challenge_action") as apply:
         out = deskd.auth_submit_challenge(
             {"kind": "code", "value": "123456", "domains": ["site.com"]})
@@ -936,7 +985,7 @@ def test_auth_submit_challenge_refused_code_is_not_ok_and_keeps_the_login_held()
     deskd.state["login"], deskd.state["in_login"] = dict(held), True
     tab = FakeTab(text="Invalid code. Enter the verification code", href="https://site.com/otp")
     tab.close = lambda: None
-    with mock.patch.object(deskd, "Tab", lambda: tab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
          mock.patch.object(deskd, "apply_challenge_action", return_value=None):
         out = deskd.auth_submit_challenge({"kind": "otp", "value": "000000",
                                            "domains": ["site.com"]})
@@ -945,7 +994,7 @@ def test_auth_submit_challenge_refused_code_is_not_ok_and_keeps_the_login_held()
 
     tab = FakeTab(text="Welcome back", href="https://site.com/home")
     tab.close = lambda: None
-    with mock.patch.object(deskd, "Tab", lambda: tab), \
+    with mock.patch.object(deskd, "Tab", lambda *a, **k: tab), \
          mock.patch.object(deskd, "apply_challenge_action", return_value=None):
         out = deskd.auth_submit_challenge({"kind": "otp", "value": "123456",
                                            "domains": ["site.com"]})

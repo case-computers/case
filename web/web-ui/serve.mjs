@@ -19,10 +19,13 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import OpenAI from 'openai';
-import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRetryable, clip } from './case-tools.mjs';
+import webpush from 'web-push';
+import { CASE_TOOLS, caseCall, caseToolPlan, runCaseTool, streamEventToNdjson, tracesFromOutput, chatAuth, envDriveAuth, resolveChatModel, resolveChatEffort, histToAnthropicMessages, anthropicToolLoop, withRateRetry, isRetryable, clip } from './case-tools.mjs';
 import * as ntfy from './ntfy.mjs';
 import { PHONE_THREAD_ID, routePhone } from './phone.mjs';
 import * as telegram from './telegram.mjs';
+import { putProviderKey, deleteProviderKey, getProviderKey, newestProviderKey, status as keyStatus } from './provider-secrets.mjs';
+import { codexBin, codexStatus, startDeviceLogin, runCodexTurn, codexLogout, DEVICE_URL } from './codex-brain.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4174);
@@ -391,14 +394,14 @@ const EXTRA_TOOLS = [
   { type: 'function', name: 'computer_list', description: 'List all computers with state, resources and credential names. Reuse an existing computer — only computer_create for an identity that should stay separate.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'computer_create', description: 'Create a persistent computer (Linux desktop + Chromium). Blocks until running. Computers are durable: logins, cookies and files survive sleep. Check computer_list first.', parameters: { type: 'object', properties: { name: { type: 'string' } }, additionalProperties: false } },
   { type: 'function', name: 'computer_screenshot', description: 'Screenshot of the computer display (1280x800 by default). Wakes if asleep. Prefer computer_snapshot for anything inside a web page; use this for canvas, visual layout, and anything outside the browser window. marks=true draws numbered snapshot boxes on the PNG (does not change the live page).', parameters: { type: 'object', properties: { marks: { type: 'boolean' } }, additionalProperties: false } },
-  { type: 'function', name: 'computer_snapshot', description: 'Numbered list of visible interactive elements on the active browser tab. PREFER over screenshots for finding what to click: returns lines like [12] button "Save changes" — pass the number to computer_click_element or computer_fill. Starred lines (*[n]) appeared since the last snapshot. You rarely need this twice: navigate, click and fill(submit) each return the fresh snapshot themselves.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
-  { type: 'function', name: 'computer_click_element', description: 'Click element [ref] from the last computer_snapshot. Pass name (quoted text from the snapshot line) so a changed page is refused with a fresh snapshot instead of a wrong click. text, if given, is typed into the element after the click. The result carries `snapshot` and the first 2000 chars of page text — do NOT call computer_snapshot after this.', parameters: { type: 'object', properties: { ref: { type: 'number' }, name: { type: 'string' }, text: { type: 'string' }, screenshot: { type: 'boolean' } }, required: ['ref'], additionalProperties: false } },
-  { type: 'function', name: 'computer_hover', description: 'Hover the OS pointer over snapshot [ref] without clicking. Use for menus that only appear on hover. Pass name so a changed page is refused.', parameters: { type: 'object', properties: { ref: { type: 'number' }, name: { type: 'string' } }, required: ['ref'], additionalProperties: false } },
-  { type: 'function', name: 'computer_upload', description: 'Assign a file already on the computer (path under /home/agent/, max 5MB) to snapshot [ref] which must be input[type=file]. Write the file first with computer_file_put or exec — do not send bytes here.', parameters: { type: 'object', properties: { ref: { type: 'number' }, path: { type: 'string' }, name: { type: 'string' } }, required: ['ref', 'path'], additionalProperties: false } },
-  { type: 'function', name: 'computer_fill', description: 'Fill a whole form in one call: fields=[{ref, value}] with refs from computer_snapshot. Never for passwords or OTP codes — vaulted computer_login owns those. submit=true submits the form at the end, and the result then carries `snapshot` of the page it landed on — no computer_snapshot needed after one.', parameters: { type: 'object', properties: { fields: { type: 'array', items: { type: 'object', properties: { ref: { type: 'number' }, value: {} }, required: ['ref', 'value'], additionalProperties: false } }, submit: { type: 'boolean' } }, required: ['fields'], additionalProperties: false } },
-  { type: 'function', name: 'computer_wait_for', description: 'Block until the page is ready instead of polling with eval. Exactly one of: selector (CSS), text (in body innerText), network_idle=true. gone=true inverts selector/text (wait for spinner to disappear).', parameters: { type: 'object', properties: { selector: { type: 'string' }, text: { type: 'string' }, gone: { type: 'boolean' }, network_idle: { type: 'boolean' }, timeout_s: { type: 'number' } }, additionalProperties: false } },
-  { type: 'function', name: 'computer_tabs', description: 'Browser tabs: action=list|activate|new|close. eval/snapshot/capture talk to the ACTIVE tab — if a click opened a new tab and the page stopped responding, list then activate the right one. activate/close need target_id from list; new needs an http(s) url.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'activate', 'new', 'close'] }, target_id: { type: 'string' }, url: { type: 'string' } }, required: ['action'], additionalProperties: false } },
-  { type: 'function', name: 'computer_capture_start', description: 'Start capturing network response bodies in the active tab whose URL matches url_pattern (regex). Survives SPA nav; catches fetch and XHR. Then navigate/act and drain with computer_capture_read. e.g. url_pattern="SearchTimeline|/graphql".', parameters: { type: 'object', properties: { url_pattern: { type: 'string' } }, required: ['url_pattern'], additionalProperties: false } },
+  { type: 'function', name: 'computer_snapshot', description: 'Numbered list of visible interactive elements on the active browser tab. PREFER over screenshots for finding what to click: returns lines like [12] button "Save changes" — pass the number to computer_click_element or computer_fill. Starred lines (*[n]) appeared since the last snapshot (autocomplete); click one, do not press Enter. Click and navigate already return the page text: snapshot again only when you need refs on a changed page.', parameters: { type: 'object', properties: { target_id: { type: 'string' } }, additionalProperties: false } },
+  { type: 'function', name: 'computer_click_element', description: 'Click element [ref] from the last computer_snapshot. Pass name (quoted text from the snapshot line) so a changed page is refused with a fresh snapshot instead of a wrong click. text, if given, is typed into the element after the click. The result carries `snapshot` and the first 2000 chars of page text — do NOT call computer_snapshot after this.', parameters: { type: 'object', properties: { ref: { type: 'number' }, name: { type: 'string' }, text: { type: 'string' }, screenshot: { type: 'boolean' }, target_id: { type: 'string' } }, required: ['ref'], additionalProperties: false } },
+  { type: 'function', name: 'computer_hover', description: 'Hover the OS pointer over snapshot [ref] without clicking. Use for menus that only appear on hover. Pass name so a changed page is refused.', parameters: { type: 'object', properties: { ref: { type: 'number' }, name: { type: 'string' }, target_id: { type: 'string' } }, required: ['ref'], additionalProperties: false } },
+  { type: 'function', name: 'computer_upload', description: 'Assign a file already on the computer (path under /home/agent/, max 5MB) to snapshot [ref] which must be input[type=file]. Write the file first with computer_file_put or exec — do not send bytes here.', parameters: { type: 'object', properties: { ref: { type: 'number' }, path: { type: 'string' }, name: { type: 'string' }, target_id: { type: 'string' } }, required: ['ref', 'path'], additionalProperties: false } },
+  { type: 'function', name: 'computer_fill', description: 'Fill a whole form in one call: fields=[{ref, value}] with refs from computer_snapshot. Never for passwords or OTP codes — vaulted computer_login owns those. submit=true submits the form at the end, and the result then carries `snapshot` of the page it landed on — no computer_snapshot needed after one.', parameters: { type: 'object', properties: { fields: { type: 'array', items: { type: 'object', properties: { ref: { type: 'number' }, value: {} }, required: ['ref', 'value'], additionalProperties: false } }, submit: { type: 'boolean' }, target_id: { type: 'string' } }, required: ['fields'], additionalProperties: false } },
+  { type: 'function', name: 'computer_wait_for', description: 'Block until the page is ready instead of polling with eval. Exactly one of: selector (CSS), text (in body innerText), network_idle=true. gone=true inverts selector/text (wait for spinner to disappear). Prefer selector over a guessed text; network_idle never settles on long-polling apps (Gmail, Slack). On timeout the result carries the page url, title and first 300 chars: read those, do not retry with another guess.', parameters: { type: 'object', properties: { selector: { type: 'string' }, text: { type: 'string' }, gone: { type: 'boolean' }, network_idle: { type: 'boolean' }, timeout_s: { type: 'number' }, target_id: { type: 'string' } }, additionalProperties: false } },
+  { type: 'function', name: 'computer_tabs', description: 'Browser tabs: action=list|activate|new|close|close_others. eval/snapshot/capture talk to the ACTIVE tab: if a click opened a new tab and the page stopped responding, list then activate the right one. activate/close need target_id from list; new needs an http(s) url; close_others closes every tab but the active one in one call, including tabs the user keeps open: only when the user asks to clear tabs; close your own tabs by id. Mutations return count and active id, not the list.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'activate', 'new', 'close', 'close_others'] }, target_id: { type: 'string' }, url: { type: 'string' } }, required: ['action'], additionalProperties: false } },
+  { type: 'function', name: 'computer_capture_start', description: 'Start capturing network response bodies in the active tab whose URL matches url_pattern (regex). Survives SPA nav; catches fetch and XHR. Then navigate/act and drain with computer_capture_read. e.g. url_pattern="SearchTimeline|/graphql".', parameters: { type: 'object', properties: { url_pattern: { type: 'string' }, target_id: { type: 'string' } }, required: ['url_pattern'], additionalProperties: false } },
   { type: 'function', name: 'computer_capture_read', description: 'Drain captured network responses. Buffer clears on each read. stop=true also ends the capture. Response bodies only — never request bodies/headers.', parameters: { type: 'object', properties: { stop: { type: 'boolean' } }, additionalProperties: false } },
   { type: 'function', name: 'computer_login', description: 'Log into a site using a vaulted credential (name from the vault list in the developer message). Returns success, failed, or handoff_pending when a human is needed for 2FA/OTP/captcha. Prefer this for any login wall — never ask the user for a password, never type into password fields, never click captchas, never call handoff_request for them. credential is the vault NAME (e.g. x.com), not an email. CALL AT MOST ONCE PER LOGIN. On handoff_pending, immediately call auth_attempt_wait in the same turn.', parameters: { type: 'object', properties: { credential: { type: 'string' }, url: { type: 'string' }, idempotency_key: { type: 'string' } }, required: ['credential', 'url'], additionalProperties: false } },
   { type: 'function', name: 'auth_attempt_wait', description: 'Block until a computer_login attempt advances. Call immediately after computer_login returns handoff_pending. Do not re-call computer_login. Do not ask the user to nudge. Pass attempt_id and since_revision from the login result. On wait_status=timeout while still awaiting_human, call again with the returned revision.', parameters: { type: 'object', properties: { attempt_id: { type: 'string' }, since_revision: { type: 'number' }, max_wait_s: { type: 'number' } }, required: ['attempt_id'], additionalProperties: false } },
@@ -406,11 +409,12 @@ const EXTRA_TOOLS = [
   { type: 'function', name: 'computer_file_put', description: 'Write a file on the computer. content_b64 is the file bytes, base64-encoded.', parameters: { type: 'object', properties: { path: { type: 'string' }, content_b64: { type: 'string' } }, required: ['path', 'content_b64'], additionalProperties: false } },
   { type: 'function', name: 'computer_sleep', description: 'Hibernate the computer. Disk state (sessions, cookies, files) survives, and it wakes in seconds. Sleep when a task is done.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'handoff_request', description: 'Ask the human for help. kind: approval|question (code/text), device|captcha|passkey (live desk). Prefer computer_login for vaulted logins and 2FA/OTP — the platform creates those handoffs. Use kind=device when the human must act on the live desktop (QR, passkey) and login did not open a challenge. Never use this to check a computer_login journey — use auth_attempt_wait.', parameters: { type: 'object', properties: { prompt: { type: 'string' }, kind: { type: 'string', enum: ['approval', 'question', 'device', 'captcha', 'passkey'] } }, required: ['prompt'], additionalProperties: false } },
+  { type: 'function', name: 'handoff_wait', description: 'Block until a human answers a handoff_request, it ends, or the wait times out. Call IMMEDIATELY after handoff_request, the way auth_attempt_wait follows computer_login. Returns wait_status=changed (status now completed|failed|expired) or timeout (still pending — call again with the same handoff_id). A human who is away may take minutes: a timeout is not a refusal and the handoff stays open. Never raise a second handoff_request for the same thing, and never poll by re-navigating the page.', parameters: { type: 'object', properties: { handoff_id: { type: 'string' }, max_wait_s: { type: 'integer' } }, required: ['handoff_id'], additionalProperties: false } },
   { type: 'function', name: 'handoff_list', description: 'List pending handoffs. For login journeys use auth_attempt_wait, not this list and not a fresh computer_login.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'handoff_get', description: 'Fetch one handoff by id (includes screenshot). For login journeys prefer auth_attempt_wait. pending = waiting on the human; validating = human acted, platform is verifying.', parameters: { type: 'object', properties: { handoff_id: { type: 'string' } }, required: ['handoff_id'], additionalProperties: false } },
   { type: 'function', name: 'case_skill', description: 'Procedural memory on this computer. action=list: skills saved here (check BEFORE a multi-step task; if one matches, read and follow it). action=read: full SKILL.md for name. When FOLLOWING a skill, quoted names that came from the original demonstration are anchors and examples — substitute the current task\'s parameters (a different recipient means search for and click THAT person, not the example one) while keeping the step structure. action=save: write content to /home/agent/skills/<name>/SKILL.md — after finishing a task the user may repeat, PROPOSE saving it. Content: SKILL.md with name+description frontmatter, numbered natural-language steps in tool vocabulary with quoted element names as anchors, a checkpoint after each state change, a "Done means" section. GENERALIZE when saving: values typed and items picked in one run are PARAMETERS — name the skill after the task class (x-dm-send, not x-dm-harsh), declare parameters in the description, keep the run\'s values as worked examples only. Keep steps to the fewest tool calls that work: one snapshot per navigation or state change, never one before every click — refs stay valid until the page changes. Logins are ONE computer_login step by vault credential NAME — never write usernames, passwords, OTPs or tokens; save rejects secret-shaped content. New skills are drafts until a later run follows them.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'read', 'save'] }, name: { type: 'string' }, content: { type: 'string' } }, required: ['action'], additionalProperties: false } },
 ];
-const ALL_TOOLS = [...CASE_TOOLS, ...EXTRA_TOOLS];
+export const ALL_TOOLS = [...CASE_TOOLS, ...EXTRA_TOOLS];
 
 export function extraPlan(name, args, id) {
   const a = args || {};
@@ -418,14 +422,18 @@ export function extraPlan(name, args, id) {
   if (name === 'computer_list') return { method: 'GET', rel: '/computers', act: 'list computers' };
   if (name === 'computer_create') return { method: 'POST', rel: '/computers', body: a.name ? { name: a.name } : {}, timeoutMs: 90000, act: `create ${a.name || 'desk'}` };
   if (name === 'computer_screenshot') return { method: 'GET', rel: `${p}/screenshot?wake=true${a.marks ? '&marks=true' : ''}`, screenshot: true, act: a.marks ? 'screenshot marks' : 'screenshot' };
-  if (name === 'computer_snapshot') return { method: 'GET', rel: `${p}/page?wake=true`, act: 'snapshot' };
+  if (name === 'computer_snapshot') return { method: 'GET', rel: `${p}/page?wake=true${a.target_id ? '&target_id=' + encodeURIComponent(a.target_id) : ''}`, act: 'snapshot' };
   if (name === 'computer_click_element') return { method: 'POST', rel: `${p}/click?wake=true`, body: a, act: `click [${a.ref}]${a.name ? ' ' + a.name : ''}` };
   if (name === 'computer_hover') return { method: 'POST', rel: `${p}/hover?wake=true`, body: a, act: `hover [${a.ref}]` };
   if (name === 'computer_upload') return { method: 'POST', rel: `${p}/upload?wake=true`, body: a, timeoutMs: 90000, act: `upload ${a.path || ''} → [${a.ref}]` };
   if (name === 'computer_fill') return { method: 'POST', rel: `${p}/fill?wake=true`, body: a, act: `fill ${Array.isArray(a.fields) ? a.fields.length : 0} fields` };
   if (name === 'computer_wait_for') return { method: 'POST', rel: `${p}/wait?wake=true`, body: a, timeoutMs: ((a.timeout_s || 30) + 20) * 1000, act: `wait ${a.selector || a.text || 'network idle'}` };
   if (name === 'computer_tabs') return { method: 'POST', rel: `${p}/tabs?wake=true`, body: a, act: `tabs ${a.action || 'list'}` };
-  if (name === 'computer_capture_start') return { method: 'POST', rel: `${p}/capture?wake=true`, body: { pattern: a.url_pattern }, act: `capture ${a.url_pattern || ''}` };
+  if (name === 'computer_capture_start') {
+    const body = { pattern: a.url_pattern };
+    if (a.target_id) body.target_id = a.target_id;
+    return { method: 'POST', rel: `${p}/capture?wake=true`, body, act: `capture ${a.url_pattern || ''}` };
+  }
   if (name === 'computer_capture_read') return { method: a.stop ? 'DELETE' : 'GET', rel: `${p}/capture?wake=true`, act: a.stop ? 'capture stop' : 'capture read' };
   if (name === 'computer_file_get') return { method: 'GET', rel: `${p}/files?path=${encodeURIComponent(a.path || '')}&wake=true`, rawFile: true, act: `read ${a.path || ''}` };
   if (name === 'computer_file_put') {
@@ -446,6 +454,10 @@ export function extraPlan(name, args, id) {
   }
   if (name === 'computer_sleep') return { method: 'POST', rel: `${p}/sleep`, timeoutMs: 60000, act: 'sleep' };
   if (name === 'handoff_request') return { method: 'POST', rel: `${p}/handoffs`, body: { kind: a.kind || 'approval', prompt: a.prompt }, act: `handoff ${a.kind || 'approval'}` };
+  if (name === 'handoff_wait') {
+    const secs = Math.max(1, Math.min(Math.floor(Number(a.max_wait_s)) || 240, 240));
+    return { method: 'GET', rel: `/handoffs/${encodeURIComponent(a.handoff_id || '')}/wait?after_status=pending&timeout_s=${secs}`, timeoutMs: (secs + 10) * 1000, act: 'handoff wait' };
+  }
   if (name === 'handoff_list') return { method: 'GET', rel: '/handoffs?status=pending', act: 'handoffs' };
   if (name === 'handoff_get') return { method: 'GET', rel: `/handoffs/${encodeURIComponent(a.handoff_id || '')}`, act: 'handoff' };
   if (name === 'case_skill') return { skill: true, args: a, cid: id, act: `skill ${a.action}${a.name ? ' ' + a.name : ''}` };
@@ -592,6 +604,7 @@ try {
   if (err.code !== 'ENOENT') console.warn('threads:', err.message);
 }
 const CHAT_BUSY = new Set();
+const CHAT_STOP = new Map();
 const STEER = new Map(); // thread id -> user texts typed while the turn runs
 function takeSteers(tid) {
   const q = STEER.get(tid) || [];
@@ -639,7 +652,7 @@ function newThread(title, agent) {
   THREADS.set(t.id, t);
   return t;
 }
-const threadSummary = (t) => ({ id: t.id, title: t.title, agent: t.agent, updated: t.updated, created: t.created });
+const threadSummary = (t) => ({ id: t.id, title: t.title, agent: t.agent, updated: t.updated, created: t.created, running: CHAT_BUSY.has(t.id) });
 // Render view for reopening a thread: text + tool calls only, outputs and
 // reasoning stay server-side.
 export function threadTurns(items) {
@@ -648,6 +661,7 @@ export function threadTurns(items) {
   const failed = new Set((items || []).filter((it) => it?.type === 'function_call_output'
     && /^\{"ok":false[,}]/.test(String(it.output || ''))).map((it) => it.call_id));
   for (const it of items || []) {
+    if (it.card) { turns.push({ who: 'shot', h: it.h || path.basename(String(it.shot || ''), '.png'), at: it.at || 'turn_end', ts: it.ts || 0 }); continue; }
     if (it.shot) continue; // screenshot attachments are model-only
     if (it.role === 'user') {
       const names = (it.attaches || []).map((a) => a.name).filter(Boolean);
@@ -792,14 +806,46 @@ export function stashShot(b64, dir = shotsDir()) {
   const file = path.join(dir, h + '.png');
   try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
   try {
-    if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(String(b64 || ''), 'base64'));
-  } catch { /* best-effort; hydrateShots falls back to a text note */ }
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, Buffer.from(String(b64 || ''), 'base64'));
+      gcShots(dir, 500, [file]);
+    }
+  } catch {}
   return { role: 'user', shot: file, content: [{ type: 'input_text', text: '[screenshot]' }] };
+}
+
+export function gcShots(dir, cap = 500, keep = []) {
+  try {
+    const files = fs.readdirSync(dir).filter((name) => name.endsWith('.png'));
+    if (files.length <= cap) return;
+    const root = path.resolve(dir) + path.sep;
+    const refs = new Set();
+    const addRef = (shot) => {
+      const abs = path.resolve(String(shot || ''));
+      if (abs.startsWith(root) && path.extname(abs) === '.png') refs.add(path.basename(abs));
+    };
+    for (const shot of keep) addRef(shot);
+    try {
+      const rows = JSON.parse(fs.readFileSync(THREADS_FILE, 'utf8'));
+      for (const thread of Array.isArray(rows) ? rows : []) {
+        for (const item of thread?.items || []) addRef(item?.shot);
+      }
+    } catch {}
+    for (const thread of THREADS.values()) for (const item of thread.items || []) addRef(item?.shot);
+    const rows = files.filter((name) => !refs.has(name))
+      .map((name) => ({ name, t: fs.statSync(path.join(dir, name)).mtimeMs })).sort((a, b) => a.t - b.t);
+    for (const row of rows.slice(0, files.length - cap)) fs.rmSync(path.join(dir, row.name), { force: true });
+  } catch {}
+}
+
+export function shotCard(b64, at, dir = shotsDir()) {
+  const it = stashShot(b64, dir);
+  return { role: 'shotcard', card: 1, at, shot: it.shot, h: path.basename(it.shot, '.png'), ts: Date.now() };
 }
 
 // A click that changed nothing yields a byte-identical png. Re-sending it buys
 // no information and then rides along in every later round of the turn.
-export function pushShot(items, shots, b64, dir = shotsDir()) {
+export function pushShot(items, shots, b64, dir = shotsDir(), emit = () => {}) {
   const h = crypto.createHash('sha1').update(b64).digest('hex');
   if (shots.has(h)) {
     items.push({ role: 'user', content: [{ type: 'input_text',
@@ -807,7 +853,10 @@ export function pushShot(items, shots, b64, dir = shotsDir()) {
     return;
   }
   shots.add(h);
-  items.push(stashShot(b64, dir));
+  const stashed = stashShot(b64, dir);
+  items.push(stashed);
+  items.push({ role: 'shotcard', card: 1, at: 'model', h, shot: stashed.shot, ts: Date.now() });
+  emit({ type: 'shot', h, at: 'model' });
 }
 
 /** memo (shot path -> item) lets a turn read and encode each file once, not once
@@ -940,7 +989,7 @@ function hydrateOneAttach(a, dir) {
 }
 
 export function hydrateAttaches(items, dir = inboxDir(), memo = new Map()) {
-  return (items || []).map((it) => {
+  return (items || []).filter((it) => !it?.card).map((it) => {
     if (!it?.attaches?.length) return it;
     const parts = [];
     if (typeof it.content === 'string' && it.content) {
@@ -1014,6 +1063,7 @@ async function steer(req, res) {
   const text = String(body.input || '').slice(0, 32000).trim();
   if (!text) return send(res, 400, 'empty input');
   if (!CHAT_BUSY.has(tid)) return json(res, 409, { error: 'no turn running — send as a normal message' });
+  if (THREADS.get(tid)?.brain === 'chatgpt') return json(res, 409, { error: 'steer not supported with ChatGPT brain' });
   const q = STEER.get(tid) || [];
   q.push(text);
   STEER.set(tid, q);
@@ -1064,7 +1114,7 @@ export async function runTurn({
     thread.agent = id;
     emit({ type: 'claim', thread_id: thread.id, agent: id });
   };
-  const dev = { role: 'developer', content: `You operate Case computer ${id}${cname ? ` (named "${cname}" — that's you when the user addresses it)` : ''} via tools. Loop: computer_navigate, then computer_click_element/computer_fill by ref. computer_hover for menus that only open on hover. computer_upload for input[type=file] (file already under /home/agent — write it first). If the snapshot has *[n] lines, those just appeared (autocomplete) — click one, do not press Enter. navigate, click and fill(submit) each RETURN the page's numbered elements and the first 2000 chars of page text, so read the result you already have — call computer_snapshot only for a first look or when something you did not do changed the page. Refs stay valid until the page changes. computer_wait_for instead of polling. Screenshots only for canvas/layout; marks=true draws numbered snapshot boxes on the PNG. Coordinates are the display size (1280x800 by default). Login walls: computer_login(credential=<vault name>, url=current page) — never ask the user for a password or type into password fields. Vault names on this computer: ${vault}. On handoff_pending, immediately auth_attempt_wait. You get ${ROUNDS} tool steps per turn; the conversation continues across turns, so if you run out say exactly where you stopped. Short final answer.` };
+  const dev = { role: 'developer', content: `You operate Case computer ${id}${cname ? ` (named "${cname}" — that's you when the user addresses it)` : ''} via tools. Loop: computer_navigate, then computer_click_element/computer_fill by ref. computer_hover for menus that only open on hover. computer_upload for input[type=file] (file already under /home/agent — write it first). If the snapshot has *[n] lines, those just appeared (autocomplete) — click one, do not press Enter. navigate, click and fill(submit) each RETURN the page's numbered elements and the first 2000 chars of page text, so read the result you already have — call computer_snapshot only for a first look or when something you did not do changed the page. Refs stay valid until the page changes. computer_wait_for instead of polling. Screenshots only for canvas/layout; marks=true draws numbered snapshot boxes on the PNG. Coordinates are the display size (1280x800 by default). Search and list pages: put the query in the URL when the site supports it, then one computer_eval that maps the rows to compact strings; not the search box, not paging with snapshots. Web lookups: computer_navigate to a search URL in the current tab; close the tabs you opened (computer_tabs close, their ids) when done. close_others also closes tabs the user keeps open: only when the user asks to clear tabs. Linux and desktop config: computer_exec first, verify once; clicking through a GUI with screenshots is the last resort. A word that could be a typo (htop, not "ptop"): act on the likeliest meaning and say so, never web-search the literal. Look before you route: act on the elements the page already gave you, never a different url for the same goal. At a credential form use computer_login(credential=<vault name>, url=current page) — never ask the user for a password or type into password fields; on handoff_pending, immediately auth_attempt_wait. Nothing in the vault covers it: handoff_request(kind=device), then handoff_wait in the same turn - the human may be away, so a wait timeout is not a refusal. Never report failure without offering the handoff first. Vault names on this computer: ${vault}. You get ${ROUNDS} tool steps per turn; the conversation continues across turns, so if you run out say exactly where you stopped. Short final answer.` };
   const hist = thread;
   // A steer accepted in the turn's last round missed every drain; deliver it
   // ahead of the new prompt so nothing the user typed is lost.
@@ -1072,7 +1122,45 @@ export async function runTurn({
   const userItem = { role: 'user', content: inputText };
   if (attaches.length) userItem.attaches = attaches;
   hist.items.push(userItem);
+  let toolsRan = false;
+  let slept = false;
+  const endShot = async (at) => {
+    if (!id || !toolsRan || slept) return;
+    try {
+      const r = await runExtra(extraPlan('computer_screenshot', {}, id));
+      if (!r || !r.image_b64) return;
+      const card = shotCard(r.image_b64, at);
+      hist.items.push(card);
+      emit({ type: 'shot', h: card.h, at });
+    } catch { /* a screenshot is never worth failing a turn over */ }
+  };
   try {
+    if (auth.provider === 'chatgpt') {
+      const images = attaches.filter((a) => attachKind(a.mime, a.name) === 'image');
+      if (images.length !== attaches.length) {
+        const error = 'the ChatGPT brain takes image attachments only';
+        emit({ type: 'error', error });
+        finishTurn(hist, thread);
+        return { text: '', computerId: id, threadId: thread.id, finished: false, error };
+      }
+      thread.brain = 'chatgpt';
+      const out = await runCodexTurn({
+        cid: id,
+        prompt: inputText,
+        resume: thread.codex_thread,
+        effort,
+        images: images.map((a) => a.path),
+        home: HOME,
+        emit: (ev) => { if (ev.type === 'tool') claim(); emit(ev); },
+        items: hist.items,
+        signal: gone.signal,
+        system: dev.content,
+      });
+      if (out.thread_id) thread.codex_thread = out.thread_id;
+      finishTurn(hist, thread);
+      emit({ type: 'done', text: out.text, computer_id: id, thread_id: thread.id });
+      return { text: out.text, computerId: id, threadId: thread.id, finished: out.finished };
+    }
     if (auth.provider === 'anthropic') {
       const messages = histToAnthropicMessages(hydrateShots(hydrateAttaches(hist.items)), { media: true });
       const shots = new Set();
@@ -1112,10 +1200,12 @@ export async function runTurn({
           const result = await toolOrStop(
             () => (eplan ? runExtra(eplan) : runCaseTool(name, args, id, null)),
             actFor(name, args || {}, id));
+          toolsRan = true;
+          if (name === 'computer_sleep' && result && result.ok) slept = true;
           const { image_b64, ...persist } = result;
           const rest = snapshotElide(name, persist, snaps);
           hist.items.push({ type: 'function_call_output', call_id: call.call_id || call.id, output: clip(rest) });
-          if (image_b64) pushShot(hist.items, shots, image_b64);
+          if (image_b64) pushShot(hist.items, shots, image_b64, shotsDir(), emit);
           return image_b64 ? { ...rest, image_b64 } : rest;
         },
       });
@@ -1129,6 +1219,7 @@ export async function runTurn({
       } else if (text) {
         hist.items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
       }
+      await endShot('turn_end');
       finishTurn(hist, thread);
       emit({ type: 'done', text, computer_id: id, thread_id: thread.id });
       return { text, computerId: id, threadId: thread.id, finished };
@@ -1270,6 +1361,8 @@ export async function runTurn({
         const eplan = extraPlan(call.name, args, id);
         const result = await toolOrStop(
           () => (eplan ? runExtra(eplan) : runCaseTool(call.name, args, id)), act);
+        toolsRan = true;
+        if (call.name === 'computer_sleep' && result && result.ok) slept = true;
         const { image_b64, ...rest } = result;
         emit({ type: 'tool_result', id: call.id, call_id: callId, act: rest.act || act, ok: !!rest.ok, name: call.name, args_used: call.name === 'computer_exec' ? String(args.command || '').slice(0, 200) : undefined, detail: clip(rest.error || rest.result || rest, 400) });
         hist.items.push({ type: 'function_call_output', call_id: callId, output: clip(snapshotElide(call.name, rest, snaps)) });
@@ -1287,7 +1380,7 @@ export async function runTurn({
         snaps.last = '';
         emit({ type: 'think', text: '[context compacted server-side — carrying the summary forward]' });
       }
-      for (const b64 of images) pushShot(hist.items, shots, b64);
+      for (const b64 of images) pushShot(hist.items, shots, b64, shotsDir(), emit);
     }
     if (!finished && !stopped()) {
       // Out of steps or out of budget mid-task. Say so — silence here reads as
@@ -1298,6 +1391,7 @@ export async function runTurn({
           : `**Out of steps.** Stopped after ${ROUNDS} tool calls with the task unfinished. Say **continue** and I pick up from here.`);
       emit({ type: 'text', text });
     }
+    await endShot('turn_end');
     // Reasoning items are only valid inside the turn that produced them; carrying
     // them forward bloats the payload and some models reject stale ones.
     finishTurn(hist, thread);
@@ -1314,6 +1408,7 @@ export async function runTurn({
     // real. histCloseOpenCalls synthesizes outputs for any dangling
     // function_call so later requests don't 400. (Rate limits are retried
     // inside the round; landing here means retries ran dry or a real fault.)
+    await endShot('error');
     finishTurn(hist, thread);
     if (!stopped()) emit({ type: 'error', error: (err?.message || 'provider error') + ' — say continue, I pick up where I stopped.' });
     return { text: '', computerId: id, threadId: thread.id, finished: false, error: err?.message || 'provider error' };
@@ -1371,6 +1466,34 @@ export async function schedulesRoute(req, res, url) {
   }
 }
 
+const NO_BRAIN = 'no brain configured: set CASE_DRIVE_API_KEY in .env, save a key in Drive, or sign in with ChatGPT';
+
+function newestBrain(home) {
+  const rows = [];
+  const saved = newestProviderKey(home);
+  if (saved) rows.push({ auth: { provider: saved.provider, key: saved.key }, at: saved.saved_at });
+  const gpt = codexStatus(home);
+  if (gpt.configured) rows.push({ auth: { provider: 'chatgpt', key: 'chatgpt' }, at: gpt.updated_at || '' });
+  rows.sort((a, b) => b.at.localeCompare(a.at));
+  return rows[0]?.auth || null;
+}
+
+export function brainAuth(env = process.env, home = HOME) {
+  const envAuth = envDriveAuth(env);
+  const auth = envAuth.key ? envAuth : newestBrain(home);
+  if (!auth) return null;
+  const model = auth.provider === 'chatgpt' ? 'codex' : resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
+  return { auth, model };
+}
+
+export function chatBrainAuth(headers, body, home = HOME) {
+  if (body.provider === 'chatgpt') return { provider: 'chatgpt', key: codexStatus(home).configured ? 'chatgpt' : '' };
+  const tab = chatAuth(headers);
+  if (tab.key) return tab;
+  const provider = /^claude/.test(String(body.model || '')) ? 'anthropic' : 'openai';
+  try { return { provider, key: getProviderKey(provider, home) }; } catch { return { provider, key: '' }; }
+}
+
 async function brainRoute(req, res) {
   const buf = await readBody(req, res);
   if (!buf) return;
@@ -1381,11 +1504,9 @@ async function brainRoute(req, res) {
   const prompt = String(body.prompt || '').slice(0, 32000);
   const name = String(body.name || '').trim();
   if (!computerId || !prompt) return json(res, 400, { error: 'computer_id and prompt required' });
-  const auth = envDriveAuth();
-  if (!auth.key) {
-    return json(res, 503, { error: 'set CASE_DRIVE_API_KEY (and CASE_DRIVE_PROVIDER) in .env' });
-  }
-  const model = resolveChatModel(process.env.CASE_DRIVE_MODEL || '', auth.provider);
+  const brain = brainAuth();
+  if (!brain) return json(res, 503, { error: NO_BRAIN });
+  const { auth, model } = brain;
   const thread = newThread('sched · ' + (name || prompt), computerId);
   CHAT_BUSY.add(thread.id);   // fresh thread, never busy; the set is what steer routes read
   let text = '';
@@ -1427,10 +1548,10 @@ async function chat(req, res) {
   let body;
   try { body = JSON.parse(buf.toString('utf8') || '{}'); }
   catch { return send(res, 400, 'bad json'); }
-  const auth = chatAuth(req.headers);
+  const auth = chatBrainAuth(req.headers, body);
   if (!auth.key) return send(res, 401, 'missing key');
-  const model = resolveChatModel(body.model, auth.provider);
-  const effort = ['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : 'medium';
+  const model = auth.provider === 'chatgpt' ? 'codex' : resolveChatModel(body.model, auth.provider);
+  const effort = resolveChatEffort(model, body.effort);
   const inputText = String(body.input || '').slice(0, 32000);
   const fileIds = Array.isArray(body.files) ? body.files.slice(0, ATTACH_MAX_N) : [];
   const attaches = [];
@@ -1444,9 +1565,10 @@ async function chat(req, res) {
   const thread = THREADS.get(String(body.thread_id || '')) || newThread(inputText || attaches[0].name, picked);
   if (CHAT_BUSY.has(thread.id)) return json(res, 409, { error: 'this thread is still running a turn' });
   CHAT_BUSY.add(thread.id);
-  const stopped = () => res.destroyed;
+  const gone = new AbortController();
+  const stopped = () => gone.signal.aborted;
   const emit = (obj) => {
-    if (stopped() || res.destroyed) return;
+    if (res.destroyed) return;
     if (!res.headersSent) {
       res.writeHead(200, {
         'content-type': 'application/x-ndjson; charset=utf-8',
@@ -1455,22 +1577,103 @@ async function chat(req, res) {
     }
     try { res.write(JSON.stringify(obj) + '\n'); } catch { /* client gone */ }
   };
-  let clientGone;
-  const goneP = new Promise((r) => { clientGone = r; });
-  const gone = new AbortController();
-  res.on('close', () => { clientGone(); gone.abort(); });
+  CHAT_STOP.set(thread.id, gone);
   try {
     await runTurn({
       thread, inputText, attaches, auth, computerId: picked, model, effort,
-      emit, stopped, signal: gone.signal, disconnect: goneP,
+      emit, stopped, signal: gone.signal,
+      disconnect: new Promise((r) => gone.signal.addEventListener('abort', r, { once: true })),
     });
   } catch (err) {
     if (!res.headersSent) return json(res, err.status || 500, { error: err.message || 'internal' });
     if (!stopped()) emit({ type: 'error', error: err.message || 'internal' });
   } finally {
+    CHAT_STOP.delete(thread.id);
     CHAT_BUSY.delete(thread.id);
     if (res.headersSent && !res.writableEnded) res.end();
   }
+}
+
+async function chatStop(req, res) {
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return send(res, 400, 'bad json'); }
+  const tid = String(body.thread_id || '');
+  if (tid && !THREADS.has(tid)) return json(res, 404, { error: 'no such thread' });
+  const running = [...CHAT_STOP.keys()];
+  const ac = CHAT_STOP.get(tid || (running.length === 1 ? running[0] : ''));
+  if (ac) ac.abort();
+  return json(res, 200, { ok: true, stopped: !!ac });
+}
+
+function readJson(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+function atomicWrite(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+export function vapidKeys(home = HOME) {
+  const file = path.join(home, 'drive', 'vapid.json');
+  const cur = readJson(file, null);
+  if (cur && cur.publicKey && cur.privateKey) return cur;
+  const keys = webpush.generateVAPIDKeys();
+  atomicWrite(file, keys);
+  return keys;
+}
+export function pushSubs(home = HOME) {
+  const list = readJson(path.join(home, 'drive', 'push.json'), []);
+  return Array.isArray(list) ? list : [];
+}
+const PUSH_HOSTS = /(^|\.)(fcm\.googleapis\.com|push\.apple\.com|notify\.windows\.com|push\.services\.mozilla\.com)$/;
+export function isPushService(endpoint) {
+  try {
+    const u = new URL(String(endpoint || ''));
+    return u.protocol === 'https:' && PUSH_HOSTS.test(u.hostname);
+  } catch { return false; }
+}
+export function addPushSub(sub, ua = '', home = HOME) {
+  if (!sub || !isPushService(sub.endpoint) || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return null;
+  const list = pushSubs(home).filter((s) => s.endpoint !== sub.endpoint);
+  list.push({ endpoint: String(sub.endpoint), keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) }, ua: String(ua || '').slice(0, 120), created: Date.now() });
+  const kept = list.slice(-20);
+  atomicWrite(path.join(home, 'drive', 'push.json'), kept);
+  return kept.length;
+}
+export function dropPushSub(endpoint, home = HOME) {
+  const list = pushSubs(home).filter((s) => s.endpoint !== endpoint);
+  atomicWrite(path.join(home, 'drive', 'push.json'), list);
+  return list.length;
+}
+export function pushBody(kind, domain) {
+  const d = String(domain || '');
+  const site = /^[a-z0-9][a-z0-9.-]*$/i.test(d) ? d.toLowerCase() : 'your computer';
+  const what = kind === 'approval' ? 'needs a yes or no'
+    : (kind === 'captcha' || kind === 'device' || kind === 'passkey') ? 'needs you on the screen'
+      : 'needs a code';
+  return `${site} ${what}`;
+}
+export async function pushAll(payload, home = HOME) {
+  const subs = pushSubs(home);
+  if (!subs.length) return 0;
+  const keys = vapidKeys(home);
+  webpush.setVapidDetails(`mailto:push@${process.env.CASE_PUBLIC_HOST || 'localhost'}`, keys.publicKey, keys.privateKey);
+  let sent = 0;
+  for (const s of subs) {
+    try {
+      await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, JSON.stringify(payload), { TTL: 600 });
+      sent++;
+    } catch (err) {
+      if (err && (err.statusCode === 404 || err.statusCode === 410)) dropPushSub(s.endpoint, home);
+      else if (!process.env.CASE_TEST_QUIET) console.warn('push:', err && err.message);
+    }
+  }
+  return sent;
 }
 
 async function pendingHandoffs() {
@@ -1482,10 +1685,107 @@ async function pendingHandoffIds() {
   return (await pendingHandoffs()).map((r) => r.id).filter(Boolean);
 }
 
+function keysPayload() {
+  return { ...keyStatus(HOME), chatgpt: codexStatus(HOME), chatgpt_available: !!codexBin() };
+}
+
+async function keysRoute(req, res, url) {
+  if (req.method === 'GET') return json(res, 200, keysPayload());
+  if (req.method === 'DELETE') {
+    const provider = url.searchParams.get('provider') || '';
+    try {
+      if (provider === 'chatgpt') codexLogout(HOME);
+      else deleteProviderKey(provider, HOME);
+    } catch (err) { return json(res, 400, { error: err.message }); }
+    return json(res, 200, keysPayload());
+  }
+  if (req.method !== 'POST') return json(res, 405, { error: 'method' });
+  const buf = await readBody(req, res);
+  if (!buf) return;
+  let body;
+  try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+  catch { return json(res, 400, { error: 'bad json' }); }
+  try { putProviderKey(String(body.provider || ''), String(body.key || ''), HOME, { label: String(body.label || '') }); }
+  catch (err) { return json(res, 400, { error: err.message }); }
+  return json(res, 200, keysPayload());
+}
+
+const IDLE_LOGIN = { phase: 'idle', code: '', url: DEVICE_URL, error: '' };
+let chatgptLoginState = IDLE_LOGIN;
+let chatgptLoginBusy = false;
+let chatgptLoginAbort = null;
+const chatgptLoginWaiters = new Set();
+
+const chatgptLoginSnapshot = () => ({ ...chatgptLoginState, busy: chatgptLoginBusy, configured: !!codexStatus(HOME).configured });
+
+function emitLogin(obj) {
+  if (obj.type === 'code') chatgptLoginState = { phase: 'pending', code: obj.code, url: obj.url, error: '' };
+  else if (obj.type === 'error') chatgptLoginState = { ...chatgptLoginState, phase: 'error', error: String(obj.error || 'login failed') };
+  else if (obj.type === 'done') chatgptLoginState = { ...chatgptLoginState, phase: 'done', error: '' };
+  const line = JSON.stringify(obj) + '\n';
+  for (const w of [...chatgptLoginWaiters]) {
+    try { w.write(line); } catch { chatgptLoginWaiters.delete(w); }
+  }
+}
+
+function attachLoginStream(res) {
+  res.writeHead(200, {
+    'content-type': 'application/x-ndjson; charset=utf-8',
+    'cache-control': 'no-store', 'x-accel-buffering': 'no',
+  });
+  const { phase, code, url, error } = chatgptLoginState;
+  if (code) res.write(JSON.stringify({ type: 'code', url, code }) + '\n');
+  if (phase === 'done' || phase === 'error') {
+    res.write(JSON.stringify(phase === 'done' ? { type: 'done' } : { type: 'error', error }) + '\n');
+    return res.end();
+  }
+  chatgptLoginWaiters.add(res);
+  res.on('close', () => chatgptLoginWaiters.delete(res));
+}
+
+function endLoginWaiters() {
+  for (const w of chatgptLoginWaiters) w.end();
+  chatgptLoginWaiters.clear();
+}
+
+async function chatgptLogin(req, res) {
+  if (req.method === 'GET') return json(res, 200, chatgptLoginSnapshot());
+  if (req.method === 'DELETE') {
+    chatgptLoginAbort?.abort();
+    chatgptLoginAbort = null;
+    chatgptLoginBusy = false;
+    chatgptLoginState = IDLE_LOGIN;
+    endLoginWaiters();
+    return json(res, 200, chatgptLoginSnapshot());
+  }
+  if (req.method !== 'POST') return json(res, 405, { error: 'method' });
+  if (chatgptLoginBusy) return attachLoginStream(res);
+  chatgptLoginBusy = true;
+  chatgptLoginState = { ...IDLE_LOGIN, phase: 'pending' };
+  const ac = new AbortController();
+  chatgptLoginAbort = ac;
+  attachLoginStream(res);
+  try {
+    await startDeviceLogin(HOME, { signal: ac.signal, onCode: ({ url, code }) => emitLogin({ type: 'code', url, code }) });
+    if (!ac.signal.aborted) emitLogin({ type: 'done' });
+  } catch (err) {
+    if (!ac.signal.aborted) emitLogin({ type: 'error', error: err.message || 'login failed' });
+  } finally {
+    if (chatgptLoginAbort === ac) {
+      chatgptLoginAbort = null;
+      chatgptLoginBusy = false;
+      if (chatgptLoginState.phase === 'pending') chatgptLoginState = IDLE_LOGIN;
+      endLoginWaiters();
+    }
+  }
+}
+
 async function answerHandoff(hid, value) {
-  return api('POST', `/handoffs/${encodeURIComponent(hid)}/answer`, {
+  const r = await api('POST', `/handoffs/${encodeURIComponent(hid)}/answer`, {
     json: { value }, timeoutMs: 120000,
   });
+  if (r.status >= 400) return r.json?.error?.message || r.json?.error || `handoff ${r.status}`;
+  return r.json?.status === 'pending' ? 'the screen still shows the challenge. Finish it, then try again' : null;
 }
 
 const ANSWERED = { approve: 'Approved.', deny: 'Denied.' };
@@ -1506,10 +1806,8 @@ async function phoneAct(decision, { auth, model, say }) {
   if (decision.type === 'error') return say('error', decision.error);
   if (decision.type === 'handoff') {
     try {
-      const r = await answerHandoff(decision.hid, decision.value);
-      if (r.status >= 400) {
-        return say('error', r.json?.error?.message || `handoff ${r.status}`);
-      }
+      const err = await answerHandoff(decision.hid, decision.value);
+      if (err) return say('error', err);
       return say('answered', ANSWERED[decision.value] || 'Submitted.');
     } catch (err) {
       return say('error', err.message || 'handoff failed');
@@ -1521,6 +1819,7 @@ async function phoneAct(decision, { auth, model, say }) {
     STEER.set(thread.id, q);
     return say('queued', 'Queued on the running turn');
   }
+  if (!auth) return say('error', NO_BRAIN);
   let computerId;
   try { computerId = await cid(); }
   catch (err) { return say('error', err.message || 'cased unreachable'); }
@@ -1556,12 +1855,12 @@ const NTFY_TITLES = {
   working: '[Case] working', done: '[Case] done',
 };
 
-async function onPhoneMessage(cfg, auth, model, text) {
+async function onPhoneMessage(cfg, env, text) {
   const { pendingIds, busy } = await phoneContext();
   const say = (kind, message) => ntfy.publish(cfg, { title: NTFY_TITLES[kind], message }).catch((err) => {
     console.warn('ntfy publish:', err.message || err);
   });
-  return phoneAct(routePhone({ text, pendingIds, busy }), { auth, model, say });
+  return phoneAct(routePhone({ text, pendingIds, busy }), { ...brainAuth(env), say });
 }
 
 export function startPhoneNtfy(env = process.env) {
@@ -1571,13 +1870,11 @@ export function startPhoneNtfy(env = process.env) {
     console.warn('CASE_NTFY_CHAT=1 but CASE_NTFY_TOPIC unset');
     return false;
   }
-  const auth = envDriveAuth(env);
-  if (!auth.key) {
-    console.warn('CASE_NTFY_CHAT=1 but CASE_DRIVE_API_KEY unset');
+  if (!brainAuth(env)) {
+    console.warn(`CASE_NTFY_CHAT=1 but ${NO_BRAIN}`);
     return false;
   }
-  const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
-  ntfy.listen(cfg, (text) => onPhoneMessage(cfg, auth, model, text));
+  ntfy.listen(cfg, (text) => onPhoneMessage(cfg, env, text));
   console.log(`drive ntfy chat on ${cfg.url}`);
   return true;
 }
@@ -1600,7 +1897,7 @@ export function sseEvents(chunk, carry = '') {
 
 /** Follow cased's event stream and call onHandoff for each new handoff.
  *  Reconnects forever; cased restarts must not silence the phone. */
-function watchHandoffs(onHandoff, onConnect) {
+function watchHandoffs(onHandoff, onConnect, onSchedule) {
   let timer = null;
   const retry = () => { clearTimeout(timer); timer = setTimeout(connect, 5000); };
   const connect = () => {
@@ -1617,6 +1914,7 @@ function watchHandoffs(onHandoff, onConnect) {
         carry = parsed.rest;
         for (const { event, data } of parsed.events) {
           if (event === 'handoff_created') onHandoff(data);
+          if (event === 'schedule.run' && onSchedule) onSchedule(data);
         }
       });
       rs.on('error', () => { /* close follows */ });
@@ -1632,6 +1930,33 @@ const CODE_PROMPTS = new Map();
 // Handoff ids already sent to the phone, so a reconnect replay does not repeat
 // them. Ids answered from the Drive UI linger; handoffs are rare, it is bytes.
 const PUSHED = new Set();
+const WEB_PUSHED = new Set();
+
+async function pushWebHandoff(h) {
+  if (!h || !h.id || WEB_PUSHED.has(h.id)) return;
+  WEB_PUSHED.add(h.id);
+  if (WEB_PUSHED.size > 500) WEB_PUSHED.clear();
+  await pushAll({ title: 'Case', body: pushBody(h.kind, h.domain), url: `/?app=1&handoff=${encodeURIComponent(h.id)}`, tag: `h:${h.id}` });
+}
+
+async function pushScheduleRun(s) {
+  if (!s || !s.schedule) return;
+  let name = 'A scheduled task';
+  try {
+    const r = await api('GET', `/computers/${encodeURIComponent(s.computer_id || await cid())}/schedules`, { timeoutMs: 8000 });
+    const rows = r.json?.schedules || r.json || [];
+    const row = Array.isArray(rows) ? rows.find((x) => x.id === s.schedule) : null;
+    if (row && row.name) name = String(row.name).slice(0, 40);
+  } catch {}
+  await pushAll({ title: 'Case', body: `${name} finished: ${String(s.status || 'done').slice(0, 20)}`, url: '/?app=1', tag: `s:${s.run || s.schedule}` });
+}
+
+function startWebPush() {
+  watchHandoffs((h) => pushWebHandoff(h).catch(() => {}), () => {
+    pendingHandoffs().then((rows) => rows.forEach((h) => pushWebHandoff(h).catch(() => {})))
+      .catch((err) => console.warn('web push handoffs:', err.message || err));
+  }, (s) => pushScheduleRun(s).catch(() => {}));
+}
 
 async function pushHandoff(cfg, h) {
   if (PUSHED.has(h.id)) return;
@@ -1671,7 +1996,7 @@ function telegramSay(cfg) {
   };
 }
 
-async function onTelegramUpdate(cfg, auth, model, update) {
+async function onTelegramUpdate(cfg, env, update) {
   const parsed = telegram.parseUpdate(update);
   if (!parsed) return;
   const { chatId, msg } = parsed;
@@ -1699,7 +2024,7 @@ async function onTelegramUpdate(cfg, auth, model, update) {
     for (const [mid, hid] of CODE_PROMPTS) if (hid === decision.hid) CODE_PROMPTS.delete(mid);
     PUSHED.delete(decision.hid);
   }
-  return phoneAct(decision, { auth, model, say });
+  return phoneAct(decision, { ...brainAuth(env), say });
 }
 
 export function startPhoneTelegram(env = process.env) {
@@ -1708,15 +2033,13 @@ export function startPhoneTelegram(env = process.env) {
     if (env.CASE_TELEGRAM_TOKEN) console.warn('CASE_TELEGRAM_TOKEN is not a BotFather token');
     return false;
   }
-  const auth = envDriveAuth(env);
-  if (!auth.key) {
-    console.warn('CASE_TELEGRAM_TOKEN set but CASE_DRIVE_API_KEY unset');
+  if (!brainAuth(env)) {
+    console.warn(`CASE_TELEGRAM_TOKEN set but ${NO_BRAIN}`);
     return false;
   }
-  const model = resolveChatModel(env.CASE_DRIVE_MODEL || '', auth.provider);
   // A webhook left on the bot makes getUpdates 409 forever; clearing it is idempotent.
   telegram.tgApi(cfg.token, 'deleteWebhook', {}).catch(() => { /* poll reports 409 if this failed */ })
-    .then(() => telegram.poll(cfg, (u) => onTelegramUpdate(cfg, auth, model, u)));
+    .then(() => telegram.poll(cfg, (u) => onTelegramUpdate(cfg, env, u)));
   if (cfg.chatId) {
     watchHandoffs((h) => pushHandoff(cfg, h), () => {
       pendingHandoffs().then((rows) => rows.forEach((h) => pushHandoff(cfg, h)))
@@ -1791,10 +2114,22 @@ export function pageFile(p) {
   return PAGE_FILES[p] || '';
 }
 
+const APP_FILES = /^\/(manifest\.json|sw\.js|icons\/[a-z0-9-]+\.png)$/;
+export function appFile(p) { return APP_FILES.test(String(p || '')) ? p : ''; }
+
 export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://x');
   const p = url.pathname;
   if (!browserOk(req)) return json(res, 403, { error: 'unexpected Host or Origin' });
+  if (req.method === 'GET' && appFile(p)) {
+    const absApp = path.join(DIR, p);
+    if (!fs.existsSync(absApp)) return send(res, 404, 'not found');
+    res.writeHead(200, {
+      'content-type': mimeFor(absApp),
+      'cache-control': p === '/sw.js' ? 'no-cache' : 'public, max-age=3600',
+    });
+    return res.end(fs.readFileSync(absApp));
+  }
   if (TOKEN && req.method === 'GET' && url.searchParams.has('token') && tokenMatches(req)) {
     res.writeHead(302, {
       Location: p === '/' ? '/' : p,
@@ -1818,10 +2153,10 @@ export const server = http.createServer(async (req, res) => {
         running: Number(h.json?.running) || 0,
         computers: Number(h.json?.computers) || 0,
         docker: !!h.json?.docker,
-        brain_key: !!envDriveAuth().key,
+        brain_key: !!brainAuth(),
       });
     } catch {
-      return json(res, 200, { ok: true, live: CASE.hostname, up: false, max_running: 0, running: 0, brain_key: !!envDriveAuth().key });
+      return json(res, 200, { ok: true, live: CASE.hostname, up: false, max_running: 0, running: 0, brain_key: !!brainAuth() });
     }
   }
   try {
@@ -1831,10 +2166,59 @@ export const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/fs') return await fsList(res, url);
     if (p === '/api/creds') return await creds(req, res, url);
     if (p === '/api/threads') return threadsRoute(req, res, url);
+    if (p === '/api/push') {
+      if (req.method === 'GET') return json(res, 200, { publicKey: vapidKeys().publicKey });
+      if (req.method === 'POST') {
+        const pb = await readBody(req, res, 8192);
+        if (!pb) return;
+        let sub;
+        try { sub = JSON.parse(pb.toString('utf8') || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
+        return addPushSub(sub, req.headers['user-agent']) == null ? json(res, 400, { error: 'bad subscription' }) : json(res, 200, { ok: true });
+      }
+      if (req.method === 'DELETE') {
+        dropPushSub(String(url.searchParams.get('endpoint') || ''));
+        return json(res, 200, { ok: true });
+      }
+      return json(res, 405, { error: 'method' });
+    }
+    if (req.method === 'GET' && p === '/api/shot') {
+      const h = String(url.searchParams.get('h') || '');
+      if (!/^[0-9a-f]{40}$/.test(h)) return send(res, 400, 'bad hash');
+      const absShot = path.join(shotsDir(), h + '.png');
+      if (!fs.existsSync(absShot)) return send(res, 404, 'not found');
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'private, max-age=31536000, immutable' });
+      return res.end(fs.readFileSync(absShot));
+    }
+    if (req.method === 'GET' && p === '/api/handoffs') {
+      const r = await api('GET', '/handoffs?status=pending', { timeoutMs: 8000 });
+      return json(res, r.status >= 400 ? r.status : 200, r.json || { handoffs: [] });
+    }
+    if (req.method === 'POST' && p === '/api/handoffs/answer') {
+      const hb = await readBody(req, res, 8192);
+      if (!hb) return;
+      let b = {};
+      try { b = JSON.parse(hb.toString('utf8') || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
+      const hid = String(b.id || '');
+      if (!hid) return json(res, 400, { error: 'id required' });
+      const err = await answerHandoff(hid, String(b.value == null ? '' : b.value));
+      return json(res, err ? 502 : 200, err ? { error: err } : { ok: true });
+    }
+    if (req.method === 'GET' && p === '/api/handoffs/shot') {
+      const hid = String(url.searchParams.get('id') || '');
+      if (!hid) return send(res, 400, 'id required');
+      const r = await api('GET', `/handoffs/${encodeURIComponent(hid)}`, { timeoutMs: 8000 });
+      const b64 = r.json && r.json.screenshot_png_b64;
+      if (!b64) return send(res, 404, 'no shot');
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+      return res.end(Buffer.from(String(b64), 'base64'));
+    }
     if (req.method === 'GET' && p === '/api/file') return await fsFile(res, url);
     if (req.method === 'POST' && p === '/api/brain') return await brainRoute(req, res);
+    if (p === '/api/keys') return await keysRoute(req, res, url);
+    if (p === '/api/chatgpt/login') return await chatgptLogin(req, res);
     if (p === '/api/schedules' || p === '/api/schedules/run') return await schedulesRoute(req, res, url);
     if (req.method === 'POST' && p === '/api/chat') return await chat(req, res);
+    if (req.method === 'POST' && p === '/api/chat/stop') return await chatStop(req, res);
     if (req.method === 'POST' && p === '/api/chat/steer') return await steer(req, res);
     if (req.method === 'POST' && p === '/api/attach') return await attach(req, res);
     if (req.method === 'POST' && p === '/api/teach-tick') {
@@ -1872,5 +2256,6 @@ if (isMain) {
     process.stdout.write(`drive http://${BIND}:${PORT}/  deploy http://${BIND}:${PORT}/deploy  (cased ${CASE.hostname}:${CASE.port})\n`);
     startPhoneNtfy();
     startPhoneTelegram();
+    startWebPush();
   });
 }

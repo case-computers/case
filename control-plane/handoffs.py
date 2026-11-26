@@ -17,6 +17,7 @@ Status: pending → validating → completed|failed; TTL → expired. All status
 writes go through store.transition_handoff (CAS + revision bump). Legacy
 `answered` is treated as completed on read for one release.
 """
+import asyncio
 import hmac
 import json
 import os
@@ -57,6 +58,10 @@ VERIFY_DONE_VALUES = frozenset({"done", "approve", "i'm done", "im done", "i am 
 # The only answers an approval takes. ntfy and Telegram buttons and the Assist page
 # send these; anything else (a typed "no", an empty body) is refused, not approved.
 APPROVAL_VALUES = ("approve", "deny")
+
+WAIT_TIMEOUT_MAX_S = 270
+WAIT_TIMEOUT_DEFAULT_S = 30
+
 
 def continuation_for(kind, continuation=None):
     if continuation:
@@ -226,6 +231,64 @@ def get_handoff(hid):
     if not row:
         raise ApiError(404, "not_found", f"no handoff {hid!r}")
     return handoff_json(row)
+
+
+async def wait_handoff(hid, after_status=None, timeout_s=WAIT_TIMEOUT_DEFAULT_S):
+    """Long-poll until the handoff leaves `after_status`, ends, or times out.
+
+    Subscribe before the first read: a human answering between the read and the
+    wait would otherwise be missed and the caller would sleep through its own
+    answer. Mirrors auth_attempts.wait_attempt; status is the cursor here because
+    a handoff has one meaningful transition, not a revision ladder.
+    """
+    from events import subscribe, unsubscribe
+
+    try:
+        timeout_s = int(timeout_s)
+    except (TypeError, ValueError):
+        timeout_s = WAIT_TIMEOUT_DEFAULT_S
+    timeout_s = max(1, min(timeout_s, WAIT_TIMEOUT_MAX_S))
+
+    def _payload(row, wait_status):
+        d = handoff_json(row, with_screenshot=False)
+        d["wait_status"] = wait_status
+        return d
+
+    def _changed(status):
+        if status in HANDOFF_TERMINAL:
+            return True
+        if status == "validating":
+            return False
+        return bool(after_status and status != after_status)
+
+    q = subscribe()
+    try:
+        row = get_handoff(hid)
+        if _changed(_public_status(row["status"])):
+            return _payload(row, "changed")
+
+        deadline = asyncio.get_running_loop().time() + float(timeout_s)
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                row = get_handoff(hid)
+                changed = _changed(_public_status(row["status"]))
+                return _payload(row, "changed" if changed else "timeout")
+            try:
+                type_, data = await asyncio.wait_for(q.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("handoff_id") != hid and data.get("id") != hid:
+                continue
+            if type_ in ("handoff_answered", "handoff_created", "login_completed"):
+                row = get_handoff(hid)
+                if not _changed(_public_status(row["status"])):
+                    continue
+                return _payload(row, "changed")
+    finally:
+        unsubscribe(q)
 
 
 def _require_open_handoff(hid):
@@ -405,19 +468,19 @@ def _page_still_challenged(computer_row):
 def verify_handoff_page(hid):
     """verify_page continuation: confirm the challenge is gone, then approve-resume if login held."""
     row = _require_open_handoff(hid)
-    if _continuation_of(row) != "verify_page":
+    if _continuation_of(row) != "verify_page" and row["kind"] != "otp":
         raise ApiError(400, "bad_request",
                        f"handoff continuation is {_continuation_of(row)!r}, not verify_page")
     _claim_validating(row, "done")
     row = store.get_handoff(hid)
     computer = get_computer(row["computer_id"])
-    if _page_still_challenged(computer):
+    aid = _attempt_id_of(row)
+    ctx = LOGIN_CTX.get(hid)
+    if (aid or ctx) and _page_still_challenged(computer):
         # Never claim login success; leave LOGIN_CTX for retry.
         store.transition_handoff(hid, "pending", answer=None)
         return store.get_handoff(hid)
 
-    aid = _attempt_id_of(row)
-    ctx = LOGIN_CTX.get(hid)
     if aid:
         # Best-effort clear of deskd login hold; page verify already passed, so a
         # soft-fail resume (e.g. next OTP wall) must not block the child completing.
@@ -440,6 +503,8 @@ def answer_handoff(hid, value):
     row = _require_open_handoff(hid)
     cont = _continuation_of(row)
     if cont == "submit_value":
+        if row["kind"] == "otp" and str(value).strip().lower() in VERIFY_DONE_VALUES:
+            return verify_handoff_page(hid)
         return submit_handoff_value(hid, value)
     if cont == "verify_page":
         if str(value).strip().lower() in VERIFY_DONE_VALUES:

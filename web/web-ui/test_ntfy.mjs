@@ -10,6 +10,7 @@ import {
   ntfyConfig, parseSseData, publish, tagsOf,
 } from './ntfy.mjs';
 
+process.env.CASE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'case-home-'));
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
 const { startPhoneNtfy } = await import('./serve.mjs');
 

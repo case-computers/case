@@ -168,8 +168,9 @@ def computer_exec(computer_id: str, command: str, timeout_s: int = 30) -> dict:
 
 
 @tool
-def computer_eval(computer_id: str, expression: str, timeout_s: int = 20) -> dict:
-    """Evaluate a JavaScript expression in the computer's active browser tab
+def computer_eval(computer_id: str, expression: str, timeout_s: int = 20,
+                  target_id: str | None = None) -> dict:
+    """Evaluate a JavaScript expression in a browser tab
     (CDP Runtime.evaluate, JSON result, promises awaited). Prefer this over
     screenshots for reading page content — exact DOM data, tiny token cost.
     Return plain values (strings, numbers, arrays, plain objects) directly — they are
@@ -179,32 +180,42 @@ def computer_eval(computer_id: str, expression: str, timeout_s: int = 20) -> dic
     — returning the elements themselves fails.
     To read a page as prose, "document.body.innerText" beats hand-written selectors.
     Use computer_navigate to change page — do not drive location.assign from here.
+    Optional target_id from computer_tabs list names the tab; omit = active tab.
     Returns {ok, value, truncated} or {ok:false, error}."""
+    body = {"expression": expression, "timeout_s": timeout_s}
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/eval", params={"wake": "true"},
-                json={"expression": expression, "timeout_s": timeout_s},
+                json=body,
                 timeout=timeout_s + 20).json()
 
 
 @tool
-def computer_navigate(computer_id: str, url: str, timeout_s: int = 30) -> dict:
+def computer_navigate(computer_id: str, url: str, timeout_s: int = 30,
+                      target_id: str | None = None) -> dict:
     """Point the computer's browser at url and block until the page has loaded.
     One call — do not follow it with readyState polling. Returns
-    {ok, url, title, text, snapshot} (url is the final one, after redirects) or
-    {ok:false, error}. `text` is the first 2000 chars of the page; only eval
-    innerText when you need more. `snapshot` is the arrived page's numbered
-    elements — DO NOT call computer_snapshot after this, you have it.
+    {ok, url, title, text, elements, elements_count, wall} (url is the final one,
+    after redirects) or {ok:false, error}. `text` is the first 2000 chars of the
+    page; only eval innerText when you need more. `elements` is the arrived page's
+    numbered controls — DO NOT call computer_snapshot after this, you have it.
+    `wall` is true when the page is a login or challenge wall.
     The body is ready when this returns; `title` is best-effort and can be "" on
     pages that set it a beat late — that is not a signal to wait or retry.
-    Same-page '#anchor' jumps are not navigations; use computer_eval for those."""
+    Same-page '#anchor' jumps are not navigations; use computer_eval for those.
+    Optional target_id from computer_tabs list names the tab; omit = active tab."""
+    body = {"url": url, "timeout_s": timeout_s}
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/navigate", params={"wake": "true"},
-                json={"url": url, "timeout_s": timeout_s},
+                json=body,
                 timeout=timeout_s + 20).json()
 
 
 @tool
-def computer_snapshot(computer_id: str) -> dict:
-    """Numbered list of the visible interactive elements on the computer's active
-    browser tab — the cheap way to see what's clickable. PREFER THIS OVER
+def computer_snapshot(computer_id: str, target_id: str | None = None) -> dict:
+    """Numbered list of the visible interactive elements on a browser tab —
+    the cheap way to see what's clickable. PREFER THIS OVER
     computer_screenshot for anything inside a web page: ~10x fewer tokens and no
     coordinate guessing. Returns {ok, url, title, count, elements} where each
     element is a line like '[12] button "Save changes"' or
@@ -216,15 +227,21 @@ def computer_snapshot(computer_id: str) -> dict:
     computer_click_element and computer_fill(submit) all return the fresh snapshot
     in their own result. Call this for the FIRST look at a page, or after something
     changed it that Case did not do (a timer, a redirect you waited out).
+    Refs belong to the tab you snapshotted — pass the same target_id to click/fill.
+    Optional target_id from computer_tabs list names the tab; omit = active tab.
     Screenshots are still right for canvas/custom-drawn UI, visual layout questions,
     and anything outside the browser window."""
-    return call("GET", f"/computers/{computer_id}/page", params={"wake": "true"}).json()
+    params = {"wake": "true"}
+    if target_id:
+        params["target_id"] = target_id
+    return call("GET", f"/computers/{computer_id}/page", params=params).json()
 
 
 @tool
 def computer_click_element(computer_id: str, ref: int, name: str | None = None,
-                           text: str | None = None, screenshot: bool = False) -> dict:
-    """Click element [ref] from the last computer_snapshot. Pass name (the quoted
+                           text: str | None = None, screenshot: bool = False,
+                           target_id: str | None = None) -> dict:
+    """Click element [ref] from the last computer_snapshot on the same tab. Pass name (the quoted
     text from the snapshot line) so a changed page is caught: on mismatch this
     REFUSES to click and returns {ok:false, stale:true, snapshot} unless exactly
     one current element matches name — then it heals and clicks ({healed:true}).
@@ -234,6 +251,7 @@ def computer_click_element(computer_id: str, ref: int, name: str | None = None,
     switched_tab. Returns the first 2000 chars of page text after the click.
     text, when given, is typed into the element after the click
     (click focuses it) — for one field that beats computer_fill.
+    Optional target_id brings that tab to the front then clicks.
     On success the result also carries `snapshot`: the page as it stands after the
     click, settled. DO NOT call computer_snapshot after this."""
     body = {"ref": ref}
@@ -243,48 +261,62 @@ def computer_click_element(computer_id: str, ref: int, name: str | None = None,
         body["text"] = text
     if screenshot:
         body["screenshot"] = True
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/click",
                 params={"wake": "true"}, json=body, timeout=60).json()
 
 
 @tool
-def computer_hover(computer_id: str, ref: int, name: str | None = None) -> dict:
+def computer_hover(computer_id: str, ref: int, name: str | None = None,
+                   target_id: str | None = None) -> dict:
     """Hover the OS pointer over snapshot [ref] without clicking — opens menus
-    that only appear on hover. Pass name so a changed page is refused."""
+    that only appear on hover. Pass name so a changed page is refused.
+    Optional target_id brings that tab to the front first."""
     body = {"ref": ref}
     if name is not None:
         body["name"] = name
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/hover",
                 params={"wake": "true"}, json=body, timeout=40).json()
 
 
 @tool
-def computer_upload(computer_id: str, ref: int, path: str, name: str | None = None) -> dict:
+def computer_upload(computer_id: str, ref: int, path: str, name: str | None = None,
+                    target_id: str | None = None) -> dict:
     """Assign a file already on the computer (path under /home/agent/, ≤5MB) to
     snapshot [ref], which must be input[type=file]. Never send file bytes through
-    this tool — write the file with computer_file_put or computer_exec first."""
+    this tool — write the file with computer_file_put or computer_exec first.
+    Optional target_id from computer_tabs list names the tab."""
     body = {"ref": ref, "path": path}
     if name is not None:
         body["name"] = name
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/upload",
                 params={"wake": "true"}, json=body, timeout=90).json()
 
 
 @tool
-def computer_fill(computer_id: str, fields: list, submit: bool = False) -> dict:
+def computer_fill(computer_id: str, fields: list, submit: bool = False,
+                  target_id: str | None = None) -> dict:
     """Fill a whole form in ONE call: fields=[{"ref": 13, "value": "jane@x.com"}, …]
-    with refs from computer_snapshot. Uses native value setters + input/change
+    with refs from computer_snapshot on the same tab. Uses native value setters + input/change
     events, so React/Vue forms see the change. Handles text inputs, textareas,
     selects (by value or option text), checkboxes/radios (value true/false) and
     contenteditable. submit=true submits the first field's form at the end.
     NEVER for passwords or OTP codes — password fields are refused inside the page;
     vaulted computer_login owns credentials. Per-field results come back in
     {fields:[{ref, ok, ...}]}; a failed ref usually means the page changed —
-    re-snapshot. With submit=true the result also carries `snapshot` of the page the
-    submit landed on, so don't call computer_snapshot after one."""
+    re-snapshot. Optional target_id from computer_tabs list names the tab. With
+    submit=true the result also carries `snapshot` of the page the submit landed
+    on, so don't call computer_snapshot after one."""
     body = {"fields": fields}
     if submit:
         body["submit"] = True
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/fill",
                 params={"wake": "true"}, json=body, timeout=60).json()
 
@@ -292,16 +324,19 @@ def computer_fill(computer_id: str, fields: list, submit: bool = False) -> dict:
 @tool
 def computer_wait_for(computer_id: str, selector: str | None = None, text: str | None = None,
                       gone: bool = False, network_idle: bool = False,
-                      timeout_s: int = 30) -> dict:
+                      timeout_s: int = 30, target_id: str | None = None) -> dict:
     """Block in this one call until the page is ready — instead of polling with
     repeated computer_eval calls (each of those costs a whole turn; this costs one).
     Give exactly one of: selector (CSS, waits until it exists), text (waits until
     document.body.innerText contains it), or network_idle=true (waits until no new
     resources load for ~1s — right after actions that trigger XHR refreshes).
     gone=true inverts selector/text (wait for a spinner to disappear).
-    Returns {ok, waited_ms}; {ok:false} on timeout means the condition never held —
-    snapshot or screenshot to see what the page actually did. computer_navigate
-    already waits for document-complete; use this for what loads after."""
+    Returns {ok, waited_ms}; {ok:false} on timeout means the condition never held,
+    and the result then carries the page url, title and first 300 chars: read
+    those rather than retrying with another guessed text. Prefer selector over
+    text; network_idle never settles on long-polling apps (Gmail, Slack).
+    computer_navigate already waits for document-complete; use this for what loads after.
+    Optional target_id from computer_tabs list names the tab."""
     body = {"timeout_s": timeout_s}
     if selector:
         body["selector"] = selector
@@ -311,6 +346,8 @@ def computer_wait_for(computer_id: str, selector: str | None = None, text: str |
         body["gone"] = True
     if network_idle:
         body["network_idle"] = True
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/wait",
                 params={"wake": "true"}, json=body, timeout=timeout_s + 30).json()
 
@@ -318,11 +355,18 @@ def computer_wait_for(computer_id: str, selector: str | None = None, text: str |
 @tool
 def computer_tabs(computer_id: str, action: str = "list", target_id: str | None = None,
                   url: str | None = None) -> dict:
-    """Browser tab management: action=list|activate|new|close. list returns
-    [{id, title, url, active}] — the ACTIVE tab is the one computer_eval,
-    computer_snapshot and computer_capture talk to. If a click opened a new tab
+    """Browser tab management: action=list|activate|new|close|close_others. list
+    returns [{id, title, url, active}]; close_others closes every tab but the
+    active one in one call, including tabs the user keeps open, so only when
+    the user asks to clear tabs; close your own tabs by id. Mutations return
+    {count, active}, not the list.
+    Pass id as target_id on computer_eval,
+    computer_snapshot, computer_fill, computer_navigate, computer_wait_for,
+    computer_capture_start, computer_click_element instead of activate when you
+    can. click/hover bring that tab to the front; the rest talk to it without
+    switching when deskd supports it. If a click opened a new tab
     (target=_blank does this constantly) and the page 'stopped responding' to eval,
-    list tabs and activate the right one. activate/close need target_id from list;
+    list tabs and pass that id (or activate). activate/close need target_id from list;
     new needs an http(s) url. After activate/new, snapshot to see where you are."""
     body = {"action": action}
     if target_id:
@@ -334,20 +378,25 @@ def computer_tabs(computer_id: str, action: str = "list", target_id: str | None 
 
 
 @tool
-def computer_capture_start(computer_id: str, url_pattern: str) -> dict:
-    """Start capturing network response bodies in the computer's active browser tab
+def computer_capture_start(computer_id: str, url_pattern: str,
+                           target_id: str | None = None) -> dict:
+    """Start capturing network response bodies in a browser tab
     whose URL matches url_pattern (a regex). A browser-level wiretap: survives page/SPA
     navigations and catches both fetch and XMLHttpRequest — use this instead of
     injecting JS fetch/XHR hooks (those get wiped on nav and miss XHR). Replaces
     any running capture. Then navigate/act, and drain with computer_capture_read.
-    e.g. url_pattern="SearchTimeline|/graphql". Returns {ok, pattern}."""
+    e.g. url_pattern="SearchTimeline|/graphql". Optional target_id from computer_tabs
+    list names the tab; omit = active tab. Returns {ok, pattern}."""
+    body = {"pattern": url_pattern}
+    if target_id:
+        body["target_id"] = target_id
     return call("POST", f"/computers/{computer_id}/capture", params={"wake": "true"},
-                json={"pattern": url_pattern}).json()
+                json=body).json()
 
 
 @tool
 def computer_capture_read(computer_id: str, stop: bool = False) -> dict:
-    """Drain captured network responses from the active browser tab. Returns
+    """Drain captured network responses from the bound browser tab. Returns
     {items, running, error}; each item is {ts,url,status,body,truncated} on success
     or {ts,url,status,error} if the body couldn't be fetched. The buffer clears on
     each read (call repeatedly to stream; ring of 100). Bodies truncated to 256 KB.
@@ -601,6 +650,36 @@ def handoff_request(computer_id: str, prompt: str, kind: str = "approval") -> di
     Never use this to "check" a computer_login journey — use auth_attempt_wait."""
     return call("POST", f"/computers/{computer_id}/handoffs",
                 json={"kind": kind, "prompt": prompt}).json()
+
+
+@tool
+def handoff_wait(handoff_id: str, max_wait_s: int = 240) -> dict:
+    """Block until a human answers a handoff_request, it ends, or the wait times out.
+
+    Call IMMEDIATELY after handoff_request, the same way auth_attempt_wait follows
+    computer_login. Chains REST long-polls under Caddy's 300s read timeout.
+    Returns the handoff with wait_status='changed' (status is now completed / failed /
+    expired) or 'timeout' (still pending — call again with the same handoff_id).
+    A human who is away may take minutes: a timeout is not a refusal, and the handoff
+    stays open until it expires. Do not re-raise a second handoff_request for the same
+    thing, and do not poll by re-navigating the page."""
+    try:
+        budget = max(1, min(int(max_wait_s), 240))
+    except (TypeError, ValueError):
+        budget = 240
+    deadline = time.time() + budget
+    out = {}
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return dict(out or call("GET", f"/handoffs/{handoff_id}").json(),
+                        wait_status="timeout")
+        leg = max(1, min(int(remaining), 270))
+        out = call("GET", f"/handoffs/{handoff_id}/wait",
+                   params={"timeout_s": leg, "after_status": "pending"},
+                   timeout=leg + 10).json()
+        if out.get("wait_status") != "timeout":
+            return out
 
 
 @tool

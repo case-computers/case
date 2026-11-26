@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 process.env.CASE_TOKEN = 'tok';
+process.env.CASE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'case-home-'));
 delete process.env.CASE_DRIVE_API_KEY;
 delete process.env.CASE_DRIVE_PROVIDER;
 process.env.CASE_THREADS = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-threads-')), 'threads.json');
@@ -34,6 +35,13 @@ const post = (p, body, headers = {}) => fetch(base + p, {
 });
 
 assert.equal((await get('/api/threads')).status, 401);
+assert.equal((await get('/manifest.json')).status, 200, 'the install manifest loads before any login');
+assert.equal((await get('/sw.js')).headers.get('cache-control'), 'no-cache');
+assert.equal((await get('/icons/icon-192.png')).headers.get('content-type'), 'image/png');
+assert.equal((await get('/icons/missing.png')).status, 404);
+assert.equal((await get('/api/push')).status, 401, 'push routes keep the token gate');
+assert.equal((await get('/api/push', { authorization: 'Bearer tok' })).status, 200);
+assert.equal((await post('/api/push', { endpoint: 'https://push.example/x', keys: { p256dh: 'p', auth: 'a' } }, { authorization: 'Bearer tok', origin: 'https://evil.example' })).status, 403);
 assert.equal((await get('/api/threads', { authorization: 'Bearer tok' })).status, 200);
 assert.equal((await fetch(base + '/api/threads', { method: 'POST', headers: { authorization: 'Bearer tok', origin: 'https://evil.example' } })).status, 403);
 assert.equal((await get('/?token=tok')).status, 302);
@@ -84,6 +92,90 @@ try {
   serve.driveLoop.turn = origTurn;
   delete process.env.CASE_DRIVE_API_KEY;
   delete process.env.CASE_DRIVE_PROVIDER;
+}
+
+{
+  const auth = { authorization: 'Bearer tok' };
+  const evil = { ...auth, origin: 'https://evil.example' };
+  const del = (p, headers = {}) => fetch(base + p, { method: 'DELETE', headers });
+  const secret = 'sk-saved-from-the-ui-1234';
+  const sentinel = 'AUTH-JSON-SENTINEL';
+  const fakeBin = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-codexbin-')), 'codex');
+  fs.writeFileSync(fakeBin, `#!/bin/bash
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then [ -f "$CODEX_HOME/auth.json" ]; exit $?; fi
+if [ "$1" = "login" ] && [ "$2" = "--device-auth" ]; then
+  echo "https://auth.openai.com/codex/device"
+  echo "ABCD-EFGHI"
+  echo 'AUTH-JSON-SENTINEL' > "$CODEX_HOME/auth.json"
+  exit 0
+fi
+exit 0
+`, { mode: 0o755 });
+  process.env.CASE_CODEX_BIN = fakeBin;
+
+  assert.equal((await get('/api/keys')).status, 401);
+  assert.equal((await post('/api/keys', { provider: 'openai', key: secret })).status, 401);
+  assert.equal((await del('/api/keys?provider=openai')).status, 401);
+  assert.equal((await post('/api/chatgpt/login', {})).status, 401);
+  assert.equal((await post('/api/keys', { provider: 'openai', key: secret }, evil)).status, 403);
+  assert.equal((await del('/api/keys?provider=openai', evil)).status, 403);
+  assert.equal((await post('/api/chatgpt/login', {}, evil)).status, 403);
+  assert.equal((await post('/api/keys', { provider: 'nope', key: secret }, auth)).status, 400);
+  assert.equal((await post('/api/keys', { provider: 'openai', key: 'short' }, auth)).status, 400);
+  assert.equal((await post('/api/keys', 'not json', auth)).status, 400);
+  assert.equal((await post('/api/chat', { input: 'hi', model: 'gpt-6-luna' }, auth)).status, 401);
+  assert.equal((await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, auth)).status, 503);
+
+  const saved = await post('/api/keys', { provider: 'openai', key: secret, label: 'work' }, auth);
+  const savedText = await saved.text();
+  assert.equal(saved.status, 200);
+  assert.ok(!savedText.includes(secret));
+  const row = JSON.parse(savedText).openai;
+  assert.deepEqual({ ...row, saved_at: !!row.saved_at }, { configured: true, provider: 'openai', label: 'work', last4: '1234', saved_at: true });
+  assert.equal(JSON.parse(savedText).anthropic.configured, false);
+  const listed = await (await get('/api/keys', auth)).text();
+  assert.ok(!listed.includes(secret));
+  assert.equal(JSON.parse(listed).openai.last4, '1234');
+  assert.equal((await (await get('/api/health', auth)).json()).brain_key, true);
+  assert.ok(!fs.readFileSync(path.join(process.env.CASE_HOME, 'provider-secrets.json'), 'utf8').includes(secret));
+
+  const origTurn = serve.driveLoop.turn;
+  let seen;
+  serve.driveLoop.turn = async (args) => { seen = args; return { text: 'did it', finished: true }; };
+  try {
+    assert.equal((await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, auth)).status, 200);
+    assert.deepEqual(seen.auth, { provider: 'openai', key: secret });
+    process.env.CASE_DRIVE_API_KEY = 'sk-env-key';
+    process.env.CASE_DRIVE_PROVIDER = 'anthropic';
+    await post('/api/brain', { computer_id: 'c_1', prompt: 'hi' }, auth);
+    assert.deepEqual(seen.auth, { provider: 'anthropic', key: 'sk-env-key' });
+  } finally {
+    serve.driveLoop.turn = origTurn;
+    delete process.env.CASE_DRIVE_API_KEY;
+    delete process.env.CASE_DRIVE_PROVIDER;
+  }
+  assert.notEqual((await post('/api/chat', { input: 'hi', model: 'gpt-6-luna' }, auth)).status, 401, 'chat falls back to the saved key');
+
+  const login = await post('/api/chatgpt/login', {}, auth);
+  assert.equal(login.status, 200);
+  const events = (await login.text()).trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(events, [{ type: 'code', url: 'https://auth.openai.com/codex/device', code: 'ABCD-EFGHI' }, { type: 'done' }]);
+  const codexDir = path.join(process.env.CASE_HOME, 'codex');
+  assert.equal(fs.readFileSync(path.join(codexDir, 'auth.json'), 'utf8').trim(), sentinel);
+  const gpt = await (await get('/api/chatgpt/login', auth)).json();
+  assert.equal(gpt.phase, 'done');
+  assert.equal(gpt.configured, true);
+  const withGpt = await (await get('/api/keys', auth)).text();
+  assert.ok(!withGpt.includes(sentinel));
+  assert.equal(JSON.parse(withGpt).chatgpt.configured, true);
+  assert.equal(JSON.parse(withGpt).chatgpt_available, true);
+  assert.equal(JSON.parse(await (await del('/api/keys?provider=chatgpt', auth)).text()).chatgpt.updated_at, null);
+  assert.equal(fs.existsSync(path.join(codexDir, 'auth.json')), false);
+
+  const gone = JSON.parse(await (await del('/api/keys?provider=openai', auth)).text());
+  assert.equal(gone.openai.configured, false);
+  assert.equal((await post('/api/chat', { input: 'hi', model: 'gpt-6-luna' }, auth)).status, 401);
+  delete process.env.CASE_CODEX_BIN;
 }
 
 // One bad request is that request's problem: a client hanging up mid-body (STOP

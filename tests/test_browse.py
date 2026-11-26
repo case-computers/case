@@ -23,7 +23,7 @@ ELS = [
 def fake_eval(*results):
     calls = []
 
-    def _eval(row, expression, timeout_s=20):
+    def _eval(row, expression, timeout_s=20, target_id=None):
         calls.append(expression)
         r = results[min(len(calls) - 1, len(results) - 1)]
         if isinstance(r, Exception):
@@ -95,6 +95,26 @@ def test_walk_v2_pierces_shadow_iframe_and_filters():
     assert "__contained(tr)" in src
     assert "__boxes.push(tr)" in src
     assert "__contained(r)" not in src
+
+
+def test_walk_yields_only_to_a_usable_descendant():
+    browse.eval_js = fake_eval({"ok": True, "value": {"url": "u", "title": "t",
+                                                      "count": 0, "els": []}})
+    browse.snapshot(ROW)
+    src = browse.eval_js.calls[0]
+    assert "querySelectorAll(__sel)" in src, "must consider every descendant, not just the first"
+    assert "if(__vis(k)&&!__occluded(k))return" in src, "yield only to a usable one"
+
+
+def test_walk_ignores_script_only_focus_and_unnamed_pointer_fragments():
+    browse.eval_js = fake_eval({"ok": True, "value": {"url": "u", "title": "t",
+                                                      "count": 0, "els": []}})
+    browse.snapshot(ROW)
+    src = browse.eval_js.calls[0]
+    assert '[tabindex]:not([tabindex="-1"])' in src
+    assert "if(!name&&!__ownClick(el)&&__inheritedPointer(el))return;" in src
+    assert "getComputedStyle(p).cursor==='pointer'" in src
+    assert src.index("__inheritedPointer(el))return;") < src.index("__seen.add(el);")
 
 
 def test_snapshot_formats_shadow_and_iframe_markers():
@@ -208,6 +228,18 @@ def test_wait_times_out_with_named_condition():
     assert out["ok"] is False and "Loaded" in out["error"], out
 
 
+def test_wait_timeout_reports_page_state():
+    state = {"url": "https://mail.google.com/#search", "title": "Inbox", "text": "x" * 400}
+
+    def _eval(row, expression, timeout_s=20, target_id=None):
+        return {"ok": True, "value": state if "location.href" in expression else False}
+    browse.eval_js = _eval
+    out = browse.wait_for(ROW, text="Search results", timeout_s=1)
+    assert out["ok"] is False and "Search results" in out["error"], out
+    assert out["url"] == state["url"] and out["title"] == "Inbox", out
+    assert out["text"] == "x" * 300, len(out["text"])
+
+
 def test_wait_gone_inverts():
     browse.eval_js = fake_eval({"ok": True, "value": True}, {"ok": True, "value": False})
     out = browse.wait_for(ROW, selector=".spinner", gone=True, timeout_s=5)
@@ -291,6 +323,27 @@ def test_tabs_new_requires_http_url():
     assert False
 
 
+def test_tabs_close_returns_count_not_list():
+    listing = '[{"type":"page","id":"AA11","title":"One","url":"https://a"}]'
+    browse.desk_json = fake_desk({"stdout": "Target is closing"}, {"stdout": listing})
+    out = browse.tabs(ROW, action="close", target_id="BB22")
+    assert out == {"ok": True, "action": "close", "target_id": "BB22",
+                   "count": 1, "active": "AA11"}, out
+
+
+def test_tabs_close_others_closes_every_inactive_tab():
+    listing = ('[{"type":"page","id":"AA11","title":"One","url":"https://a"},'
+               '{"type":"page","id":"BB22","title":"Two","url":"https://b"},'
+               '{"type":"page","id":"CC33","title":"Three","url":"https://c"}]')
+    browse.desk_json = fake_desk({"stdout": listing}, {"stdout": "Target is closing"},
+                                 {"stdout": "Target is closing"},
+                                 {"stdout": '[{"type":"page","id":"AA11","title":"One","url":"https://a"}]'})
+    out = browse.tabs(ROW, action="close_others")
+    assert out["ok"] and out["closed"] == 2 and out["count"] == 1, out
+    closed = [c[2]["command"] for c in browse.desk_json.calls if "/json/close/" in c[2]["command"]]
+    assert len(closed) == 2 and "BB22" in closed[0] and "CC33" in closed[1], closed
+
+
 def test_tabs_cdp_unreachable_is_502():
     browse.desk_json = fake_desk({"stdout": ""})
     try:
@@ -338,7 +391,7 @@ def fake_eval_map(rules):
     and the last one repeats."""
     calls, used = [], {k: 0 for k in rules}
 
-    def _eval(row, expression, timeout_s=20):
+    def _eval(row, expression, timeout_s=20, target_id=None):
         calls.append(expression)
         for needle, results in rules.items():
             if needle in expression:
@@ -535,7 +588,7 @@ def test_locate_fast_path_names_elements_like_the_walk():
     browse.desk_json = fake_desk({"ok": True})
     browse.click_element(ROW, 0, name="x", snapshot_after=False)
     src = browse.eval_js.calls[0]
-    assert "const nm=__name(stored)" in src and "const name=__name(el)" in src
+    assert "const nm=__nameOf(stored,tag)" in src and "const name=__nameOf(el,tag)" in src
     assert src.count("el.alt") == 1, src
 
 
@@ -550,7 +603,7 @@ def test_click_activates_a_new_tab():
         {"stdout": listing0},
         {"ok": True},
         {"stdout": listing1},
-        {"stdout": ""},
+        {"stdout": "Target activated"},
         {"stdout": listing2},
     )
     out = browse.click_element(ROW, 0, name="Docs", snapshot_after=False)
