@@ -7,7 +7,7 @@ restart.
 
 ![Case demo](.github/demo.gif)
 
-**[Managed Case](https://case.computer):** We run the computers for you, including
+**[Managed Case](https://case.computer/computer/):** We run the computers for you, including
 DNS, HTTPS, and managed images.
 
 **Self-hosted:** Run the open source version on your own machine or server.
